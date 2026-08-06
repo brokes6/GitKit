@@ -563,6 +563,32 @@ export async function pull(
   await invoke("git_pull", { path, token: token ?? null, opId, onProgress: channel });
 }
 
+/** A local branch sitting behind its upstream, as seen by an update check. */
+export interface BehindBranch {
+  name: string; upstream: string; behind: number;
+  /** Local-only commits — non-zero means diverged, so no fast-forward can apply it. */
+  ahead: number;
+  current: boolean;
+}
+
+/** What one repo's update check found. */
+export interface UpdateCheck {
+  behind: BehindBranch[];
+  dirty: boolean;
+  currentBranch: string;
+}
+
+/** Fetch remote-tracking refs and report which local branches fell behind. Never
+ *  moves a local branch — {@link syncLocal} is the explicit apply step. */
+export async function checkUpdates(path: string, token?: string): Promise<UpdateCheck> {
+  return await invoke<UpdateCheck>("git_check_updates", { path, token: token ?? null });
+}
+
+/** Fast-forward local branches onto the upstreams a previous check already fetched. */
+export async function syncLocal(path: string): Promise<FetchSummary> {
+  return await invoke<FetchSummary>("git_sync_local", { path });
+}
+
 /** Cancel a running fetch/pull by op id. Safe to call after it has finished. */
 export async function cancelGitOp(opId: string): Promise<void> {
   await invoke("git_cancel", { opId });

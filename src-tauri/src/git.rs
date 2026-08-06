@@ -998,6 +998,122 @@ fn sync_tracking_branches(path: &str) -> FetchSummary {
     sum
 }
 
+/// One local branch that has fallen behind its upstream.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BehindBranch {
+    pub name: String,
+    pub upstream: String,
+    pub behind: u32,
+    /// Local-only commits — non-zero means diverged, which no fast-forward can fix.
+    pub ahead: u32,
+    pub current: bool,
+}
+
+/// What one repo's update check found.
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheck {
+    pub behind: Vec<BehindBranch>,
+    /// Working tree has uncommitted changes — the current branch can't be synced.
+    pub dirty: bool,
+    pub current_branch: String,
+}
+
+/// Check a repo for new upstream commits WITHOUT touching any local branch: the
+/// fetch only moves remote-tracking refs, then every local branch is compared to
+/// its upstream. Applying the result is a separate, explicit step
+/// (`git_sync_local`) so the scheduled check can report first and pull second.
+///
+/// Runs unattended, so it fails fast instead of hanging: a stalled HTTP transfer
+/// aborts, and ssh neither prompts nor waits long on an unreachable host.
+#[tauri::command]
+pub async fn git_check_updates(path: String, token: Option<String>) -> Result<UpdateCheck, String> {
+    run_blocking(move || {
+        let mut cmd = command("git");
+        cmd.arg("-C").arg(&path);
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        cmd.env("PATH", augmented_path());
+        cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=15");
+        if let Some(tok) = token.as_deref().filter(|s| !s.trim().is_empty()) {
+            cmd.env("GITKIT_GL_TOKEN", tok.trim());
+            cmd.arg("-c").arg("credential.helper=");
+            cmd.arg("-c")
+                .arg("credential.helper=!f() { echo username=oauth2; echo \"password=$GITKIT_GL_TOKEN\"; }; f");
+        }
+        let out = cmd
+            .args([
+                "-c",
+                "http.lowSpeedLimit=1000",
+                "-c",
+                "http.lowSpeedTime=20",
+                "fetch",
+                "--all",
+                "--prune",
+                "--quiet",
+            ])
+            .output()
+            .map_err(|e| format!("无法执行 git：{e}"))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(if err.is_empty() { "获取失败".into() } else { err });
+        }
+        Ok(collect_behind(&path))
+    })
+    .await
+}
+
+/// Compare every local branch with its upstream (read-only; assumes a fetch just ran).
+fn collect_behind(path: &str) -> UpdateCheck {
+    let mut res = UpdateCheck {
+        current_branch: run_git(path, &["branch", "--show-current"])
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default(),
+        dirty: run_git(path, &["status", "--porcelain"])
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false),
+        behind: Vec::new(),
+    };
+    let fmt = "%(refname:short)\x1f%(upstream)\x1f%(HEAD)";
+    let Ok(out) = run_git(path, &["for-each-ref", &format!("--format={fmt}"), "refs/heads"]) else {
+        return res;
+    };
+    for line in out.lines() {
+        let f: Vec<&str> = line.split('\x1f').collect();
+        if f.len() < 3 || f[1].is_empty() {
+            continue; // no upstream → nothing to compare against
+        }
+        let (name, upstream, current) = (f[0], f[1], f[2] == "*");
+        let Ok(counts) = run_git(
+            path,
+            &["rev-list", "--left-right", "--count", &format!("{name}...{upstream}")],
+        ) else {
+            continue;
+        };
+        let nums: Vec<u32> = counts.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+        if nums.len() != 2 || nums[1] == 0 {
+            continue; // up to date, or only ahead — that's a push, not an update
+        }
+        res.behind.push(BehindBranch {
+            name: name.to_string(),
+            upstream: upstream.trim_start_matches("refs/remotes/").to_string(),
+            behind: nums[1],
+            ahead: nums[0],
+            current,
+        });
+    }
+    res
+}
+
+/// Fast-forward local branches onto their already-fetched upstreams — the "pull"
+/// half of the check → pull flow. No network: the refs came in with the check.
+/// Same safety rules as the tail of a fetch (diverged branches and a dirty current
+/// branch are reported, never forced).
+#[tauri::command]
+pub async fn git_sync_local(path: String) -> Result<FetchSummary, String> {
+    run_blocking(move || Ok(sync_tracking_branches(&path))).await
+}
+
 /// Check out `branch` and fast-forward it to `hash` (a remote commit), syncing the
 /// local branch up to the remote without merging or losing history.
 #[tauri::command]

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, startTransition, useTransition, createContext, useContext } from "react";
+import { useState, useEffect, useRef, useMemo, startTransition, useTransition, createContext, useContext } from "react";
 import { createPortal } from "react-dom";
 import { Toaster, toast } from "sonner";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -19,9 +19,9 @@ import {
   createPullRequest, branchColor, setVibrancy, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
-  cancelGitOp, isCancelled,
+  cancelGitOp, isCancelled, checkUpdates, syncLocal,
 } from "./git";
-import type { DepInfo, Tag, RepoInfo, CloneProgress, GitProgress } from "./git";
+import type { DepInfo, Tag, RepoInfo, CloneProgress, GitProgress, BehindBranch } from "./git";
 
 // ─── theme ────────────────────────────────────────────────────────────────────
 
@@ -2170,6 +2170,36 @@ function loadPaletteId(): PaletteId {
   return (PALETTE_ORDER as readonly string[]).includes(s ?? "") ? (s as PaletteId) : "warm";
 }
 
+// ── Scheduled daily update check ────────────────────────────────────────────
+// Once a day at `time`, every open project is fetched and the ones with new
+// upstream commits are reported in a dialog that can pull them in one go.
+// `lastRun` is the epoch ms of the last completed run, and a run is due when
+// today's scheduled instant has passed while the last run predates it. That one
+// rule covers everything: a day missed with the app closed fires shortly after
+// the next launch, and moving the time later in the day still fires today.
+interface DailyCheck { enabled: boolean; time: string; lastRun: number }
+const DAILY_CHECK_DEFAULT: DailyCheck = { enabled: false, time: "09:30", lastRun: 0 };
+function loadDailyCheck(): DailyCheck {
+  try {
+    const c = JSON.parse(localStorage.getItem("gitkit.dailyCheck") ?? "{}");
+    return {
+      enabled: !!c.enabled,
+      time: typeof c.time === "string" && /^\d{1,2}:\d{2}$/.test(c.time) ? c.time : DAILY_CHECK_DEFAULT.time,
+      lastRun: typeof c.lastRun === "number" ? c.lastRun : 0,
+    };
+  } catch { return DAILY_CHECK_DEFAULT; }
+}
+function saveDailyCheck(c: DailyCheck): void {
+  try { localStorage.setItem("gitkit.dailyCheck", JSON.stringify(c)); } catch { /* ignore */ }
+}
+/** Today's "HH:MM" as an epoch ms in local time. */
+function scheduledAt(time: string, now: Date = new Date()): number {
+  const [h, m] = time.split(":").map((n) => parseInt(n, 10));
+  const d = new Date(now);
+  d.setHours(Number.isFinite(h) ? h : 9, Number.isFinite(m) ? m : 30, 0, 0);
+  return d.getTime();
+}
+
 // Committer identities (name/email profiles), persisted across launches. Applied
 // to commits later via `git -c user.name=… -c user.email=…` (no global config change).
 interface Identity { id: string; name: string; email: string }
@@ -3617,6 +3647,86 @@ function AppearanceSettings({ vibrancy, setVibrancy, paletteId, setPaletteId, th
   );
 }
 
+// Second-level pane: the scheduled daily check for new upstream commits across
+// every open project. The check itself lives in App (it needs the project list
+// and the token lookup); this pane only edits the schedule and can trigger a run.
+function DailyCheckSettings({ cfg, setCfg, onRunNow, busy, projectCount }: {
+  cfg: DailyCheck; setCfg: (c: DailyCheck) => void;
+  onRunNow: () => void; busy: boolean; projectCount: number;
+}) {
+  const t = useTheme();
+  const inputStyle = { background: t.inputBg, color: t.text, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
+  const nextRun = (() => {
+    if (!cfg.enabled) return null;
+    const today = scheduledAt(cfg.time);
+    const due = Date.now() >= today && cfg.lastRun < today;
+    if (due) return "启动后稍候即会执行(今天的检查还没做)";
+    return today > Date.now() ? `今天 ${cfg.time}` : `明天 ${cfg.time}`;
+  })();
+
+  return (
+    <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-1">
+        <span className="text-sm font-semibold" style={{ color: t.text }}>定时检查更新</span>
+        <span className="text-[11px] leading-relaxed" style={{ color: t.textFaint }}>
+          每天到点后自动获取顶部已打开项目的远程分支,列出有新提交的项目,并可一键统一拉取。
+          检查只更新远程跟踪分支,不会改动本地分支和工作区;拉取时也只做快进,分叉或有未提交更改的分支会跳过并提示。
+        </span>
+      </div>
+
+      {/* Enable toggle */}
+      <button {...press(() => setCfg({ ...cfg, enabled: !cfg.enabled }))}
+        className="flex items-center gap-3 cursor-pointer w-fit">
+        <span className="relative inline-flex flex-shrink-0 transition-colors"
+          style={{ width: 38, height: 22, borderRadius: 11, background: cfg.enabled ? t.accent : t.inputBorder }}>
+          <span className="absolute top-0.5 transition-all"
+            style={{ width: 18, height: 18, borderRadius: 9, background: "#fff",
+              left: cfg.enabled ? 18 : 2, boxShadow: "0 1px 3px rgba(0,0,0,0.3)" }} />
+        </span>
+        <span className="text-xs" style={{ color: t.textSec }}>{cfg.enabled ? "已开启" : "已关闭"}</span>
+      </button>
+
+      {/* Schedule */}
+      <div className="flex items-center gap-3 px-3.5 py-3"
+        style={{ borderRadius: R - 2, border: `0.5px solid ${t.border}`, background: t.inputBg,
+          opacity: cfg.enabled ? 1 : 0.55 }}>
+        <div className="flex items-center justify-center rounded-xl flex-shrink-0"
+          style={{ width: 40, height: 40, background: t.accentBg }}>
+          <RefreshCw size={18} style={{ color: t.accent }} />
+        </div>
+        <div className="flex flex-col min-w-0 flex-1 gap-0.5">
+          <span className="text-xs font-semibold" style={{ color: t.text }}>每天检查时间</span>
+          <span className="text-[11px]" style={{ color: t.textMuted }}>
+            {nextRun ? `下次：${nextRun}` : "开启后按设定时间执行"}
+          </span>
+        </div>
+        <input type="time" value={cfg.time} disabled={!cfg.enabled}
+          onChange={(e) => setCfg({ ...cfg, time: e.target.value || DAILY_CHECK_DEFAULT.time })}
+          className="text-xs px-2.5 py-2 outline-none font-mono flex-shrink-0"
+          style={{ ...inputStyle, cursor: cfg.enabled ? "text" : "not-allowed" }} />
+      </div>
+
+      <div style={{ height: "0.5px", background: t.border }} />
+
+      {/* Manual run + last result */}
+      <div className="flex items-center gap-3">
+        <button {...(busy || projectCount === 0 ? {} : press(onRunNow))} disabled={busy || projectCount === 0}
+          className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium flex-shrink-0"
+          style={{ background: t.accent, color: "#fff", borderRadius: R - 3,
+            cursor: busy || projectCount === 0 ? "not-allowed" : "pointer", opacity: busy || projectCount === 0 ? 0.6 : 1 }}>
+          <RefreshCw size={12} className={busy ? "animate-spin" : undefined} />
+          立即检查
+        </button>
+        <span className="text-[11px] min-w-0" style={{ color: t.textMuted }}>
+          {projectCount === 0 ? "还没有打开任何项目"
+            : cfg.lastRun ? `上次检查：${formatFullDate(new Date(cfg.lastRun).toISOString())} · 共 ${projectCount} 个项目`
+            : `将检查顶部已打开的 ${projectCount} 个项目`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 // Second-level pane: current version + in-app update check (download / verify /
 // install / relaunch), split out from appearance into its own section.
 function UpdateSettings() {
@@ -3905,12 +4015,16 @@ function ProjectPrefsSettings({ identities }: { identities: Identity[] }) {
 }
 
 function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId, vibrancy, setVibrancy,
-  paletteId, setPaletteId, themeMode, setThemeMode, onClose }: {
+  paletteId, setPaletteId, themeMode, setThemeMode, dailyCheck, setDailyCheck,
+  onRunCheckNow, checkBusy, projectCount, onClose }: {
   identities: Identity[]; setIdentities: React.Dispatch<React.SetStateAction<Identity[]>>;
   defaultId: string; setDefaultId: (id: string) => void;
   vibrancy: boolean; setVibrancy: (v: boolean) => void;
   paletteId: PaletteId; setPaletteId: (id: PaletteId) => void;
-  themeMode: ThemeMode; setThemeMode: (m: ThemeMode) => void; onClose: () => void;
+  themeMode: ThemeMode; setThemeMode: (m: ThemeMode) => void;
+  dailyCheck: DailyCheck; setDailyCheck: (c: DailyCheck) => void;
+  onRunCheckNow: () => void; checkBusy: boolean; projectCount: number;
+  onClose: () => void;
 }) {
   const t = useTheme();
   const MENU = [
@@ -3918,6 +4032,7 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId, vi
     { key: "gitlab",     label: "GitLab 集成", Icon: Cloud },
     { key: "github",     label: "GitHub 集成", Icon: Github },
     { key: "projects",   label: "项目配置", Icon: FolderGit2 },
+    { key: "daily",      label: "定时检查", Icon: RefreshCw },
     { key: "appearance", label: "外观", Icon: Sparkles },
     { key: "update",     label: "软件更新", Icon: DownloadCloud },
     { key: "deps",       label: "环境依赖", Icon: TerminalSquare },
@@ -3976,6 +4091,10 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId, vi
             )}
             {section === "github" && <GithubAccountsSettings />}
             {section === "projects" && <ProjectPrefsSettings identities={identities} />}
+            {section === "daily" && (
+              <DailyCheckSettings cfg={dailyCheck} setCfg={setDailyCheck}
+                onRunNow={onRunCheckNow} busy={checkBusy} projectCount={projectCount} />
+            )}
             {section === "appearance" && (
               <AppearanceSettings vibrancy={vibrancy} setVibrancy={setVibrancy}
                 paletteId={paletteId} setPaletteId={setPaletteId}
@@ -3987,6 +4106,121 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId, vi
         </div>
       </div>
     </div>
+  );
+}
+
+// ─── Update check results ───────────────────────────────────────────────────
+// One open project's outcome from a scheduled (or manual) update check, plus how
+// the follow-up pull went for it.
+interface UpdateRow {
+  id: string; name: string; path: string;
+  behind: BehindBranch[]; dirty: boolean; currentBranch: string;
+  error?: string;                                   // the check itself failed
+  state: "idle" | "pulling" | "done" | "failed";
+  detail?: string;                                  // what the pull did / why it didn't
+}
+/** Branches a plain fast-forward can bring in — diverged ones need a real merge. */
+const ffable = (r: UpdateRow) => r.behind.filter((b) => b.ahead === 0 && !(b.current && r.dirty));
+
+function UpdatesDialog({ rows, busy, onPull, onClose }: {
+  rows: UpdateRow[]; busy: boolean;
+  onPull: (ids: string[]) => void; onClose: () => void;
+}) {
+  const t = useTheme();
+  // Only projects with something a fast-forward can actually apply start ticked.
+  const [sel, setSel] = useState<string[]>(() => rows.filter((r) => !r.error && ffable(r).length).map((r) => r.id));
+  const toggle = (id: string) => setSel((p) => p.includes(id) ? p.filter((x) => x !== id) : [...p, id]);
+  // A project already pulled drops out of the selection — re-running it would be a
+  // no-op, and the button going to (0) is what says the batch is finished.
+  const selectable = rows.filter((r) => !r.error && r.state !== "done" && ffable(r).length);
+  const chosen = sel.filter((id) => selectable.some((r) => r.id === id));
+  const finished = rows.some((r) => r.state === "done" || r.state === "failed");
+  const total = rows.reduce((n, r) => n + r.behind.reduce((m, b) => m + b.behind, 0), 0);
+
+  return (
+    <Modal title="远程有新的提交" Icon={DownloadCloud} onClose={busy ? () => {} : onClose} width={560}
+      footer={
+        <>
+          <button {...(busy ? {} : press(onClose))} disabled={busy}
+            className="px-3.5 py-2 text-xs font-medium"
+            style={{ color: t.textMuted, borderRadius: R - 2, border: `0.5px solid ${t.inputBorder}`,
+              cursor: busy ? "not-allowed" : "pointer" }}>
+            {finished ? "完成" : "稍后再说"}
+          </button>
+          <button {...(busy || !chosen.length ? {} : press(() => onPull(chosen)))} disabled={busy || !chosen.length}
+            className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold"
+            style={{ background: busy || !chosen.length ? t.inputBg : t.accent,
+              color: busy || !chosen.length ? t.textFaint : "#fff",
+              borderRadius: R - 2, cursor: busy || !chosen.length ? "not-allowed" : "pointer" }}>
+            {busy ? <RefreshCw size={12} className="animate-spin" /> : <Download size={12} />}
+            {busy ? "拉取中…" : `拉取选中 (${chosen.length})`}
+          </button>
+        </>
+      }>
+      <div className="text-xs" style={{ color: t.textSec }}>
+        {rows.length} 个项目的远程有新提交,共 {total} 个提交。拉取只做快进,不会产生合并提交。
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        {rows.map((r) => {
+          const can = !r.error && ffable(r).length > 0;
+          const checked = can && sel.includes(r.id);
+          const diverged = r.behind.filter((b) => b.ahead > 0);
+          const dirtyBlocked = r.behind.some((b) => b.current && r.dirty && b.ahead === 0);
+          return (
+            <div key={r.id} className="flex items-start gap-2.5 px-3 py-2.5"
+              style={{ borderRadius: R - 2, border: `0.5px solid ${checked ? t.accent + "66" : t.border}`,
+                background: checked ? t.accentBg : "transparent", opacity: can || r.error ? 1 : 0.75 }}>
+              <button {...(can && !busy ? press(() => toggle(r.id)) : {})}
+                className="flex items-center justify-center flex-shrink-0 mt-0.5"
+                style={{ width: 15, height: 15, borderRadius: 4,
+                  border: `1.5px solid ${checked ? t.accent : t.inputBorder}`,
+                  background: checked ? t.accent : "transparent",
+                  cursor: can && !busy ? "pointer" : "not-allowed" }}>
+                {checked && <Check size={10} strokeWidth={3} style={{ color: "#fff" }} />}
+              </button>
+              <div className="flex flex-col min-w-0 flex-1 gap-1">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-xs font-semibold truncate" style={{ color: t.text }}>{r.name}</span>
+                  {r.state === "pulling" && <RefreshCw size={11} className="animate-spin flex-shrink-0" style={{ color: t.accent }} />}
+                  {r.state === "done" && <Check size={12} className="flex-shrink-0" style={{ color: t.green }} />}
+                  {r.state === "failed" && <AlertTriangle size={12} className="flex-shrink-0" style={{ color: t.red }} />}
+                </div>
+                {r.error ? (
+                  <span className="text-[11px]" style={{ color: t.red }}>检查失败：{r.error}</span>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {r.behind.map((b) => (
+                      <span key={b.name} className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono"
+                        style={{ borderRadius: R - 4, background: t.inputBg, color: t.textSec,
+                          border: `0.5px solid ${branchColor(b.name)}44` }}>
+                        <GitBranch size={9} style={{ color: branchColor(b.name) }} />
+                        {b.name}
+                        <span style={{ color: t.accent }}>↓{b.behind}</span>
+                        {b.ahead > 0 && <span style={{ color: t.amber }}>↑{b.ahead}</span>}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {r.detail && (
+                  <span className="text-[11px]" style={{ color: r.state === "failed" ? t.red : t.textMuted }}>{r.detail}</span>
+                )}
+                {!r.detail && diverged.length > 0 && (
+                  <span className="text-[11px]" style={{ color: t.amber }}>
+                    {diverged.map((b) => b.name).join("、")} 与远程有分叉,需手动合并
+                  </span>
+                )}
+                {!r.detail && dirtyBlocked && (
+                  <span className="text-[11px]" style={{ color: t.amber }}>
+                    {r.currentBranch} 有未提交更改,拉取时会跳过
+                  </span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Modal>
   );
 }
 
@@ -4223,20 +4457,54 @@ export default function App() {
   const memberOf = (c: Commit): string[] =>
     c.branchLabels?.length ? c.branchLabels : c.branchLabel ? [c.branchLabel] : [];
 
+  // Every local branch's first-parent backbone: branch → (commit hash → depth
+  // below that branch's tip). Depth is what tells the two sides of a fork apart —
+  // the branch that reaches the shared commit in fewer steps is the one the other
+  // was created from.
+  const backbones = useMemo(() => {
+    const byHash = new Map(commits.map((c) => [c.fullHash, c]));
+    const m = new Map<string, Map<string, number>>();
+    for (const b of branches) {
+      const depth = new Map<string, number>();
+      let h: string | undefined = b.head;
+      let i = 0;
+      while (h && byHash.has(h) && !depth.has(h)) {
+        depth.set(h, i++);
+        h = byHash.get(h)!.parents[0] as string | undefined;
+      }
+      m.set(b.name, depth);
+    }
+    return m;
+  }, [commits, branches]);
+
+  // Trunk-ish leaf names outrank topic branches when deciding which side of a
+  // fork is the base.
+  const TRUNK = new Set(["master", "main", "develop", "dev", "trunk"]);
+
   // Focused (single-branch) view: walk the branch tip's first-parent chain and
-  // keep only the commits UNIQUE to it. We stop at the first commit below the tip
-  // that is ANOTHER branch's tip — that's the fork point, and that branch is the
-  // "base" this branch was created from. Tip-based (not membership) detection is
-  // what makes `feature/x` off master show just its own commits: a child branch
-  // that forked off master doesn't sit on master's own first-parent line, so it
-  // never falsely cuts master short.
+  // keep only the commits UNIQUE to it. We stop at the first commit that also sits
+  // on a MORE SENIOR branch's backbone — that's the fork point, and that branch is
+  // the "base" this branch was created from. Membership (not tip equality) is what
+  // keeps this correct once the base branch moves on: master's tip stops sitting on
+  // our chain the moment it gains a commit, and a tip-only test would then run to
+  // the bottom of history and blame some unrelated stale branch.
+  // Seniority breaks the symmetry — a shared commit alone can't say who forked from
+  // whom. A branch is senior if it is a trunk/published branch while we are not, or
+  // if it reaches the shared commit in fewer steps than we do AND does not outrank
+  // us in the other direction. The rank guard matters: a child branch left sitting
+  // on master's old tip reaches that commit in 0 steps, and without it focusing
+  // master would truncate right there and claim master came from the child.
   const focusInfo = (() => {
     if (!focusActive || !focusBranch) return null;
     const br = branches.find((b) => b.name === focusBranch);
     if (!br?.head) return { list: [] as Commit[], base: null as string | null };
     const map = new Map<string, Commit>(commits.map((cc) => [cc.fullHash, cc]));
-    const tipAt = new Map<string, string>(); // commit hash → branch whose tip it is
-    for (const b of branches) if (b.name !== focusBranch && b.head) tipAt.set(b.head, b.name);
+    const rank = (name: string) => {
+      const leaf = name.slice(name.lastIndexOf("/") + 1).toLowerCase();
+      if (TRUNK.has(leaf)) return 0;
+      return branches.find((b) => b.name === name)?.remote ? 1 : 2;
+    };
+    const myRank = rank(focusBranch);
 
     const list: Commit[] = [];
     const seen = new Set<string>();
@@ -4245,7 +4513,20 @@ export default function App() {
     let i = 0;
     while (h && map.has(h) && !seen.has(h)) {
       seen.add(h);
-      if (i > 0 && tipAt.has(h)) { base = tipAt.get(h) ?? null; break; }
+      const senior: { name: string; r: number; d: number }[] = [];
+      for (const [name, depth] of backbones) {
+        if (name === focusBranch) continue;
+        const d = depth.get(h);
+        if (d === undefined) continue;
+        const r = rank(name);
+        if (r < myRank || (d < i && r <= myRank)) senior.push({ name, r, d });
+      }
+      if (senior.length) {
+        // Trunk first, then the branch sitting closest to the fork point.
+        senior.sort((a, b2) => a.r - b2.r || a.d - b2.d);
+        base = senior[0].name;
+        break;
+      }
       const c: Commit = map.get(h)!;
       list.push(c);
       h = c.parents[0] as string | undefined;
@@ -4763,6 +5044,118 @@ export default function App() {
     setCancelling(true);
     try { await cancelGitOp(id); } catch { /* already finished — the op will settle on its own */ }
   };
+
+  // ── scheduled daily update check ──────────────────────────────────────────
+  // Once a day, fetch every open project and report which ones gained upstream
+  // commits — a morning's worth of remote work in one dialog instead of N manual
+  // fetches. The check is read-only (it only moves remote-tracking refs); the
+  // pull is the explicit button in that dialog.
+  const [dailyCheck, setDailyCheckState] = useState<DailyCheck>(loadDailyCheck);
+  const setDailyCheck = (c: DailyCheck) => { setDailyCheckState(c); saveDailyCheck(c); };
+  const [checkBusy, setCheckBusy] = useState(false);
+  const [pullBusy, setPullBusy] = useState(false);
+  const [updateRows, setUpdateRows] = useState<UpdateRow[] | null>(null);
+  const checkRunning = useRef(false); // guards against overlapping runs
+
+  const runUpdateCheck = async (manual: boolean) => {
+    // A running git op owns the repos right now — retry on the next tick.
+    if (checkRunning.current || (!manual && gitBusyRef.current)) return;
+    const list = projects;
+    if (list.length === 0) { if (manual) toast("还没有打开任何项目"); return; }
+    checkRunning.current = true;
+    setCheckBusy(true);
+    const tid = manual ? toast.loading(`正在检查 ${list.length} 个项目…`) : undefined;
+    const rows: UpdateRow[] = [];
+    // Sequential on purpose: parallel fetches across repos fight over the network
+    // and can trigger several credential prompts at once.
+    for (const p of list) {
+      try {
+        const rems = await loadRemotes(p.path);
+        if (rems.length === 0) continue; // local-only repo — nothing to check
+        const url = rems.find((r) => r.name === "origin")?.url ?? rems[0].url;
+        // Non-interactive token pick: a remembered account wins, else the
+        // host-matched fallback. A background check must never open the picker.
+        const saved = githubCandidates(url).find((a) => a.id === loadProjectAccountId(p.path));
+        const res = await checkUpdates(p.path, saved?.token ?? pickRemoteToken(url));
+        if (res.behind.length) {
+          rows.push({ id: p.id, name: p.name, path: p.path, behind: res.behind,
+            dirty: res.dirty, currentBranch: res.currentBranch, state: "idle" });
+        }
+      } catch (e) {
+        rows.push({ id: p.id, name: p.name, path: p.path, behind: [], dirty: false,
+          currentBranch: "", error: String(e), state: "idle" });
+      }
+    }
+    // Remote-tracking refs moved — drop the caches so the timeline shows them.
+    for (const p of list) realCache.current.delete(p.path);
+    setReloadTick((n) => n + 1);
+    checkRunning.current = false;
+    setCheckBusy(false);
+    // Stamp the run even when nothing was found, so it doesn't repeat all day.
+    setDailyCheckState((prev) => { const next = { ...prev, lastRun: Date.now() }; saveDailyCheck(next); return next; });
+
+    const updated = rows.filter((r) => !r.error);
+    const failed = rows.length - updated.length;
+    if (updated.length === 0) {
+      if (manual) {
+        if (failed) toast.error(`检查完成,${failed} 个项目检查失败`, { id: tid });
+        else toast.success("所有项目都已是最新", { id: tid });
+      } else if (failed) {
+        toast.error(`定时检查：${failed} 个项目检查失败`);
+      }
+      return;
+    }
+    if (tid) toast.dismiss(tid);
+    setUpdateRows(rows);
+  };
+
+  // Apply the check's findings: a local fast-forward per project (the commits are
+  // already fetched), reporting per project rather than failing the whole batch.
+  const doPullUpdates = async (ids: string[]) => {
+    if (!updateRows || pullBusy) return;
+    setPullBusy(true);
+    let touchedActive = false;
+    for (const id of ids) {
+      const row = updateRows.find((r) => r.id === id);
+      if (!row) continue;
+      setUpdateRows((prev) => prev?.map((r) => r.id === id ? { ...r, state: "pulling", detail: undefined } : r) ?? null);
+      try {
+        const s = await syncLocal(row.path);
+        const parts: string[] = [];
+        if (s.synced.length) parts.push(`已快进 ${s.synced.join("、")}`);
+        if (s.dirtySkipped) parts.push("当前分支有未提交更改,已跳过");
+        if (s.diverged.length) parts.push(`${s.diverged.join("、")} 与远程有分叉,需手动合并`);
+        setUpdateRows((prev) => prev?.map((r) => r.id === id
+          ? { ...r, state: s.synced.length ? "done" : "failed", detail: parts.join(" · ") || "没有可快进的分支" }
+          : r) ?? null);
+        realCache.current.delete(row.path);
+        if (row.path === activeProject?.path) touchedActive = true;
+      } catch (e) {
+        setUpdateRows((prev) => prev?.map((r) => r.id === id ? { ...r, state: "failed", detail: String(e) } : r) ?? null);
+      }
+    }
+    setPullBusy(false);
+    if (touchedActive) pendingJumpLatest.current = true;
+    setReloadTick((n) => n + 1);
+  };
+
+  // Fire the check when today's scheduled instant has passed and the last run
+  // predates it. Polled every minute (plus one look shortly after launch), so a
+  // day missed with the app closed catches up on the next start, and moving the
+  // time later in the day still fires today.
+  const runCheckRef = useRef(runUpdateCheck);
+  runCheckRef.current = runUpdateCheck;
+  useEffect(() => {
+    if (!dailyCheck.enabled) return;
+    const tick = () => {
+      const due = scheduledAt(dailyCheck.time);
+      if (Date.now() < due || dailyCheck.lastRun >= due) return;
+      void runCheckRef.current(false);
+    };
+    const first = window.setTimeout(tick, 15000);
+    const timer = window.setInterval(tick, 60000);
+    return () => { window.clearTimeout(first); window.clearInterval(timer); };
+  }, [dailyCheck.enabled, dailyCheck.time, dailyCheck.lastRun]);
 
   // Commit staged files with the chosen identity (falls back to repo/global config).
   const doCommit = async (message: string, files: string[], identity: Identity | null) => {
@@ -5340,6 +5733,19 @@ export default function App() {
                   </div>
                 ) : (
                   <div key={activeProject?.path} className="gk-reveal">
+                    {/* A branch sitting exactly on its base has no commits of its
+                        own — say so instead of rendering an empty timeline. */}
+                    {focusActive && displayCommits.length === 0 && (
+                      <div className="flex flex-col items-center justify-center gap-1.5 px-6 py-16 text-center">
+                        <GitBranch size={18} style={{ color: theme.textFaint }} />
+                        <span className="text-xs font-medium" style={{ color: theme.textSec }}>该分支还没有独立提交</span>
+                        {focusInfo?.base && (
+                          <span className="text-[11px]" style={{ color: theme.textMuted }}>
+                            与 {focusInfo.base} 完全一致
+                          </span>
+                        )}
+                      </div>
+                    )}
                     {displayCommits.map((commit, i) => (
                       <CommitRow key={commit.fullHash} commit={commit}
                         graphInfo={displayGraph[i]}
@@ -5477,7 +5883,15 @@ export default function App() {
             vibrancy={vibrancy} setVibrancy={setVibrancyState}
             paletteId={paletteId} setPaletteId={setPaletteId}
             themeMode={themeMode} setThemeMode={setThemeMode}
+            dailyCheck={dailyCheck} setDailyCheck={setDailyCheck}
+            onRunCheckNow={() => void runUpdateCheck(true)}
+            checkBusy={checkBusy} projectCount={projects.length}
             onClose={() => setSettingsOpen(false)} />
+        )}
+
+        {updateRows && (
+          <UpdatesDialog rows={updateRows} busy={pullBusy}
+            onPull={doPullUpdates} onClose={() => setUpdateRows(null)} />
         )}
 
         {createBranchOpen && (
