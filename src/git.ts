@@ -63,17 +63,17 @@ interface RFileStat {
 // capsule, the graph lane line, and the sidebar dot (all resolve through
 // branchColor). Chosen for high hue separation so branches are told apart at a
 // glance and a lane can be traced by colour; each hue reads the same as a 2px
-// line, a thin outline, and a dot on both the dark and cream backgrounds.
+// line, a thin outline, and a dot on both dark and light backgrounds.
 // Kept in sync with LANE_COLORS in App.tsx.
 const PALETTE = [
-  "#3E86D6", // blue
-  "#D6912E", // amber
-  "#3DA063", // green
-  "#D14E43", // red
-  "#9464C9", // purple
-  "#2FA098", // teal
-  "#D46036", // orange
-  "#CB5F8F", // pink
+  "#5E78C7", // blue
+  "#B78338", // amber
+  "#4F8A6B", // green
+  "#B95D58", // red
+  "#7D70AE", // purple
+  "#4E8989", // teal
+  "#B66C4C", // orange
+  "#A56380", // pink
 ];
 
 function authorColor(email: string): string {

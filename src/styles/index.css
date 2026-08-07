@@ -9,8 +9,41 @@ html, body {
     system-ui, "Helvetica Neue", sans-serif;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  font-feature-settings: "kern", "liga", "calt";
 }
 #root { height: 100vh; }
+
+button, input, textarea, select, [role="tab"], [role="button"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[role="tab"]:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid var(--gk-accent, #4567f2) !important;
+  outline-offset: 2px;
+}
+
+.gk-search-field {
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+
+.gk-search-field:focus-within {
+  border-color: color-mix(in srgb, var(--gk-accent, #4567f2) 68%, transparent) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--gk-accent, #4567f2) 10%, transparent);
+}
+
+.gk-search-input:focus-visible {
+  outline: none !important;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, currentColor 18%, transparent) transparent;
+}
 
 /* Commit-detail content fade (on open + on switching commits) */
 @keyframes gk-detail-in {
@@ -50,3 +83,12 @@ html, body {
   to   { opacity: 1; filter: blur(0); }
 }
 .gk-reveal { animation: gk-reveal 0.26s cubic-bezier(0.32, 0.72, 0, 1); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

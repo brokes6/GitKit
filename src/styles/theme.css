@@ -2,13 +2,13 @@
 
 :root {
   --font-size: 15px;
-  --background: #F4F2EC;
-  --foreground: #262523;
+  --background: #F2F3F5;
+  --foreground: #1B1C1E;
   --card: #111115;
   --card-foreground: #e2e2e8;
   --popover: #1c1c24;
   --popover-foreground: #e2e2e8;
-  --primary: #C15F3C;
+  --primary: #4567F2;
   --primary-foreground: #ffffff;
   --secondary: #1c1c24;
   --secondary-foreground: #e2e2e8;
@@ -24,7 +24,7 @@
   --switch-background: #2a2a35;
   --font-weight-medium: 500;
   --font-weight-normal: 400;
-  --ring: rgba(107, 107, 255, 0.5);
+  --ring: rgba(69, 103, 242, 0.42);
   --chart-1: #6b6bff;
   --chart-2: #34d399;
   --chart-3: #f59e0b;

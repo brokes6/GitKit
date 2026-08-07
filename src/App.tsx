@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useMemo, startTransition, useTransition, createContext, useContext } from "react";
+import { useState, useEffect, useRef, useMemo, useDeferredValue, startTransition, useTransition, createContext, useContext } from "react";
 import { createPortal } from "react-dom";
 import { Toaster, toast } from "sonner";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import {
   GitBranch, GitMerge, GitPullRequest, Upload, Download, RefreshCw,
@@ -9,7 +9,7 @@ import {
   Moon, Sun, Monitor, Plus, Minus, X, FolderOpen, ArrowRight,
   Pin, EyeOff, Eye, Folder, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
   Settings, UserPlus, Trash2, Star, Users, Github, Laptop, Sparkles, RotateCcw, TerminalSquare,
-  Tag as TagIcon, Square, DownloadCloud, Pencil, FolderGit2,
+  Tag as TagIcon, Square, DownloadCloud, Pencil, FolderGit2, Search,
 } from "lucide-react";
 import {
   pickRepoFolder, openRepo, loadBranches, loadRemotes, loadHistory,
@@ -350,13 +350,13 @@ const ROSE = buildPalette("rose", "玫瑰",
 // 石墨 — graphite / minimalist neutral
 const GRAPHITE = buildPalette("graphite", "石墨",
   { bg: "#1B1C1E", bgPanel: "#151618", windowBg: "#0D0E0F",
-    sidebar: "#171819", diff: "#111213", dialog: "#232426",
-    text: "#E6E7E9", textSec: "#A9ABAF", textMuted: "#7C7E83", textFaint: "#54565A",
-    accent: "#8590A8", accentFg: "#B4BCCE", accent2: "#7FA8A2", accent2Fg: "#A9CCC7", accent3: "#C6A874", accent3Fg: "#DEC79E" },
-  { bg: "#F2F3F5", bgPanel: "#FBFBFC", windowBg: "#B4B6BA",
-    sidebar: "#E9EAEC", diff: "#F6F7F8", dialog: "#FFFFFF",
-    text: "#1B1C1E", textSec: "#4A4C50", textMuted: "#70737A", textFaint: "#A1A3A8",
-    accent: "#5C6885", accentFg: "#434D66", accent2: "#4E7A74", accent2Fg: "#3A5C57", accent3: "#9A7B3E", accent3Fg: "#755D2E" });
+    sidebar: "#18191B", diff: "#111213", dialog: "#232426",
+    text: "#ECEEF2", textSec: "#B8BCC4", textMuted: "#8D919A", textFaint: "#666A72",
+    accent: "#4563D3", accentFg: "#AFC0FF", accent2: "#4563D3", accent2Fg: "#AFC0FF", accent3: "#4563D3", accent3Fg: "#AFC0FF" },
+  { bg: "#F4F5F7", bgPanel: "#FCFCFD", windowBg: "#B4B6BA",
+    sidebar: "#EFF1F4", diff: "#F7F8FA", dialog: "#FFFFFF",
+    text: "#181A1F", textSec: "#444851", textMuted: "#6B707A", textFaint: "#9297A1",
+    accent: "#4567F2", accentFg: "#2F50D5", accent2: "#4567F2", accent2Fg: "#2F50D5", accent3: "#4567F2", accent3Fg: "#2F50D5" });
 
 // Theme families: each supplies a light + dark variant. `themeMode`
 // (dark/light/system) still decides which variant renders; the family only
@@ -402,7 +402,7 @@ const GRAPH_W_MIN = 44;     // sparse views: message column hugs the few lanes (
 const GRAPH_W_MAX = 100;    // busy views: cap here — lanes compress instead of pushing text right
 const laneXAt = (lane: number, step: number) => GRAPH_LEFT + lane * step;
 // Fallback lane colours — mirror git.ts PALETTE (keep in sync).
-const LANE_COLORS = ["#3E86D6", "#D6912E", "#3DA063", "#D14E43", "#9464C9", "#2FA098", "#D46036", "#CB5F8F"];
+const LANE_COLORS = ["#5E78C7", "#B78338", "#4F8A6B", "#B95D58", "#7D70AE", "#4E8989", "#B66C4C", "#A56380"];
 const R = 10; // unified border-radius base
 const getLC = (lane: number) => LANE_COLORS[lane % LANE_COLORS.length];
 
@@ -560,8 +560,8 @@ function GraphRowSVG({ info, height = ROW_H, width = GRAPH_W_MAX, step = LANE_ST
 function glassStyle(t: ThemeColors, extra: React.CSSProperties = {}): React.CSSProperties {
   return {
     background: t.glass,
-    backdropFilter: "blur(24px) saturate(180%)",
-    WebkitBackdropFilter: "blur(24px) saturate(180%)",
+    backdropFilter: "blur(18px) saturate(135%)",
+    WebkitBackdropFilter: "blur(18px) saturate(135%)",
     borderBottom: `0.5px solid ${t.glassBorder}`,
     ...extra,
   };
@@ -591,15 +591,15 @@ function WindowControls() {
   const cls = "flex items-center justify-center flex-shrink-0 cursor-pointer transition-colors duration-100";
   return (
     <div className="flex items-stretch self-stretch flex-shrink-0" style={{ marginRight: -16, marginLeft: 6 }}>
-      <button title="最小化" onClick={() => { void win.minimize(); }} className={cls}
+      <button title="最小化" aria-label="最小化窗口" onClick={() => { void win.minimize(); }} className={cls}
         style={{ width: 44, color: t.textMuted }} {...hover(t.inputBg, t.text)}>
         <Minus size={15} />
       </button>
-      <button title="最大化 / 还原" onClick={() => { void win.toggleMaximize(); }} className={cls}
+      <button title="最大化 / 还原" aria-label="最大化或还原窗口" onClick={() => { void win.toggleMaximize(); }} className={cls}
         style={{ width: 44, color: t.textMuted }} {...hover(t.inputBg, t.text)}>
         <Square size={11} />
       </button>
-      <button title="关闭" onClick={() => { void win.close(); }} className={cls}
+      <button title="关闭" aria-label="关闭窗口" onClick={() => { void win.close(); }} className={cls}
         style={{ width: 44, color: t.textMuted }} {...hover("#e81123", "#fff")}>
         <X size={16} />
       </button>
@@ -607,106 +607,37 @@ function WindowControls() {
   );
 }
 
-function TitleBar({ projects, activeId, branch, themeMode, onThemeCycle, onSelectProject, onOpenNew, onCloneNew, onOpenSettings }: {
-  projects: Project[]; activeId: string; branch: string;
-  themeMode: ThemeMode; onThemeCycle: () => void;
-  onSelectProject: (id: string) => void; onOpenNew: () => void; onCloneNew: () => void; onOpenSettings: () => void;
+function TitleBar({ projects, activeId, themeMode, onThemeCycle, onSelectProject, onCloseProject, onOpenNew, onCloneNew, onOpenSettings }: {
+  projects: Project[]; activeId: string; themeMode: ThemeMode;
+  onThemeCycle: () => void; onSelectProject: (id: string) => void;
+  onCloseProject: (id: string) => void; onOpenNew: () => void; onCloneNew: () => void; onOpenSettings: () => void;
 }) {
   const t = useTheme();
   const { Icon, label } = THEME_META[themeMode];
-  const [menuOpen, setMenuOpen] = useState(false);
-  const active = projects.find((p) => p.id === activeId) ?? projects[0];
+  const iconButton = "flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer transition-colors duration-150";
   return (
-    <div data-tauri-drag-region className="relative h-11 flex items-center pr-4 flex-shrink-0 select-none"
-      style={{ ...glassStyle(t), paddingLeft: IS_WINDOWS ? 14 : 92, zIndex: menuOpen ? 50 : "auto" }}>
-      <div data-tauri-drag-region className="flex items-center gap-2 text-sm flex-1 min-w-0">
-        {/* Project name → switcher */}
-        <button onClick={() => setMenuOpen((v) => !v)}
-          className="flex items-center gap-1.5 px-2 py-1 cursor-pointer transition-all duration-150"
-          style={{ borderRadius: R - 2, background: menuOpen ? t.inputBg : "transparent" }}
-          onMouseEnter={(e) => { if (!menuOpen) e.currentTarget.style.background = t.inputBg; }}
-          onMouseLeave={(e) => { if (!menuOpen) e.currentTarget.style.background = "transparent"; }}>
-          {active && <span className="w-2 h-2 rounded-full flex-shrink-0"
-            style={{ background: active.color, boxShadow: `0 0 6px ${active.color}88` }} />}
-          <span className="font-semibold" style={{ color: t.text }}>{active?.name}</span>
-          <svg width="9" height="5" viewBox="0 0 9 5" fill="none" style={{ opacity: 0.55, color: t.textMuted }}>
-            <path d="M1 1L4.5 4L8 1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-          </svg>
+    <div data-tauri-drag-region className="relative h-12 flex items-stretch flex-shrink-0 select-none"
+      style={{ ...glassStyle(t), paddingLeft: IS_WINDOWS ? 8 : 92, zIndex: 50 }}>
+      <ProjectTabBar projects={projects} activeId={activeId} embedded
+        onSelect={onSelectProject} onClose={onCloseProject} onAdd={onOpenNew} onClone={onCloneNew} />
+      <div className="flex items-center gap-0.5 px-2 flex-shrink-0"
+        style={{ borderLeft: `0.5px solid ${t.glassBorder}` }}>
+        <button onClick={onThemeCycle} className={iconButton}
+          title={`主题：${label}`} aria-label={`切换主题，当前${label}`}
+          style={{ color: t.textMuted, borderRadius: R - 3 }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = t.inputBg; e.currentTarget.style.color = t.text; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textMuted; }}>
+          <Icon size={14} aria-hidden="true" />
         </button>
-        <span data-tauri-drag-region style={{ color: t.textFaint }}>/</span>
-        <div data-tauri-drag-region className="flex items-center gap-1.5 px-2.5 py-1.5 transition-all duration-150"
-          style={{ color: t.textMuted, borderRadius: R - 2 }}>
-          <GitBranch size={12} />
-          <span className="text-xs font-medium">{branch}</span>
-        </div>
+        <button onClick={onOpenSettings} className={iconButton}
+          title="设置" aria-label="打开设置"
+          style={{ color: t.textMuted, borderRadius: R - 3 }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = t.inputBg; e.currentTarget.style.color = t.text; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textMuted; }}>
+          <Settings size={14} aria-hidden="true" />
+        </button>
       </div>
-      <button onClick={onOpenSettings} title="设置"
-        className="flex items-center justify-center p-1.5 mr-0.5 transition-all duration-150 cursor-pointer"
-        style={{ color: t.textMuted, borderRadius: R - 2 }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = t.inputBg; e.currentTarget.style.color = t.text; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textMuted; }}>
-        <Settings size={13} />
-      </button>
-      <button onClick={onThemeCycle}
-        className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium transition-all duration-150 cursor-pointer"
-        style={{ color: t.textMuted, borderRadius: R - 2 }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = t.inputBg; e.currentTarget.style.color = t.text; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textMuted; }}>
-        <Icon size={12} />
-        <span>{label}</span>
-      </button>
-
       {IS_WINDOWS && <WindowControls />}
-
-      {menuOpen && (
-        <>
-          <div className="fixed inset-0" style={{ zIndex: 40 }} onClick={() => setMenuOpen(false)} />
-          <div className="absolute" style={{
-            top: 44, left: 74, zIndex: 41, width: 288,
-            background: t.dialogBg,
-            backdropFilter: "blur(24px) saturate(180%)", WebkitBackdropFilter: "blur(24px) saturate(180%)",
-            border: `0.5px solid ${t.glassBorder}`, borderRadius: R, boxShadow: t.shadowWindow, padding: 6,
-          }}>
-            <div className="px-2 py-1.5 text-[11px] font-semibold" style={{ color: t.textMuted }}>打开的项目</div>
-            {projects.map((p) => (
-              <button key={p.id} onClick={() => { onSelectProject(p.id); setMenuOpen(false); }}
-                className="w-full flex items-center gap-2.5 px-2 py-2 text-left cursor-pointer"
-                style={{ borderRadius: R - 3, background: p.id === activeId ? t.rowSelected : "transparent" }}
-                onMouseEnter={(e) => { if (p.id !== activeId) e.currentTarget.style.background = t.rowHover; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = p.id === activeId ? t.rowSelected : "transparent"; }}>
-                <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: p.color }} />
-                <div className="flex flex-col min-w-0 flex-1">
-                  <span className="text-xs truncate"
-                    style={{ color: p.id === activeId ? t.accentFg : t.text, fontWeight: p.id === activeId ? 500 : 400 }}>
-                    {p.name}
-                  </span>
-                  <span className="text-[11px] font-mono truncate" style={{ color: t.textMuted }}>
-                    {p.branch}
-                  </span>
-                </div>
-                {p.id === activeId && <Check size={12} style={{ color: t.accent }} />}
-              </button>
-            ))}
-            <div style={{ height: "0.5px", background: t.border, margin: "5px 4px" }} />
-            <button onClick={() => { setMenuOpen(false); onOpenNew(); }}
-              className="w-full flex items-center gap-2.5 px-2 py-2 text-left cursor-pointer"
-              style={{ borderRadius: R - 3, color: t.accent }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = t.accentBg; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
-              <FolderOpen size={14} />
-              <span className="text-xs font-medium">打开新项目…</span>
-            </button>
-            <button onClick={() => { setMenuOpen(false); onCloneNew(); }}
-              className="w-full flex items-center gap-2.5 px-2 py-2 text-left cursor-pointer"
-              style={{ borderRadius: R - 3, color: t.accent }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = t.accentBg; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
-              <Cloud size={14} />
-              <span className="text-xs font-medium">克隆仓库…</span>
-            </button>
-          </div>
-        </>
-      )}
     </div>
   );
 }
@@ -719,36 +650,36 @@ function ProjectTab({ project, isActive, isLast, onSelect, onClose }: {
   const t = useTheme();
   const [hovered, setHovered] = useState(false);
   return (
-    <div className="relative flex items-center gap-2.5 px-4 cursor-pointer flex-shrink-0 select-none"
+    <div role="tab" aria-selected={isActive} tabIndex={isActive ? 0 : -1}
+      className="relative flex items-center gap-2 px-3.5 cursor-pointer flex-shrink-0 select-none"
       data-tab-active={isActive || undefined}
       onClick={onSelect}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(); } }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
         height: "100%",
-        minWidth: 150, maxWidth: 205,
+        minWidth: 142, maxWidth: 196,
         background: isActive
-          ? (t.isDark ? "rgba(255,255,255,0.06)" : "rgba(0,0,0,0.05)")
+          ? (t.isDark ? "rgba(255,255,255,0.055)" : t.bgPanel)
           : hovered ? t.rowHover : "transparent",
         borderRight: isLast ? "none" : `0.5px solid ${t.glassBorder}`,
         transition: "background 0.12s",
       }}>
       {/* Active indicator */}
       {isActive && (
-        <div className="absolute bottom-0 left-0 right-0"
-          style={{ height: 2, background: project.color, borderRadius: "2px 2px 0 0",
-            boxShadow: `0 0 8px ${project.color}88` }} />
+        <div className="absolute bottom-0 left-3.5 right-3.5"
+          style={{ height: 2, background: t.accent, borderRadius: "2px 2px 0 0" }} />
       )}
-      <div className="w-2 h-2 rounded-full flex-shrink-0"
-        style={{ background: project.color, opacity: isActive ? 1 : 0.4,
-          boxShadow: isActive ? `0 0 6px ${project.color}88` : "none",
-          transition: "opacity 0.15s, box-shadow 0.15s" }} />
+      <div className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+        style={{ background: project.color, opacity: isActive ? 0.85 : 0.32,
+          transition: "opacity 0.15s" }} />
       <div className="flex flex-col min-w-0 flex-1 text-left gap-px">
-        <span className="text-xs leading-tight truncate"
-          style={{ color: isActive ? t.text : t.textSec, fontWeight: isActive ? 500 : 400 }}>
+        <span className="text-[13px] leading-tight truncate"
+          style={{ color: isActive ? t.text : t.textSec, fontWeight: isActive ? 600 : 450 }}>
           {project.name}
         </span>
-        <span className="text-[11px] font-mono leading-tight truncate"
+        <span className="text-[11px] font-mono leading-tight truncate tabular-nums"
           style={{ color: isActive ? t.textMuted : t.textFaint }}>
           {project.branch}
         </span>
@@ -760,15 +691,15 @@ function ProjectTab({ project, isActive, isLast, onSelect, onClose }: {
         <span className="flex-shrink-0 text-[11px] font-bold px-1.5 py-px transition-opacity duration-100"
           style={{ background: project.color + "20", color: project.color,
             border: `1px solid ${project.color}44`, borderRadius: 20,
-            boxShadow: `0 0 6px ${project.color}22`,
             opacity: hovered && onClose ? 0 : 1 }}>
           {project.changes}
         </span>
       )}
       {hovered && onClose && (
         <button onClick={(e) => { e.stopPropagation(); onClose(); }}
-          className="absolute flex items-center justify-center w-4 h-4 transition-colors"
-          style={{ right: 16, top: "50%", transform: "translateY(-50%)",
+          className="absolute flex items-center justify-center w-5 h-5 transition-colors"
+          aria-label={`关闭项目 ${project.name}`} title={`关闭 ${project.name}`}
+          style={{ right: 12, top: "50%", transform: "translateY(-50%)",
             color: t.textMuted, borderRadius: 6, background: "transparent" }}
           onMouseEnter={(e) => { e.currentTarget.style.background = t.redBg; e.currentTarget.style.color = t.red; }}
           onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textMuted; }}>
@@ -781,12 +712,17 @@ function ProjectTab({ project, isActive, isLast, onSelect, onClose }: {
 
 // ─── ProjectTabBar ────────────────────────────────────────────────────────────
 
-function ProjectTabBar({ projects, activeId, onSelect, onClose, onAdd }: {
+function ProjectTabBar({ projects, activeId, onSelect, onClose, onAdd, onClone, embedded = false }: {
   projects: Project[]; activeId: string;
-  onSelect: (id: string) => void; onClose: (id: string) => void; onAdd: () => void;
+  onSelect: (id: string) => void; onClose: (id: string) => void;
+  onAdd: () => void; onClone: () => void;
+  embedded?: boolean;
 }) {
   const t = useTheme();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const addMenuRef = useRef<HTMLDivElement>(null);
+  const [addMenuPos, setAddMenuPos] = useState<{ left: number; top: number } | null>(null);
   const lastId = projects[projects.length - 1]?.id;
   // Keep the active tab in view when it changes. If it's the last one, scroll
   // all the way to the end so the trailing "+" button is revealed too.
@@ -800,33 +736,100 @@ function ProjectTabBar({ projects, activeId, onSelect, onClose, onAdd }: {
         ?.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
     }
   }, [activeId, lastId, projects.length]);
+
+  useEffect(() => {
+    if (!addMenuPos) return;
+    addMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    const close = () => setAddMenuPos(null);
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        close();
+        addButtonRef.current?.focus();
+      }
+    };
+    window.addEventListener("resize", close);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("resize", close);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [addMenuPos]);
+
+  const toggleAddMenu = () => {
+    if (addMenuPos) { setAddMenuPos(null); return; }
+    const rect = addButtonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const menuWidth = 196;
+    setAddMenuPos({
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8)),
+      top: rect.bottom + 6,
+    });
+  };
+  const chooseAddAction = (action: () => void) => {
+    setAddMenuPos(null);
+    action();
+  };
+
   return (
-    <div ref={scrollRef} data-tauri-drag-region className="flex items-stretch flex-shrink-0 select-none"
-      style={{ ...glassStyle(t), height: 42, overflowX: "auto", scrollbarWidth: "none" }}>
-      <div style={{ width: "0.5px", background: t.glassBorder, flexShrink: 0 }} />
-      {projects.map((proj, i) => (
-        <ProjectTab key={proj.id} project={proj} isActive={proj.id === activeId}
-          isLast={i === projects.length - 1}
-          onSelect={() => onSelect(proj.id)}
-          onClose={projects.length > 1 ? () => onClose(proj.id) : undefined} />
-      ))}
-      <button onClick={onAdd}
-        className="flex items-center justify-center px-3.5 flex-shrink-0 transition-colors duration-100"
-        style={{ color: t.textFaint, borderLeft: `0.5px solid ${t.glassBorder}` }}
-        onMouseEnter={(e) => { e.currentTarget.style.color = t.textSec; e.currentTarget.style.background = t.rowHover; }}
-        onMouseLeave={(e) => { e.currentTarget.style.color = t.textFaint; e.currentTarget.style.background = "transparent"; }}
-        title="打开仓库">
-        <Plus size={13} />
-      </button>
-      <div data-tauri-drag-region className="flex-1" />
-    </div>
+    <>
+      <div ref={scrollRef} data-tauri-drag-region role="tablist" aria-label="打开的项目"
+        className="flex items-stretch flex-1 min-w-0 select-none"
+        style={{ ...(embedded ? { background: "transparent" } : glassStyle(t)),
+          height: embedded ? 48 : 42, overflowX: "auto", scrollbarWidth: "none" }}>
+        <div style={{ width: "0.5px", background: t.glassBorder, flexShrink: 0 }} />
+        {projects.map((proj, i) => (
+          <ProjectTab key={proj.id} project={proj} isActive={proj.id === activeId}
+            isLast={i === projects.length - 1}
+            onSelect={() => onSelect(proj.id)}
+            onClose={projects.length > 1 ? () => onClose(proj.id) : undefined} />
+        ))}
+        <button ref={addButtonRef} onClick={toggleAddMenu}
+          className="flex items-center justify-center px-3.5 flex-shrink-0 transition-colors duration-100"
+          style={{ color: addMenuPos ? t.accent : t.textFaint,
+            background: addMenuPos ? t.accentBg : "transparent",
+            borderLeft: `0.5px solid ${t.glassBorder}` }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = t.textSec; e.currentTarget.style.background = addMenuPos ? t.accentBg : t.rowHover; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = addMenuPos ? t.accent : t.textFaint; e.currentTarget.style.background = addMenuPos ? t.accentBg : "transparent"; }}
+          title="添加仓库" aria-label="添加仓库" aria-haspopup="menu" aria-expanded={!!addMenuPos}>
+          <Plus size={14} aria-hidden="true" />
+        </button>
+        <div data-tauri-drag-region className="flex-1" />
+      </div>
+
+      {addMenuPos && createPortal(
+        <>
+          <div className="fixed inset-0" style={{ zIndex: 80 }} onMouseDown={() => setAddMenuPos(null)} />
+          <div ref={addMenuRef} role="menu" aria-label="添加仓库"
+            className="fixed p-1.5 gk-modal-in"
+            style={{ left: addMenuPos.left, top: addMenuPos.top, zIndex: 81, width: 196,
+              background: t.dialogBg, border: `0.5px solid ${t.glassBorder}`,
+              borderRadius: R, boxShadow: t.shadowWindow }}>
+            <button role="menuitem" onClick={() => chooseAddAction(onAdd)}
+              className="flex items-center gap-2.5 w-full px-2.5 py-2 text-left text-xs font-medium cursor-pointer"
+              style={{ color: t.text, borderRadius: R - 3 }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = t.rowHover; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
+              <FolderOpen size={14} aria-hidden="true" style={{ color: t.accent }} />
+              打开本地仓库
+            </button>
+            <button role="menuitem" onClick={() => chooseAddAction(onClone)}
+              className="flex items-center gap-2.5 w-full px-2.5 py-2 text-left text-xs font-medium cursor-pointer"
+              style={{ color: t.text, borderRadius: R - 3 }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = t.rowHover; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
+              <Cloud size={14} aria-hidden="true" style={{ color: t.accent2 }} />
+              克隆远程仓库
+            </button>
+          </div>
+        </>, document.body,
+      )}
+    </>
   );
 }
 
 // ─── ActionBar ────────────────────────────────────────────────────────────────
 
-function ActionBar({ onClone, onCreateBranch, onFetch, onPull, onPush, onCreateTag, onCherryPick, onStash, onCreatePR, pushCount = 0, busy }: {
-  onClone?: () => void;
+function ActionBar({ onCreateBranch, onFetch, onPull, onPush, onCreateTag, onCherryPick, onStash, onCreatePR, pushCount = 0, busy }: {
   onCreateBranch?: () => void;
   onFetch?: () => void; onPull?: () => void; onPush?: () => void;
   onCreateTag?: () => void;
@@ -846,19 +849,17 @@ function ActionBar({ onClone, onCreateBranch, onFetch, onPull, onPush, onCreateT
     setPushMenu(false);
   };
   const actions = [
-    { label: "克隆",       icon: Cloud,          accent: false, badge: 0 },
-    { label: "获取",       icon: RefreshCw,      accent: false, badge: 0 },
-    { label: "拉取",       icon: Download,       accent: false, badge: 0 },
-    { label: "推送",       icon: Upload,         accent: false, badge: pushCount },
-    { label: "新建分支",     icon: GitBranchPlus,  accent: false, badge: 0 },
-    { label: "合并",       icon: GitMerge,       accent: false, badge: 0 },
-    { label: "遴选",       icon: GitCommit,      accent: false, badge: 0 },
-    { label: "储藏",       icon: Layers,         accent: false, badge: 0 },
-    { label: "创建合并请求", icon: GitPullRequest, accent: true,  badge: 0 },
+    { label: "获取",       icon: RefreshCw,      accent: false, badge: 0,         separated: false },
+    { label: "拉取",       icon: Download,       accent: false, badge: 0,         separated: false },
+    { label: "推送",       icon: Upload,         accent: false, badge: pushCount, separated: false },
+    { label: "新建分支",   icon: GitBranchPlus,  accent: false, badge: 0,         separated: true },
+    { label: "合并",       icon: GitMerge,       accent: false, badge: 0,         separated: false },
+    { label: "遴选",       icon: GitCommit,      accent: false, badge: 0,         separated: false },
+    { label: "储藏",       icon: Layers,         accent: false, badge: 0,         separated: false },
+    { label: "创建合并请求", icon: GitPullRequest, accent: true, badge: 0,         separated: true },
   ] as const;
 
   const handleClick = (label: string) => {
-    if (label === "克隆") { onClone?.(); return; }
     if (label === "获取") { onFetch?.(); return; }
     if (label === "拉取") { onPull?.(); return; }
     if (label === "推送") { onPush?.(); return; }
@@ -875,28 +876,36 @@ function ActionBar({ onClone, onCreateBranch, onFetch, onPull, onPush, onCreateT
   const busyLabel = busy === "fetch" ? "获取" : busy === "pull" ? "拉取" : busy === "push" ? "推送" : null;
 
   return (
-    <div className="h-11 flex items-center px-3 gap-0.5 flex-shrink-0 select-none"
-      style={{ ...glassStyle(t), position: "relative", zIndex: 30 }}>
+    <div className="h-[42px] flex items-center px-3 gap-0.5 flex-shrink-0 select-none"
+      aria-label="仓库操作" style={{ background: t.bgPanel, borderBottom: `0.5px solid ${t.border}`,
+        position: "relative", zIndex: 30 }}>
       {actions.map((a) => {
         const btn = (
           <button key={a.label} onClick={() => handleClick(a.label)}
             disabled={busyLabel === a.label}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-all duration-150 cursor-pointer"
-            style={{ color: a.accent ? t.accent : t.textMuted, borderRadius: R - 2 }}
+            aria-busy={busyLabel === a.label || undefined}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium transition-[color,background-color,opacity,transform] duration-150 cursor-pointer active:scale-[0.98]"
+            style={{ color: a.accent ? "#fff" : t.textSec, borderRadius: R - 3,
+              marginLeft: a.separated ? 8 : 0,
+              borderLeft: a.separated && !a.accent ? `0.5px solid ${t.border}` : "none",
+              paddingLeft: a.separated && !a.accent ? 14 : 10,
+              background: a.accent ? t.accent : "transparent",
+              boxShadow: a.accent ? (t.isDark ? "inset 0 1px 0 rgba(255,255,255,0.14)" : "inset 0 1px 0 rgba(255,255,255,0.24)") : "none" }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.background = a.accent ? t.accentBg : t.inputBg;
-              e.currentTarget.style.color = a.accent ? t.accentFg : t.text;
+              e.currentTarget.style.background = a.accent ? t.accent : t.inputBg;
+              e.currentTarget.style.color = a.accent ? "#fff" : t.text;
+              if (a.accent) e.currentTarget.style.opacity = "0.88";
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.background = "transparent";
-              e.currentTarget.style.color = a.accent ? t.accent : t.textMuted;
+              e.currentTarget.style.background = a.accent ? t.accent : "transparent";
+              e.currentTarget.style.color = a.accent ? "#fff" : t.textSec;
+              e.currentTarget.style.opacity = "1";
             }}>
-            <a.icon size={12} className={busyLabel === a.label ? "animate-spin" : undefined} />
+            <a.icon size={13} strokeWidth={1.8} aria-hidden="true" className={busyLabel === a.label ? "animate-spin" : undefined} />
             <span>{a.label}</span>
             {a.badge > 0 && (
               <span className="flex items-center justify-center rounded-full text-[11px] font-bold ml-0.5"
-                style={{ width: 15, height: 15, background: t.accent, color: "#fff",
-                  boxShadow: `0 0 8px ${t.accent}66` }}>
+                style={{ minWidth: 16, height: 16, padding: "0 4px", background: t.accent, color: "#fff" }}>
                 {a.badge}
               </span>
             )}
@@ -940,13 +949,13 @@ function SidebarSection({ label, open, onToggle }: { label: string; open: boolea
   const t = useTheme();
   return (
     <button onClick={onToggle}
-      className="flex items-center gap-1.5 w-full px-3 py-2 text-left transition-colors duration-150 cursor-pointer"
+      className="flex items-center gap-1.5 w-full px-3 py-2.5 text-left transition-colors duration-150 cursor-pointer"
       style={{ color: t.textFaint, borderRadius: R - 2 }}
       onMouseEnter={(e) => (e.currentTarget.style.color = t.textMuted)}
       onMouseLeave={(e) => (e.currentTarget.style.color = t.textFaint)}>
       <ChevronRight size={10} className="flex-shrink-0 transition-transform duration-200"
         style={{ transform: open ? "rotate(90deg)" : "rotate(0deg)" }} />
-      <span className="text-[11px] font-bold tracking-widest uppercase">{label}</span>
+      <span className="text-[10px] font-semibold tracking-[0.06em]">{label}</span>
     </button>
   );
 }
@@ -988,9 +997,10 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
 
   const itemStyle = (active: boolean): React.CSSProperties => ({
     borderRadius: R - 2,
-    margin: "1px 8px",
+    margin: "2px 7px",
     background: active ? t.rowSelected : "transparent",
-    transition: "background 0.12s",
+    boxShadow: active ? `inset 2px 0 0 ${t.accent}` : "none",
+    transition: "background 0.12s, box-shadow 0.12s",
   });
 
   // The current (checked-out) branch is marked with a deepened neutral pill
@@ -1003,18 +1013,18 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
     // Background priority: focus tint (coral) > current-branch pill (neutral).
     const baseBg = active ? t.rowSelected : b.current ? currentBg : "transparent";
     return (
-      <div key={b.name} onClick={() => onFocus(b.name)} onDoubleClick={() => onCheckout?.(b.name)}
+      <div key={b.name} role="button" tabIndex={0} onClick={() => onFocus(b.name)} onDoubleClick={() => onCheckout?.(b.name)}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onFocus(b.name); } }}
         onContextMenu={(e) => onBranchContext?.(e, b)}
         className="group flex items-center gap-2 pr-2 cursor-pointer"
-        style={{ ...itemStyle(active), background: baseBg, paddingLeft: indent ? 26 : 12, height: 30 }}
+        style={{ ...itemStyle(active), background: baseBg, paddingLeft: indent ? 26 : 12, height: 32 }}
         title={b.worktree
           ? `${b.name}\n已被工作树占用：${b.worktree}\n无法直接切换或删除`
           : `单击只看此分支 · 双击切换到 ${b.name}`}
         onMouseEnter={(e) => { onHoverBranch(b.name); if (!active) e.currentTarget.style.background = b.current ? currentBgHover : t.rowHover; }}
         onMouseLeave={(e) => { onHoverBranch(null); if (!active) e.currentTarget.style.background = baseBg; }}>
-        <div className="w-2 h-2 rounded-full flex-shrink-0"
-          style={{ background: b.color, opacity: b.current ? 1 : 0.5,
-            boxShadow: b.current ? `0 0 6px ${b.color}aa` : "none" }} />
+        <div className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+          style={{ background: b.color, opacity: b.current ? 0.9 : 0.42 }} />
         <span className="text-xs flex-1 truncate"
           style={{ color: active ? t.accentFg : b.current ? t.text : t.textSec, fontWeight: b.current ? 600 : 400 }}>
           {leaf ?? b.name}
@@ -1083,25 +1093,26 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
   const hiddenBranches = branches.filter((b) => hidden.includes(b.name));
 
   return (
-    <div className="w-[220px] flex-shrink-0 flex flex-col overflow-y-auto select-none"
+    <div className="w-[212px] flex-shrink-0 flex flex-col overflow-y-auto select-none"
       style={{ background: t.sidebarBg,
-        backdropFilter: "blur(20px) saturate(160%)",
-        WebkitBackdropFilter: "blur(20px) saturate(160%)",
+        backdropFilter: "blur(12px) saturate(110%)",
+        WebkitBackdropFilter: "blur(12px) saturate(110%)",
         borderRight: `0.5px solid ${t.glassBorder}` }}>
 
-      <div className="pt-3">
+      <div className="pt-2.5">
         {/* Global "all branches" view toggle — active when no branch is focused */}
         <button onClick={onShowAll}
-          className="flex items-center gap-2 mx-2 mb-1 px-2 cursor-pointer"
-          style={{ height: 30, borderRadius: R - 2,
+          className="flex items-center gap-2 mx-[7px] mb-1 px-2.5 cursor-pointer"
+          style={{ height: 32, borderRadius: R - 2,
             background: focusBranch === null ? t.accentBg : "transparent",
-            color: focusBranch === null ? t.accentFg : t.textSec }}
+            color: focusBranch === null ? t.accentFg : t.textSec,
+            boxShadow: focusBranch === null ? `inset 2px 0 0 ${t.accent}` : "none" }}
           onMouseEnter={(e) => { if (focusBranch !== null) e.currentTarget.style.background = t.rowHover; }}
           onMouseLeave={(e) => { if (focusBranch !== null) e.currentTarget.style.background = "transparent"; }}>
           <LayoutGrid size={13} className="flex-shrink-0"
             style={{ color: focusBranch === null ? t.accent : t.textMuted }} />
           <span className="text-xs font-medium flex-1 text-left truncate">全部视图</span>
-          {focusBranch === null && <Check size={12} style={{ color: t.accent }} />}
+          {focusBranch === null && <Check size={12} strokeWidth={2.2} style={{ color: t.accent }} />}
         </button>
         <SidebarSection label="分支" open={branchesOpen} onToggle={() => setBranchesOpen(!branchesOpen)} />
         {branchesOpen && (
@@ -1328,8 +1339,8 @@ function refBadges(tags: string[], remoteNames: string[]): { name: string; kind:
 }
 
 // Inline branch/HEAD/tag capsules, shown once on a commit's tip row right beside
-// the message. Each branch pill is coloured by branchColor — the SAME colour as
-// its graph lane and its sidebar dot — so a branch reads as one colour end to end.
+// the message. Their surfaces stay neutral; the small source icons retain the
+// graph colour so refs remain traceable without turning the row into a colour wall.
 // Long names truncate; hovering expands to the full name (see RefPill).
 function InlineRefs({ tags, remoteNames, onDblClick }: {
   tags: string[]; remoteNames: string[]; onDblClick?: (name: string) => void;
@@ -1341,8 +1352,8 @@ function InlineRefs({ tags, remoteNames, onDblClick }: {
     <div className="flex items-center gap-1 overflow-hidden" style={{ flexWrap: "nowrap" }}>
       {badges.map((b) =>
         b.kind === "head" ? (
-          <span key="HEAD" className="px-1.5 py-0.5 text-[11px] font-mono font-semibold flex-shrink-0"
-            style={{ background: t.accent + "1f", color: t.accent, border: `1px solid ${t.accent}66`, borderRadius: R - 4 }}>
+          <span key="HEAD" className="px-1.5 py-0.5 text-[10px] font-mono font-semibold flex-shrink-0"
+            style={{ background: t.accentBg, color: t.accentFg, border: `0.5px solid ${t.accent}55`, borderRadius: R - 4 }}>
             HEAD
           </span>
         ) : (
@@ -1373,28 +1384,29 @@ function RefPill({ b, onDblClick }: {
   const cls = "flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-mono font-semibold";
   const icons = (
     <>
-      {hasLocal && <Laptop size={12} strokeWidth={2.4} className="flex-shrink-0" />}
-      {hasRemote && <Cloud size={12} strokeWidth={2.4} className="flex-shrink-0" />}
+      {hasLocal && <Laptop size={11} strokeWidth={2} className="flex-shrink-0" style={{ color: c }} />}
+      {hasRemote && <Cloud size={11} strokeWidth={2} className="flex-shrink-0" style={{ color: c }} />}
     </>
   );
   return (
     <span ref={ref} className="relative inline-flex min-w-0 cursor-pointer" style={{ maxWidth: 176 }}
-      title={`${b.name} · ${tip} · 双击检出并同步`}
+      title={`${b.name} - ${tip}\n双击检出并同步`}
       onMouseEnter={() => { const r = ref.current?.getBoundingClientRect(); if (r) setPos({ left: r.left, top: r.top }); }}
       onMouseLeave={() => setPos(null)}
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => { e.stopPropagation(); onDblClick?.(b.name); }}>
       {/* Collapsed pill — hidden (but keeps its width) while the overlay shows. */}
       <span className={`${cls} w-full min-w-0`}
-        style={{ background: c + "1c", color: c, border: `1px solid ${c}55`, borderRadius: R - 4,
+        style={{ background: t.inputBg, color: b.kind === "tag" ? t.amber : t.textSec,
+          border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 4,
           visibility: pos ? "hidden" : "visible" }}>
         {icons}<span className="truncate min-w-0">{b.name}</span>
       </span>
       {pos && createPortal(
         <span className={`${cls} whitespace-nowrap`}
           style={{ position: "fixed", left: pos.left, top: pos.top, zIndex: 100, pointerEvents: "none",
-            background: t.bgPanel, color: c, border: `1px solid ${c}88`, borderRadius: R - 4,
-            boxShadow: `inset 0 0 0 100px ${c}22, 0 2px 10px rgba(0,0,0,0.28)` }}>
+            background: t.dialogBg, color: b.kind === "tag" ? t.amber : t.text,
+            border: `0.5px solid ${c}66`, borderRadius: R - 4, boxShadow: t.shadowEl }}>
           {icons}<span>{b.name}</span>
         </span>,
         document.body,
@@ -1431,23 +1443,15 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
       className="relative cursor-pointer"
       style={{ height: rowH, borderBottom: `0.5px solid ${t.border}`,
         contentVisibility: "auto", containIntrinsicSize: `0 ${rowH}px` }}>
-      {/* Rounded selection overlay — inset so graph line stays unclipped */}
+      {/* Inset selection overlay keeps the graph topology readable. */}
       <div className="absolute pointer-events-none"
         style={{
-          top: 3, bottom: 3, left: 4, right: 4,
-          borderRadius: R - 2,
-          background: selected ? t.rowSelected : highlight ? laneColor + "1f" : hovered ? t.rowHover : "transparent",
+          top: 2, bottom: 2, left: 5, right: 5,
+          borderRadius: R - 3,
+          background: selected ? t.accentBg : highlight ? laneColor + "16" : hovered ? t.rowHover : "transparent",
           transition: "background 0.1s",
-          boxShadow: selected ? `inset 0 0 0 0.5px ${t.accent}44`
-            : highlight ? `inset 0 0 0 0.5px ${laneColor}66` : "none",
+          boxShadow: highlight && !selected ? `inset 0 0 0 0.5px ${laneColor}44` : "none",
         }} />
-      {/* Permanent lane-colour bar — ties the commit to its branch lane */}
-      <div className="absolute left-0"
-        style={{ top: 8, bottom: 8, width: 3, borderRadius: "0 3px 3px 0",
-          background: laneColor,
-          opacity: selected ? 1 : hovered ? 0.8 : 0.5,
-          boxShadow: selected ? `0 0 8px ${laneColor}aa` : "none",
-          transition: "opacity 0.12s" }} />
       <div className="relative flex items-start">
         {/* Graph sits flush-left — the topology lanes carry the branch colours. */}
         <div style={{ width: graphW, flexShrink: 0 }}>
@@ -1465,13 +1469,13 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
                 aria-label="合并提交" />
             )}
             <span className="text-sm leading-snug truncate"
-              style={{ color: selected ? t.accentFg : t.text, fontWeight: 500 }}>
+              style={{ color: t.text, fontWeight: selected ? 600 : 500 }}>
               {commit.message}
             </span>
           </div>
           <div className="flex items-center gap-2 min-w-0">
             <Avatar author={commit.author} size={16} />
-            <span className="text-[12px] truncate" style={{ color: t.textSec }}>{commit.author.name}</span>
+            <span className="text-[12px] truncate" style={{ color: t.textMuted }}>{commit.author.name}</span>
             <span className="text-[11px] font-mono flex-shrink-0" style={{ color: t.textFaint }}>{commit.hash}</span>
             <span className="text-[11px] ml-auto flex-shrink-0" style={{ color: t.textFaint }}>
               {formatRelativeTime(commit.date)}
@@ -2167,7 +2171,7 @@ function loadThemeMode(): ThemeMode {
 
 function loadPaletteId(): PaletteId {
   const s = localStorage.getItem("gitkit.palette");
-  return (PALETTE_ORDER as readonly string[]).includes(s ?? "") ? (s as PaletteId) : "warm";
+  return (PALETTE_ORDER as readonly string[]).includes(s ?? "") ? (s as PaletteId) : "graphite";
 }
 
 // ── Scheduled daily update check ────────────────────────────────────────────
@@ -2178,6 +2182,7 @@ function loadPaletteId(): PaletteId {
 // rule covers everything: a day missed with the app closed fires shortly after
 // the next launch, and moving the time later in the day still fires today.
 interface DailyCheck { enabled: boolean; time: string; lastRun: number }
+interface CheckProgress { current: number; total: number; project: string }
 const DAILY_CHECK_DEFAULT: DailyCheck = { enabled: false, time: "09:30", lastRun: 0 };
 function loadDailyCheck(): DailyCheck {
   try {
@@ -2342,6 +2347,9 @@ function pickRemoteToken(remoteUrl: string): string | undefined {
 // act on `mousedown` (which always fires) instead, making them one-click reliable.
 const press = (fn: () => void) => ({
   onMouseDown: (e: React.MouseEvent) => { e.preventDefault(); fn(); },
+  onKeyDown: (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); }
+  },
 });
 
 type DlgIcon = typeof GitPullRequest;
@@ -2359,7 +2367,8 @@ function Modal({ title, Icon, onClose, width = 480, children, footer }: {
   return (
     <div className="fixed inset-0 flex items-center justify-center" style={{ zIndex: 200 }}>
       <div className="absolute inset-0 gk-overlay-in" style={{ background: "rgba(0,0,0,0.45)" }} {...press(onClose)} />
-      <div className="relative flex flex-col gk-modal-in" style={{ width, maxHeight: "85vh",
+      <div role="dialog" aria-modal="true" aria-label={title}
+        className="relative flex flex-col gk-modal-in" style={{ width, maxHeight: "85vh",
         background: t.dialogBg,
         border: `0.5px solid ${t.glassBorder}`, borderRadius: R + 2, boxShadow: t.shadowWindow, overflow: "hidden" }}>
         <div className="flex-shrink-0 flex items-center gap-2.5 px-5 py-3.5" style={{ borderBottom: `0.5px solid ${t.border}` }}>
@@ -2368,13 +2377,14 @@ function Modal({ title, Icon, onClose, width = 480, children, footer }: {
           </div>
           <span className="text-sm font-semibold flex-1" style={{ color: t.text }}>{title}</span>
           <button {...press(onClose)}
-            className="p-1 cursor-pointer" style={{ color: t.textMuted, borderRadius: R - 3 }}
+            aria-label={`关闭${title}`} title="关闭"
+            className="flex items-center justify-center w-7 h-7 cursor-pointer" style={{ color: t.textMuted, borderRadius: R - 3 }}
             onMouseEnter={(e) => (e.currentTarget.style.background = t.inputBg)}
             onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
             <X size={15} />
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-5 py-4 flex flex-col gap-4">{children}</div>
+        <div className="flex-1 overflow-y-auto overscroll-contain px-5 py-4 flex flex-col gap-4">{children}</div>
         {footer && (
           <div className="flex-shrink-0 flex items-center justify-end gap-2 px-5 py-3.5" style={{ borderTop: `0.5px solid ${t.border}` }}>
             {footer}
@@ -3650,13 +3660,14 @@ function AppearanceSettings({ vibrancy, setVibrancy, paletteId, setPaletteId, th
 // Second-level pane: the scheduled daily check for new upstream commits across
 // every open project. The check itself lives in App (it needs the project list
 // and the token lookup); this pane only edits the schedule and can trigger a run.
-function DailyCheckSettings({ cfg, setCfg, onRunNow, busy, projectCount }: {
+function DailyCheckSettings({ cfg, setCfg, onRunNow, busy, progress, projectCount }: {
   cfg: DailyCheck; setCfg: (c: DailyCheck) => void;
-  onRunNow: () => void; busy: boolean; projectCount: number;
+  onRunNow: () => void; busy: boolean; progress: CheckProgress | null; projectCount: number;
 }) {
   const t = useTheme();
   const inputStyle = { background: t.inputBg, color: t.text, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
   const nextRun = (() => {
+    if (busy && progress) return `正在检查 ${progress.current}/${progress.total} · ${progress.project}`;
     if (!cfg.enabled) return null;
     const today = scheduledAt(cfg.time);
     const due = Date.now() >= today && cfg.lastRun < today;
@@ -3665,63 +3676,73 @@ function DailyCheckSettings({ cfg, setCfg, onRunNow, busy, projectCount }: {
   })();
 
   return (
-    <div className="flex flex-col gap-5">
-      <div className="flex flex-col gap-1">
-        <span className="text-sm font-semibold" style={{ color: t.text }}>定时检查更新</span>
-        <span className="text-[11px] leading-relaxed" style={{ color: t.textFaint }}>
-          每天到点后自动获取顶部已打开项目的远程分支,列出有新提交的项目,并可一键统一拉取。
-          检查只更新远程跟踪分支,不会改动本地分支和工作区;拉取时也只做快进,分叉或有未提交更改的分支会跳过并提示。
+    <div className="flex flex-col gap-4 max-w-[620px]">
+      <div className="flex flex-col gap-1.5">
+        <span className="text-base font-semibold" style={{ color: t.text }}>定时检查更新</span>
+        <span className="text-xs leading-relaxed max-w-[62ch]" style={{ color: t.textMuted }}>
+          每天自动获取已打开项目的远程分支。发现新提交后显示汇总窗口，并在应用位于后台时提醒你。
         </span>
       </div>
 
-      {/* Enable toggle */}
-      <button {...press(() => setCfg({ ...cfg, enabled: !cfg.enabled }))}
-        className="flex items-center gap-3 cursor-pointer w-fit">
-        <span className="relative inline-flex flex-shrink-0 transition-colors"
-          style={{ width: 38, height: 22, borderRadius: 11, background: cfg.enabled ? t.accent : t.inputBorder }}>
-          <span className="absolute top-0.5 transition-all"
-            style={{ width: 18, height: 18, borderRadius: 9, background: "#fff",
-              left: cfg.enabled ? 18 : 2, boxShadow: "0 1px 3px rgba(0,0,0,0.3)" }} />
-        </span>
-        <span className="text-xs" style={{ color: t.textSec }}>{cfg.enabled ? "已开启" : "已关闭"}</span>
-      </button>
+      <div className="flex flex-col overflow-hidden"
+        style={{ borderRadius: R, border: `0.5px solid ${t.inputBorder}`, background: t.dialogBg }}>
+        <div className="flex items-center gap-4 px-4 py-3.5">
+          <div className="flex flex-col gap-0.5 flex-1 min-w-0">
+            <span className="text-[13px] font-semibold" style={{ color: t.text }}>自动检查</span>
+            <span className="text-xs" style={{ color: t.textMuted }}>到达设定时间后在后台检查全部项目</span>
+          </div>
+          <button {...press(() => setCfg({ ...cfg, enabled: !cfg.enabled }))}
+            role="switch" aria-checked={cfg.enabled} aria-label="自动检查更新"
+            className="relative inline-flex flex-shrink-0 cursor-pointer transition-colors"
+            style={{ width: 38, height: 22, borderRadius: 11, background: cfg.enabled ? t.accent : t.inputBorder }}>
+            <span className="absolute top-0.5 transition-[left] duration-150"
+              style={{ width: 18, height: 18, borderRadius: 9, background: "#fff",
+                left: cfg.enabled ? 18 : 2, boxShadow: "0 1px 3px rgba(0,0,0,0.24)" }} />
+          </button>
+        </div>
 
-      {/* Schedule */}
-      <div className="flex items-center gap-3 px-3.5 py-3"
-        style={{ borderRadius: R - 2, border: `0.5px solid ${t.border}`, background: t.inputBg,
-          opacity: cfg.enabled ? 1 : 0.55 }}>
-        <div className="flex items-center justify-center rounded-xl flex-shrink-0"
-          style={{ width: 40, height: 40, background: t.accentBg }}>
-          <RefreshCw size={18} style={{ color: t.accent }} />
+        <div className="flex items-center gap-3 px-4 py-3.5"
+          style={{ borderTop: `0.5px solid ${t.border}`, opacity: cfg.enabled || busy ? 1 : 0.52 }}>
+          <div className="flex items-center justify-center flex-shrink-0"
+            style={{ width: 34, height: 34, borderRadius: R - 3, background: t.accentBg }}>
+            <RefreshCw size={15} aria-hidden="true" className={busy ? "animate-spin" : undefined}
+              style={{ color: t.accent }} />
+          </div>
+          <div className="flex flex-col min-w-0 flex-1 gap-0.5">
+            <span className="text-[13px] font-medium" style={{ color: t.text }}>每天检查时间</span>
+            <span className="text-xs truncate" style={{ color: busy ? t.accentFg : t.textMuted }}>
+              {nextRun ?? "开启后按设定时间执行"}
+            </span>
+          </div>
+          <label className="sr-only" htmlFor="daily-check-time">每天检查时间</label>
+          <input id="daily-check-time" name="dailyCheckTime" type="time" value={cfg.time}
+            disabled={!cfg.enabled || busy}
+            onChange={(e) => setCfg({ ...cfg, time: e.target.value || DAILY_CHECK_DEFAULT.time })}
+            className="text-xs px-2.5 py-2 outline-none font-mono tabular-nums flex-shrink-0"
+            style={{ ...inputStyle, cursor: cfg.enabled && !busy ? "text" : "not-allowed" }} />
         </div>
-        <div className="flex flex-col min-w-0 flex-1 gap-0.5">
-          <span className="text-xs font-semibold" style={{ color: t.text }}>每天检查时间</span>
-          <span className="text-[11px]" style={{ color: t.textMuted }}>
-            {nextRun ? `下次：${nextRun}` : "开启后按设定时间执行"}
-          </span>
-        </div>
-        <input type="time" value={cfg.time} disabled={!cfg.enabled}
-          onChange={(e) => setCfg({ ...cfg, time: e.target.value || DAILY_CHECK_DEFAULT.time })}
-          className="text-xs px-2.5 py-2 outline-none font-mono flex-shrink-0"
-          style={{ ...inputStyle, cursor: cfg.enabled ? "text" : "not-allowed" }} />
       </div>
 
-      <div style={{ height: "0.5px", background: t.border }} />
-
-      {/* Manual run + last result */}
-      <div className="flex items-center gap-3">
-        <button {...(busy || projectCount === 0 ? {} : press(onRunNow))} disabled={busy || projectCount === 0}
-          className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium flex-shrink-0"
-          style={{ background: t.accent, color: "#fff", borderRadius: R - 3,
-            cursor: busy || projectCount === 0 ? "not-allowed" : "pointer", opacity: busy || projectCount === 0 ? 0.6 : 1 }}>
-          <RefreshCw size={12} className={busy ? "animate-spin" : undefined} />
-          立即检查
-        </button>
-        <span className="text-[11px] min-w-0" style={{ color: t.textMuted }}>
+      <div className="flex items-center gap-3 min-h-9">
+        <span className="text-xs min-w-0 flex-1" style={{ color: t.textMuted }}>
           {projectCount === 0 ? "还没有打开任何项目"
             : cfg.lastRun ? `上次检查：${formatFullDate(new Date(cfg.lastRun).toISOString())} · 共 ${projectCount} 个项目`
             : `将检查顶部已打开的 ${projectCount} 个项目`}
         </span>
+        <button {...(busy || projectCount === 0 ? {} : press(onRunNow))} disabled={busy || projectCount === 0}
+          className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium flex-shrink-0"
+          style={{ background: busy ? t.inputBg : t.accentBg, color: busy ? t.textFaint : t.accentFg,
+            border: `0.5px solid ${busy ? t.inputBorder : t.accent + "55"}`, borderRadius: R - 3,
+            cursor: busy || projectCount === 0 ? "not-allowed" : "pointer", opacity: projectCount === 0 ? 0.55 : 1 }}>
+          <RefreshCw size={12} aria-hidden="true" className={busy ? "animate-spin" : undefined} />
+          {busy ? "检查中" : "立即检查"}
+        </button>
+      </div>
+
+      <div className="flex items-start gap-2.5 px-3 py-2.5 text-xs leading-relaxed"
+        style={{ color: t.textMuted, background: t.inputBg, borderRadius: R - 2 }}>
+        <Check size={13} className="flex-shrink-0 mt-0.5" style={{ color: t.green }} />
+        检查阶段只更新远程跟踪分支。统一拉取仅执行安全快进，分叉分支和有未提交更改的当前分支会保留原状。
       </div>
     </div>
   );
@@ -4016,40 +4037,43 @@ function ProjectPrefsSettings({ identities }: { identities: Identity[] }) {
 
 function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId, vibrancy, setVibrancy,
   paletteId, setPaletteId, themeMode, setThemeMode, dailyCheck, setDailyCheck,
-  onRunCheckNow, checkBusy, projectCount, onClose }: {
+  onRunCheckNow, checkBusy, checkProgress, projectCount, onClose }: {
   identities: Identity[]; setIdentities: React.Dispatch<React.SetStateAction<Identity[]>>;
   defaultId: string; setDefaultId: (id: string) => void;
   vibrancy: boolean; setVibrancy: (v: boolean) => void;
   paletteId: PaletteId; setPaletteId: (id: PaletteId) => void;
   themeMode: ThemeMode; setThemeMode: (m: ThemeMode) => void;
   dailyCheck: DailyCheck; setDailyCheck: (c: DailyCheck) => void;
-  onRunCheckNow: () => void; checkBusy: boolean; projectCount: number;
+  onRunCheckNow: () => void; checkBusy: boolean; checkProgress: CheckProgress | null; projectCount: number;
   onClose: () => void;
 }) {
   const t = useTheme();
   const MENU = [
-    { key: "identity",   label: "提交者身份", Icon: Users },
-    { key: "gitlab",     label: "GitLab 集成", Icon: Cloud },
-    { key: "github",     label: "GitHub 集成", Icon: Github },
-    { key: "projects",   label: "项目配置", Icon: FolderGit2 },
-    { key: "daily",      label: "定时检查", Icon: RefreshCw },
-    { key: "appearance", label: "外观", Icon: Sparkles },
-    { key: "update",     label: "软件更新", Icon: DownloadCloud },
-    { key: "deps",       label: "环境依赖", Icon: TerminalSquare },
+    { group: "账户", key: "identity",   label: "提交者身份", Icon: Users },
+    { group: "账户", key: "gitlab",     label: "GitLab 集成", Icon: Cloud },
+    { group: "账户", key: "github",     label: "GitHub 集成", Icon: Github },
+    { group: "工作区", key: "projects",   label: "项目配置", Icon: FolderGit2 },
+    { group: "工作区", key: "daily",      label: "定时检查", Icon: RefreshCw },
+    { group: "偏好", key: "appearance", label: "外观", Icon: Sparkles },
+    { group: "系统", key: "update",     label: "软件更新", Icon: DownloadCloud },
+    { group: "系统", key: "deps",       label: "环境依赖", Icon: TerminalSquare },
   ] as const;
   const [section, setSection] = useState<(typeof MENU)[number]["key"]>("identity");
 
   return (
     <div className="fixed inset-0 flex items-center justify-center" style={{ zIndex: 200 }}>
       <div className="absolute inset-0 gk-overlay-in" style={{ background: "rgba(0,0,0,0.45)" }} {...press(onClose)} />
-      <div className="relative flex flex-col gk-modal-in" style={{ width: 860, height: 620,
+      <div role="dialog" aria-modal="true" aria-labelledby="settings-title"
+        className="relative flex flex-col gk-modal-in" style={{ width: "min(780px, calc(100vw - 48px))",
+        height: "min(520px, calc(100vh - 48px))",
         background: t.dialogBg,
         border: `0.5px solid ${t.glassBorder}`, borderRadius: R + 2, boxShadow: t.shadowWindow, overflow: "hidden" }}>
-        <div className="flex-shrink-0 flex items-center gap-2.5 px-5 py-3.5" style={{ borderBottom: `0.5px solid ${t.border}` }}>
+        <div className="flex-shrink-0 flex items-center gap-2.5 px-4 py-3" style={{ borderBottom: `0.5px solid ${t.border}` }}>
           <Settings size={15} style={{ color: t.accent }} />
-          <span className="text-sm font-semibold flex-1" style={{ color: t.text }}>设置</span>
+          <span id="settings-title" className="text-sm font-semibold flex-1" style={{ color: t.text }}>设置</span>
           <button {...press(onClose)}
-            className="p-1 cursor-pointer" style={{ color: t.textMuted, borderRadius: R - 3 }}
+            aria-label="关闭设置" title="关闭"
+            className="flex items-center justify-center w-7 h-7 cursor-pointer" style={{ color: t.textMuted, borderRadius: R - 3 }}
             onMouseEnter={(e) => (e.currentTarget.style.background = t.inputBg)}
             onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
             <X size={15} />
@@ -4058,26 +4082,31 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId, vi
 
         <div className="flex flex-1 overflow-hidden">
           {/* First-level menu */}
-          <div className="flex-shrink-0 flex flex-col gap-0.5 py-3 px-2"
-            style={{ width: 190, borderRight: `0.5px solid ${t.border}`, background: t.isDark ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.015)" }}>
-            {MENU.map((m) => {
+          <nav aria-label="设置分类" className="flex-shrink-0 flex flex-col py-2.5 px-2 overflow-y-auto"
+            style={{ width: 174, borderRight: `0.5px solid ${t.border}`, background: t.isDark ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.015)" }}>
+            {MENU.map((m, index) => {
               const active = section === m.key;
               return (
-                <button key={m.key} {...press(() => setSection(m.key))}
-                  className="flex items-center gap-2.5 px-2.5 py-2 text-left cursor-pointer transition-colors"
-                  style={{ borderRadius: R - 3, background: active ? t.accentBg : "transparent",
-                    color: active ? t.accentFg : t.textSec }}
-                  onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = t.rowHover; }}
-                  onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}>
-                  <m.Icon size={14} style={{ color: active ? t.accent : t.textMuted }} />
-                  <span className="text-xs font-medium">{m.label}</span>
-                </button>
+                <div key={m.key}>
+                  {(index === 0 || MENU[index - 1].group !== m.group) && (
+                    <div className="px-2.5 pt-2 pb-1 text-[10px] font-semibold" style={{ color: t.textFaint }}>{m.group}</div>
+                  )}
+                  <button {...press(() => setSection(m.key))} aria-current={active ? "page" : undefined}
+                    className="flex items-center gap-2.5 w-full px-2.5 py-1.5 text-left cursor-pointer transition-colors"
+                    style={{ borderRadius: R - 3, background: active ? t.accentBg : "transparent",
+                      color: active ? t.accentFg : t.textSec }}
+                    onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = t.rowHover; }}
+                    onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}>
+                    <m.Icon size={14} aria-hidden="true" style={{ color: active ? t.accent : t.textMuted }} />
+                    <span className="text-[12px] font-medium">{m.label}</span>
+                  </button>
+                </div>
               );
             })}
-          </div>
+          </nav>
 
           {/* Second-level content */}
-          <div className="flex-1 overflow-y-auto px-6 py-5">
+          <div className="flex-1 overflow-y-auto px-6 py-5 overscroll-contain">
             {section === "identity" && (
               <IdentitySettings identities={identities} setIdentities={setIdentities}
                 defaultId={defaultId} setDefaultId={setDefaultId} />
@@ -4093,7 +4122,7 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId, vi
             {section === "projects" && <ProjectPrefsSettings identities={identities} />}
             {section === "daily" && (
               <DailyCheckSettings cfg={dailyCheck} setCfg={setDailyCheck}
-                onRunNow={onRunCheckNow} busy={checkBusy} projectCount={projectCount} />
+                onRunNow={onRunCheckNow} busy={checkBusy} progress={checkProgress} projectCount={projectCount} />
             )}
             {section === "appearance" && (
               <AppearanceSettings vibrancy={vibrancy} setVibrancy={setVibrancy}
@@ -4329,6 +4358,9 @@ export default function App() {
   useEffect(() => { localStorage.setItem("gitkit.activeProjectId", activeProjectId); }, [activeProjectId]);
 
   const [selectedCommit, setSelectedCommit]   = useState<Commit | null>(null);
+  const [commitQuery, setCommitQuery] = useState("");
+  const deferredCommitQuery = useDeferredValue(commitQuery.trim().toLocaleLowerCase());
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [selectedFile, setSelectedFile]       = useState<CommitFile | null>(null);
   const [viewChanges, setViewChanges]         = useState(false);
   const [currentBranch, setCurrentBranch]     = useState(activeProject?.branch ?? "");
@@ -4341,6 +4373,18 @@ export default function App() {
   // Stash under inspection (with its loaded files) + the file whose diff is shown.
   const [selectedStash, setSelectedStash] = useState<(Stash & { files: CommitFile[] }) | null>(null);
   const [selectedStashFile, setSelectedStashFile] = useState<CommitFile | null>(null);
+
+  useEffect(() => {
+    const focusSearch = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+        if (document.querySelector('[role="dialog"]')) return;
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", focusSearch);
+    return () => window.removeEventListener("keydown", focusSearch);
+  }, []);
 
   // Right-click menu. Native (webview) menu is suppressed everywhere except text
   // fields; only elements that call openCtx get an actual menu.
@@ -4540,9 +4584,15 @@ export default function App() {
   const base = isReal && hiddenBranches.length > 0
     ? commits.filter((c) => { const m = memberOf(c); return m.length === 0 || m.some((n) => !hiddenBranches.includes(n)); })
     : commits;
-  const displayCommits = focusActive ? (focusInfo?.list ?? []) : base;
+  const scopedCommits = focusActive ? (focusInfo?.list ?? []) : base;
+  const displayCommits = deferredCommitQuery
+    ? scopedCommits.filter((c) => [
+        c.message, c.body, c.author.name, c.author.email, c.hash, c.fullHash,
+        c.branchLabel, ...(c.branchLabels ?? []), ...(c.tags ?? []),
+      ].filter(Boolean).join("\n").toLocaleLowerCase().includes(deferredCommitQuery))
+    : scopedCommits;
   const displayGraph = (() => {
-    if (!isReal || (!focusActive && hiddenBranches.length === 0)) return graphRows;
+    if (!deferredCommitQuery && (!isReal || (!focusActive && hiddenBranches.length === 0))) return graphRows;
     const set = new Set(displayCommits.map((c) => c.fullHash));
     return computeGraph(displayCommits.map((c) => ({ ...c, parents: c.parents.filter((p) => set.has(p)) })));
   })();
@@ -5053,6 +5103,7 @@ export default function App() {
   const [dailyCheck, setDailyCheckState] = useState<DailyCheck>(loadDailyCheck);
   const setDailyCheck = (c: DailyCheck) => { setDailyCheckState(c); saveDailyCheck(c); };
   const [checkBusy, setCheckBusy] = useState(false);
+  const [checkProgress, setCheckProgress] = useState<CheckProgress | null>(null);
   const [pullBusy, setPullBusy] = useState(false);
   const [updateRows, setUpdateRows] = useState<UpdateRow[] | null>(null);
   const checkRunning = useRef(false); // guards against overlapping runs
@@ -5068,7 +5119,9 @@ export default function App() {
     const rows: UpdateRow[] = [];
     // Sequential on purpose: parallel fetches across repos fight over the network
     // and can trigger several credential prompts at once.
-    for (const p of list) {
+    for (let index = 0; index < list.length; index++) {
+      const p = list[index];
+      setCheckProgress({ current: index + 1, total: list.length, project: p.name });
       try {
         const rems = await loadRemotes(p.path);
         if (rems.length === 0) continue; // local-only repo — nothing to check
@@ -5091,6 +5144,7 @@ export default function App() {
     setReloadTick((n) => n + 1);
     checkRunning.current = false;
     setCheckBusy(false);
+    setCheckProgress(null);
     // Stamp the run even when nothing was found, so it doesn't repeat all day.
     setDailyCheckState((prev) => { const next = { ...prev, lastRun: Date.now() }; saveDailyCheck(next); return next; });
 
@@ -5107,6 +5161,16 @@ export default function App() {
     }
     if (tid) toast.dismiss(tid);
     setUpdateRows(rows);
+    if (!manual) {
+      try {
+        const appWindow = getCurrentWindow();
+        if (!(await appWindow.isFocused())) {
+          await appWindow.requestUserAttention(UserAttentionType.Informational);
+        }
+      } catch {
+        // Browser previews do not expose native window attention APIs.
+      }
+    }
   };
 
   // Apply the check's findings: a local fast-forward per project (the commits are
@@ -5548,27 +5612,22 @@ export default function App() {
   return (
     <ThemeCtx.Provider value={theme}>
       {/* Fills the native macOS window */}
-      <div className="flex flex-col w-full h-screen overflow-hidden"
-        style={{ background: theme.bg, isolation: "isolate" }}>
+      <div className="flex flex-col w-full h-[100dvh] overflow-hidden"
+        style={{ background: theme.bg, isolation: "isolate", colorScheme: effectiveDark ? "dark" : "light",
+          "--gk-accent": theme.accent } as React.CSSProperties}>
 
           <Toaster position="bottom-center" theme={effectiveDark ? "dark" : "light"}
             toastOptions={{ style: { background: theme.glass, backdropFilter: "blur(20px)",
               border: `0.5px solid ${theme.glassBorder}`, color: theme.text,
               fontSize: 12, fontFamily: "inherit", borderRadius: R } }} />
 
-          <TitleBar projects={projects} activeId={activeProjectId} branch={currentBranch}
+          <TitleBar projects={projects} activeId={activeProjectId}
             themeMode={themeMode} onThemeCycle={cycleTheme}
-            onSelectProject={handleSelectProject} onOpenNew={handleOpenNew}
-            onCloneNew={() => setCloneOpen(true)}
+            onSelectProject={handleSelectProject} onCloseProject={handleCloseProject}
+            onOpenNew={handleOpenNew} onCloneNew={() => setCloneOpen(true)}
             onOpenSettings={() => setSettingsOpen(true)} />
 
-          <ProjectTabBar projects={projects} activeId={activeProjectId}
-            onSelect={handleSelectProject}
-            onClose={handleCloseProject}
-            onAdd={handleOpenNew} />
-
-          <ActionBar onClone={() => setCloneOpen(true)}
-            onCreateBranch={activeProject ? () => setCreateBranchOpen(true) : undefined}
+          <ActionBar onCreateBranch={activeProject ? () => setCreateBranchOpen(true) : undefined}
             onFetch={activeProject ? () => runGitAction("fetch") : undefined}
             onPull={activeProject ? () => runGitAction("pull") : undefined}
             onPush={activeProject ? () => runGitAction("push") : undefined}
@@ -5654,13 +5713,30 @@ export default function App() {
                 animates smoothly and the left ~380px stays visible & clickable. */}
             <div className="relative flex-1 overflow-hidden">
             <div className="absolute inset-0 flex flex-col overflow-hidden">
-              <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2.5"
-                style={{ borderBottom: `0.5px solid ${theme.border}` }}>
-                <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                  <circle cx="5.5" cy="5.5" r="4" stroke={theme.textFaint} strokeWidth="1.5" />
-                  <path d="M9 9L12 12" stroke={theme.textFaint} strokeWidth="1.5" strokeLinecap="round" />
-                </svg>
-                <span className="text-xs" style={{ color: theme.textFaint }}>搜索提交…</span>
+              <div className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5"
+                style={{ borderBottom: `0.5px solid ${theme.border}`, background: theme.bg }}>
+                <label className="gk-search-field flex items-center gap-2 flex-1 max-w-[340px] px-2.5 py-1.5"
+                  style={{ background: theme.bgPanel, border: `0.5px solid ${theme.inputBorder}`,
+                    borderRadius: R - 3, boxShadow: theme.isDark ? "inset 0 1px 0 rgba(255,255,255,0.025)" : "inset 0 1px 0 rgba(255,255,255,0.75)" }}>
+                  <Search size={13} aria-hidden="true" style={{ color: theme.textFaint }} />
+                  <input ref={searchInputRef} value={commitQuery}
+                    onChange={(e) => setCommitQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Escape") { setCommitQuery(""); e.currentTarget.blur(); } }}
+                    aria-label="搜索提交" placeholder="搜索消息、作者、分支或哈希…"
+                    autoComplete="off" spellCheck={false}
+                    className="gk-search-input min-w-0 flex-1 bg-transparent text-xs outline-none"
+                    style={{ color: theme.text }} />
+                  {commitQuery && (
+                    <button type="button" onClick={() => { setCommitQuery(""); searchInputRef.current?.focus(); }}
+                      aria-label="清空搜索" className="flex items-center justify-center w-5 h-5"
+                      style={{ color: theme.textMuted, borderRadius: 5 }}>
+                      <X size={11} aria-hidden="true" />
+                    </button>
+                  )}
+                </label>
+                <span className="ml-auto text-[11px] tabular-nums" style={{ color: theme.textFaint }}>
+                  {deferredCommitQuery ? `${displayCommits.length} 条结果` : `${displayCommits.length} 次提交`}
+                </span>
               </div>
               {focusActive && (
                 <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5"
@@ -5685,29 +5761,28 @@ export default function App() {
                   const sel = detailOpen && viewChanges;
                   return (
                   <div className="sticky top-0" style={{ zIndex: 20, background: theme.bg }}>
-                  {/* Amber identity — a left accent bar + tinted band + filled icon make
-                      the working-changes entry read as an actionable banner, not just
-                      another commit row. Colours come from theme.amber so it tracks the
-                      active palette (and stays legible in light & dark). */}
+                  {/* A restrained semantic marker keeps working changes visible without
+                      competing with the active blue interaction colour. */}
                   <button onClick={() => { setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
-                    className="relative w-full flex items-center gap-2.5 px-3.5 py-2.5 cursor-pointer text-left transition-colors"
+                    className="relative w-full flex items-center gap-3 px-4 py-3 cursor-pointer text-left transition-colors"
                     style={{ borderBottom: `0.5px solid ${theme.border}`,
-                      background: sel ? theme.rowSelected : theme.amber + "14",
-                      boxShadow: `inset 3px 0 0 ${theme.amber}` }}
-                    onMouseEnter={(e) => { if (!sel) e.currentTarget.style.background = theme.amber + "24"; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = sel ? theme.rowSelected : theme.amber + "14"; }}>
-                    <div className="flex items-center justify-center rounded-full flex-shrink-0"
-                      style={{ width: 26, height: 26, background: theme.amber, boxShadow: `0 2px 6px ${theme.amber}55` }}>
-                      <FileText size={13} style={{ color: "#fff" }} />
+                      background: sel ? theme.accentBg : theme.bgPanel,
+                      boxShadow: `inset 2px 0 0 ${sel ? theme.accent : theme.amber}` }}
+                    onMouseEnter={(e) => { if (!sel) e.currentTarget.style.background = theme.rowHover; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = sel ? theme.accentBg : theme.bgPanel; }}>
+                    <div className="flex items-center justify-center flex-shrink-0"
+                      style={{ width: 28, height: 28, borderRadius: R - 3, background: theme.amber + "16" }}>
+                      <FileText size={14} strokeWidth={1.8} style={{ color: theme.amber }} />
                     </div>
                     <div className="flex flex-col min-w-0 flex-1">
                       <span className="text-sm font-semibold truncate"
-                        style={{ color: sel ? theme.accentFg : theme.text }}>未提交的更改</span>
+                        style={{ color: theme.text }}>未提交的更改</span>
                       <span className="text-[11px]" style={{ color: theme.textMuted }}>提交到 {currentBranch}</span>
                     </div>
-                    <span className="flex items-center justify-center rounded-full text-[11px] font-bold flex-shrink-0"
-                      style={{ minWidth: 20, height: 20, padding: "0 6px",
-                        background: theme.amber, color: "#fff", boxShadow: `0 0 0 3px ${theme.amber}22` }}>{changesCount}</span>
+                    <span className="flex items-center justify-center text-[11px] font-semibold flex-shrink-0 tabular-nums"
+                      style={{ minWidth: 22, height: 20, padding: "0 6px", borderRadius: 6,
+                        background: theme.amber + "14", color: theme.amber,
+                        border: `0.5px solid ${theme.amber}38` }}>{changesCount}</span>
                   </button>
                   </div>
                   );
@@ -5735,7 +5810,13 @@ export default function App() {
                   <div key={activeProject?.path} className="gk-reveal">
                     {/* A branch sitting exactly on its base has no commits of its
                         own — say so instead of rendering an empty timeline. */}
-                    {focusActive && displayCommits.length === 0 && (
+                    {deferredCommitQuery && displayCommits.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center gap-1.5 px-6 py-16 text-center">
+                        <Search size={18} style={{ color: theme.textFaint }} />
+                        <span className="text-xs font-medium" style={{ color: theme.textSec }}>没有匹配的提交</span>
+                        <span className="text-[11px]" style={{ color: theme.textMuted }}>尝试消息、作者、分支名或提交哈希</span>
+                      </div>
+                    ) : focusActive && displayCommits.length === 0 && (
                       <div className="flex flex-col items-center justify-center gap-1.5 px-6 py-16 text-center">
                         <GitBranch size={18} style={{ color: theme.textFaint }} />
                         <span className="text-xs font-medium" style={{ color: theme.textSec }}>该分支还没有独立提交</span>
@@ -5885,7 +5966,7 @@ export default function App() {
             themeMode={themeMode} setThemeMode={setThemeMode}
             dailyCheck={dailyCheck} setDailyCheck={setDailyCheck}
             onRunCheckNow={() => void runUpdateCheck(true)}
-            checkBusy={checkBusy} projectCount={projects.length}
+            checkBusy={checkBusy} checkProgress={checkProgress} projectCount={projects.length}
             onClose={() => setSettingsOpen(false)} />
         )}
 
