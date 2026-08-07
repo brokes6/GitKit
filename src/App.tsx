@@ -579,6 +579,9 @@ const THEME_META: Record<ThemeMode, { Icon: typeof Moon; label: string }> = {
 // Windows has no native overlay title bar, so we render our own controls there.
 // macOS keeps its native traffic lights (Overlay title bar) and skips these.
 const IS_WINDOWS = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+const WINDOW_CONTROL_WIDTH = 44;
+const WINDOW_CONTROLS_WIDTH = WINDOW_CONTROL_WIDTH * 3;
+const TITLEBAR_DRAG_STRIP_HEIGHT = 8;
 
 // Minimize / maximize / close for the borderless Windows window.
 function WindowControls() {
@@ -592,15 +595,15 @@ function WindowControls() {
   return (
     <div className="flex items-stretch self-stretch flex-shrink-0" style={{ marginRight: -16, marginLeft: 6 }}>
       <button title="最小化" aria-label="最小化窗口" onClick={() => { void win.minimize(); }} className={cls}
-        style={{ width: 44, color: t.textMuted }} {...hover(t.inputBg, t.text)}>
+        style={{ width: WINDOW_CONTROL_WIDTH, color: t.textMuted }} {...hover(t.inputBg, t.text)}>
         <Minus size={15} />
       </button>
       <button title="最大化 / 还原" aria-label="最大化或还原窗口" onClick={() => { void win.toggleMaximize(); }} className={cls}
-        style={{ width: 44, color: t.textMuted }} {...hover(t.inputBg, t.text)}>
+        style={{ width: WINDOW_CONTROL_WIDTH, color: t.textMuted }} {...hover(t.inputBg, t.text)}>
         <Square size={11} />
       </button>
       <button title="关闭" aria-label="关闭窗口" onClick={() => { void win.close(); }} className={cls}
-        style={{ width: 44, color: t.textMuted }} {...hover("#e81123", "#fff")}>
+        style={{ width: WINDOW_CONTROL_WIDTH, color: t.textMuted }} {...hover("#e81123", "#fff")}>
         <X size={16} />
       </button>
     </div>
@@ -618,6 +621,14 @@ function TitleBar({ projects, activeId, themeMode, onThemeCycle, onSelectProject
   return (
     <div data-tauri-drag-region className="relative h-12 flex items-stretch flex-shrink-0 select-none"
       style={{ ...glassStyle(t), paddingLeft: IS_WINDOWS ? 8 : 92, zIndex: 50 }}>
+      {/* Stays visually transparent while keeping a drag target above full tab rows. */}
+      <div data-tauri-drag-region aria-hidden="true" className="absolute top-0"
+        style={{
+          left: IS_WINDOWS ? 0 : 92,
+          right: IS_WINDOWS ? WINDOW_CONTROLS_WIDTH : 0,
+          height: TITLEBAR_DRAG_STRIP_HEIGHT,
+          zIndex: 1,
+        }} />
       <ProjectTabBar projects={projects} activeId={activeId} embedded
         onSelect={onSelectProject} onClose={onCloseProject} onAdd={onOpenNew} onClone={onCloneNew} />
       <div className="flex items-center gap-0.5 px-2 flex-shrink-0"
@@ -5828,7 +5839,12 @@ export default function App() {
                       </div>
                     )}
                     {displayCommits.map((commit, i) => (
-                      <CommitRow key={commit.fullHash} commit={commit}
+                      <CommitRow
+                        // WKWebView can retain a content-visibility paint cache when
+                        // the graph gutter changes width. Remount the row on layout
+                        // changes so text and graph geometry paint together.
+                        key={`${commit.fullHash}:${graphW}:${laneStep}`}
+                        commit={commit}
                         graphInfo={displayGraph[i]}
                         selected={detailOpen && !viewChanges && (commit.isStash
                           ? selectedStash?.index === 0
