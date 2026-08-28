@@ -74,10 +74,12 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             git::open_repo,
+            git::reveal_in_file_manager,
             git::git_branches,
             git::git_remotes,
             git::git_log,
             git::git_status,
+            git::git_status_paths,
             git::commit_files,
             git::commit_file_diff,
             git::working_file_diff,

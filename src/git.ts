@@ -18,6 +18,11 @@ export interface RepoInfo {
   name: string;
   current_branch: string;
 }
+export interface WorkingTreeChanged {
+  path: string;
+  paths: string[];
+  full: boolean;
+}
 interface RCommit {
   hash: string;
   short_hash: string;
@@ -25,6 +30,8 @@ interface RCommit {
   author_name: string;
   author_email: string;
   date: string;
+  committer_date: string;
+  patch_id: string | null;
   refs: string[];
   subject: string;
   body: string;
@@ -219,8 +226,15 @@ export async function openRepo(path: string): Promise<RepoInfo> {
   return invoke<RepoInfo>("open_repo", { path });
 }
 
+/** Reveal a file in Finder / Explorer, or open the repository folder when no
+ *  file is selected. Missing historical files fall back to an existing parent. */
+export async function revealInFileManager(path: string, file?: string): Promise<void> {
+  await invoke("reveal_in_file_manager", { path, file: file ?? null });
+}
+
 /** Start watching a repo's working tree; the backend emits `working-tree-changed`
- *  (payload = the repo path) on any file change outside `.git/`. Idempotent. */
+ *  (payload = the repo path) for worktree edits and status-relevant Git metadata.
+ *  Idempotent. */
 export async function startWatch(path: string): Promise<void> {
   await invoke("start_watch", { path });
 }
@@ -362,6 +376,8 @@ export async function loadHistory(path: string): Promise<Commit[]> {
       color: authorColor(c.author_email),
     },
     date: c.date,
+    committerDate: c.committer_date,
+    patchId: c.patch_id ?? undefined,
     lane: 0,
     tags: cleanRefs(c.refs),
     parents: c.parents,
@@ -372,6 +388,16 @@ export async function loadHistory(path: string): Promise<Commit[]> {
 
 export async function loadStatus(path: string): Promise<WorkingFile[]> {
   const raw = await invoke<RStatus[]>("git_status", { path });
+  return mapStatus(raw);
+}
+
+/** Status only for paths collected from one native watcher burst. */
+export async function loadStatusPaths(path: string, paths: string[]): Promise<WorkingFile[]> {
+  const raw = await invoke<RStatus[]>("git_status_paths", { path, paths });
+  return mapStatus(raw);
+}
+
+function mapStatus(raw: RStatus[]): WorkingFile[] {
   const map = (l: string): WorkingFile["status"] =>
     l === "A" ? "added" : l === "D" ? "deleted" : l === "?" ? "untracked" : "modified";
   return raw.map((s) => ({

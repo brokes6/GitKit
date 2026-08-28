@@ -84,6 +84,67 @@ select:focus-visible,
 }
 .gk-reveal { animation: gk-reveal 0.26s cubic-bezier(0.32, 0.72, 0, 1); }
 
+/* Smart-merge disclosure: the row and graph remain one continuous object while
+   the exact commits are revealed. Exit is slightly quicker than entrance. */
+.gk-smart-row {
+  display: grid;
+  grid-template-rows: var(--gk-smart-row-height);
+  transition: grid-template-rows 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.gk-smart-details {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition:
+    grid-template-rows 170ms cubic-bezier(0.4, 0, 1, 1),
+    opacity 120ms ease-in,
+    transform 170ms cubic-bezier(0.4, 0, 1, 1);
+}
+
+.gk-smart-details[data-expanded="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+  transition:
+    grid-template-rows 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 160ms ease-out 30ms,
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Sidebar hierarchy disclosures stay mounted so both opening and closing keep
+   their spatial relationship. Visibility also removes collapsed controls from
+   keyboard navigation without requiring per-branch focus bookkeeping. */
+.gk-sidebar-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transform: translateY(-3px);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    grid-template-rows 160ms cubic-bezier(0.4, 0, 1, 1),
+    opacity 110ms ease-in,
+    transform 160ms cubic-bezier(0.4, 0, 1, 1),
+    visibility 0s linear 160ms;
+}
+
+.gk-sidebar-disclosure[data-expanded="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+  pointer-events: auto;
+  transition:
+    grid-template-rows 200ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 150ms ease-out 20ms,
+    transform 200ms cubic-bezier(0.16, 1, 0.3, 1),
+    visibility 0s linear;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     scroll-behavior: auto !important;

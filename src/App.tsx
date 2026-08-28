@@ -5,7 +5,7 @@ import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import {
   GitBranch, GitMerge, GitPullRequest, Upload, Download, RefreshCw,
-  Layers, ChevronRight, Copy, Check, GitCommit, FileText,
+  Layers, ChevronRight, ChevronDown, Copy, Check, GitCommit, FileText,
   Moon, Sun, Monitor, Plus, Minus, X, FolderOpen, ArrowRight,
   Pin, EyeOff, Eye, Folder, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
   Settings, UserPlus, Trash2, Star, Users, Github, Laptop, Sparkles, RotateCcw, TerminalSquare,
@@ -13,15 +13,16 @@ import {
 } from "lucide-react";
 import {
   pickRepoFolder, openRepo, loadBranches, loadRemotes, loadHistory,
-  loadStatus, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
+  loadStatus, loadStatusPaths, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
   attributeBranches, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
   createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, fetchAll, pull, push, gitlabTest, githubTest,
   createPullRequest, branchColor, setVibrancy, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
-  cancelGitOp, isCancelled, checkUpdates, syncLocal,
+  cancelGitOp, isCancelled, checkUpdates, syncLocal, revealInFileManager,
 } from "./git";
-import type { DepInfo, Tag, RepoInfo, CloneProgress, GitProgress, BehindBranch } from "./git";
+import type { DepInfo, Tag, RepoInfo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged } from "./git";
+import { buildSmartMergeCommits, commitBranchName, orderedEquivalentCommits } from "./smartMerge";
 
 // ─── theme ────────────────────────────────────────────────────────────────────
 
@@ -416,12 +417,16 @@ export interface CommitFile {
 }
 export interface Commit {
   hash: string; fullHash: string; message: string; body?: string;
-  author: Author; date: string; lane: number; tags?: string[]; parents: string[];
+  author: Author; date: string; committerDate?: string; patchId?: string;
+  lane: number; tags?: string[]; parents: string[];
   stats: { additions: number; deletions: number; files: number };
   files: CommitFile[];
   branchLabel?: string;       // primary branch (drives lane colour)
   branchLabels?: string[];    // every branch whose first-parent backbone reaches here
   isStash?: boolean;          // stash tip — rendered as a single collapsed node
+  // Smart-merge presentation only. The commits remain independent Git objects;
+  // this list lets one logical row disclose every matching branch/hash.
+  equivalentCommits?: Commit[];
 }
 // `worktree` — absolute path of the linked worktree holding this branch, when
 // one does. Such a branch can't be checked out or deleted until it's released.
@@ -468,6 +473,13 @@ function formatFullDate(dateStr: string): string {
   return new Date(dateStr).toLocaleString("zh-CN", {
     year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
   });
+}
+
+function fileManagerActionLabel(): string {
+  const agent = typeof navigator === "undefined" ? "" : navigator.userAgent.toLocaleLowerCase();
+  if (agent.includes("macintosh") || agent.includes("mac os")) return "在访达中打开";
+  if (agent.includes("windows")) return "在文件资源管理器中打开";
+  return "在文件管理器中打开";
 }
 
 // ─── Avatar ───────────────────────────────────────────────────────────────────
@@ -971,6 +983,19 @@ function SidebarSection({ label, open, onToggle }: { label: string; open: boolea
   );
 }
 
+function SidebarDisclosure({ open, className = "", children }: {
+  open: boolean; className?: string; children: React.ReactNode;
+}) {
+  return (
+    <div className="gk-sidebar-disclosure" data-expanded={open ? "true" : "false"}
+      aria-hidden={!open}>
+      <div className="min-h-0 overflow-hidden">
+        <div className={className}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
 function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidden, setHidden,
   pinned, setPinned, collapsed, setCollapsed,
   onFocus, onShowAll, onHoverBranch, onCheckout, onBranchContext, onSyncRemote, onRemoteContext, onStashClick, onStashApply, onStashDrop, onStashContext, selectedStashIndex }: {
@@ -1126,8 +1151,7 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
           {focusBranch === null && <Check size={12} strokeWidth={2.2} style={{ color: t.accent }} />}
         </button>
         <SidebarSection label="分支" open={branchesOpen} onToggle={() => setBranchesOpen(!branchesOpen)} />
-        {branchesOpen && (
-          <div className="pb-2">
+        <SidebarDisclosure open={branchesOpen} className="pb-2">
             {pinnedBranches.length > 0 && (
               <>
                 <div className="flex items-center gap-1 px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide"
@@ -1162,7 +1186,9 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
                     </button>
                     <span className="text-[11px] flex-shrink-0 group-hover:hidden" style={{ color: t.textFaint }}>{list.length}</span>
                   </div>
-                  {!isCol && list.map((b) => renderBranch(b, b.name.slice(folder.length + 1), true))}
+                  <SidebarDisclosure open={!isCol}>
+                    {list.map((b) => renderBranch(b, b.name.slice(folder.length + 1), true))}
+                  </SidebarDisclosure>
                 </div>
               );
             })}
@@ -1177,27 +1203,27 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
                   <ChevronRight size={10} className="flex-shrink-0 transition-transform duration-200"
                     style={{ transform: showHidden ? "rotate(90deg)" : "rotate(0deg)" }} />
                 </button>
-                {showHidden && hiddenBranches.map((b) => (
-                  <div key={b.name} className="group flex items-center gap-2 pr-2 py-1.5"
-                    style={{ ...itemStyle(false), paddingLeft: 26, opacity: 0.65 }}>
-                    <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: b.color, opacity: 0.4 }} />
-                    <span className="text-xs flex-1 truncate" style={{ color: t.textMuted }}>{b.name}</span>
-                    <button onClick={() => toggleHide(b.name)} className="p-0.5" title="取消隐藏"
-                      style={{ color: t.textMuted }}>
-                      <Eye size={11} />
-                    </button>
-                  </div>
-                ))}
+                <SidebarDisclosure open={showHidden}>
+                  {hiddenBranches.map((b) => (
+                    <div key={b.name} className="group flex items-center gap-2 pr-2 py-1.5"
+                      style={{ ...itemStyle(false), paddingLeft: 26, opacity: 0.65 }}>
+                      <div className="w-2 h-2 rounded-full flex-shrink-0" style={{ background: b.color, opacity: 0.4 }} />
+                      <span className="text-xs flex-1 truncate" style={{ color: t.textMuted }}>{b.name}</span>
+                      <button onClick={() => toggleHide(b.name)} className="p-0.5" title="取消隐藏"
+                        style={{ color: t.textMuted }}>
+                        <Eye size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </SidebarDisclosure>
               </>
             )}
-          </div>
-        )}
+        </SidebarDisclosure>
       </div>
 
       <div className="pt-1" style={{ borderTop: `0.5px solid ${t.border}` }}>
         <SidebarSection label="远程" open={remotesOpen} onToggle={() => setRemotesOpen(!remotesOpen)} />
-        {remotesOpen && (
-          <div className="pb-2">
+        <SidebarDisclosure open={remotesOpen} className="pb-2">
             {remotes.length === 0 && (
               <div className="px-4 py-1.5 text-[11px]" style={{ color: t.textFaint }}>无远程</div>
             )}
@@ -1217,7 +1243,8 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
                     <span className="text-xs font-medium flex-1 truncate text-left">{r.name}</span>
                     <span className="text-[11px] flex-shrink-0" style={{ color: t.textFaint }}>{r.branches.length}</span>
                   </div>
-                  {open && (() => {
+                  <SidebarDisclosure open={open}>
+                    {(() => {
                     // Group this remote's branches into folders by the first path
                     // segment (feat/master → "feat"), same as the local tree. Folder
                     // collapse state is namespaced by remote ("origin/feat") so it's
@@ -1249,24 +1276,25 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
                                 <span className="text-[11px] font-medium flex-1 truncate text-left">{folder}</span>
                                 <span className="text-[11px] flex-shrink-0" style={{ color: t.textFaint }}>{list.length}</span>
                               </div>
-                              {!isCol && list.map((leaf) => renderRemoteLeaf(r.name, leaf, leaf.slice(folder.length + 1), 56))}
+                              <SidebarDisclosure open={!isCol}>
+                                {list.map((leaf) => renderRemoteLeaf(r.name, leaf, leaf.slice(folder.length + 1), 56))}
+                              </SidebarDisclosure>
                             </div>
                           );
                         })}
                       </>
                     );
-                  })()}
+                    })()}
+                  </SidebarDisclosure>
                 </div>
               );
             })}
-          </div>
-        )}
+        </SidebarDisclosure>
       </div>
 
       <div className="pt-1" style={{ borderTop: `0.5px solid ${t.border}` }}>
         <SidebarSection label="储藏" open={stashesOpen} onToggle={() => setStashesOpen(!stashesOpen)} />
-        {stashesOpen && (
-          <div className="pb-2">
+        <SidebarDisclosure open={stashesOpen} className="pb-2">
             {stashes.length === 0 && (
               <div className="px-3 py-1.5 text-[11px]" style={{ color: t.textFaint, margin: "0 8px" }}>
                 暂无储藏
@@ -1305,10 +1333,9 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
                     <Trash2 size={12} />
                   </button>
                 </div>
-              </div>
+                </div>
             ); })}
-          </div>
-        )}
+        </SidebarDisclosure>
       </div>
     </div>
   );
@@ -1427,15 +1454,19 @@ function RefPill({ b, onDblClick }: {
 }
 
 
-function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GRAPH_W_MAX, laneStep = LANE_STEP, remoteNames = [], onBranchDblClick, onClick, onContextMenu }: {
+function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GRAPH_W_MAX, laneStep = LANE_STEP, remoteNames = [], smartExpanded = false, onToggleSmart, onRelatedCommitClick, onBranchDblClick, onClick, onContextMenu }: {
   commit: Commit; graphInfo: GraphRowInfo; selected: boolean; highlight?: boolean; graphW?: number; laneStep?: number;
-  remoteNames?: string[]; onBranchDblClick?: (name: string) => void; onClick: () => void;
+  remoteNames?: string[]; smartExpanded?: boolean; onToggleSmart?: () => void;
+  onRelatedCommitClick?: (commit: Commit) => void;
+  onBranchDblClick?: (name: string) => void; onClick: () => void;
   onContextMenu?: (e: React.MouseEvent) => void;
 }) {
   const t = useTheme();
   const [hovered, setHovered] = useState(false);
   const laneColor = graphInfo.colors?.dot ?? getLC(graphInfo.dotLane);
   const isMerge = commit.parents.length > 1;
+  const equivalents = orderedEquivalentCommits(commit);
+  const isSmartMerged = equivalents.length > 1;
   // Refs (branch tips / HEAD / tags) only ever sit on their tip commit, so they
   // render inline once — no separate gutter column, no per-commit backbone list.
   const hasRefs = refBadges(commit.tags ?? [], remoteNames).length > 0;
@@ -1445,15 +1476,19 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
   const parts: number[] = [];
   if (hasRefs) parts.push(20);   // inline ref-capsule line (tip commits only)
   parts.push(22, 20);            // message + meta
+  // Keep the compact association and its disclosure in one flex child. The
+  // inner grid owns the reveal, so the collapsed row keeps its original height.
+  if (isSmartMerged) parts.push(24 + (smartExpanded ? 6 + equivalents.length * 30 : 0));
   const rowH = 20 + parts.reduce((a, b) => a + b, 0) + (parts.length - 1) * 6;
   return (
     <div onClick={onClick}
+      data-commit-hash={commit.fullHash}
       onContextMenu={onContextMenu}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      className="relative cursor-pointer"
-      style={{ height: rowH, borderBottom: `0.5px solid ${t.border}`,
-        contentVisibility: "auto", containIntrinsicSize: `0 ${rowH}px` }}>
+      className="gk-smart-row relative cursor-pointer overflow-hidden"
+      style={{ "--gk-smart-row-height": `${rowH}px`, borderBottom: `0.5px solid ${t.border}`,
+        contentVisibility: "auto", containIntrinsicSize: `0 ${rowH}px` } as React.CSSProperties}>
       {/* Inset selection overlay keeps the graph topology readable. */}
       <div className="absolute pointer-events-none"
         style={{
@@ -1463,7 +1498,7 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
           transition: "background 0.1s",
           boxShadow: highlight && !selected ? `inset 0 0 0 0.5px ${laneColor}44` : "none",
         }} />
-      <div className="relative flex items-start">
+      <div className="relative flex items-start min-h-0 overflow-hidden">
         {/* Graph sits flush-left — the topology lanes carry the branch colours. */}
         <div style={{ width: graphW, flexShrink: 0 }}>
           <GraphRowSVG info={graphInfo} height={rowH} width={graphW} step={laneStep} stash={commit.isStash} />
@@ -1479,10 +1514,22 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
               <GitMerge size={13} className="flex-shrink-0" style={{ color: laneColor }}
                 aria-label="合并提交" />
             )}
-            <span className="text-sm leading-snug truncate"
+            <span className="text-sm leading-snug truncate flex-1 min-w-0"
               style={{ color: t.text, fontWeight: selected ? 600 : 500 }}>
               {commit.message}
             </span>
+            {isSmartMerged && (
+              <button type="button" aria-expanded={smartExpanded}
+                title="展开真实提交"
+                onClick={(e) => { e.stopPropagation(); onToggleSmart?.(); }}
+                className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] font-semibold flex-shrink-0 cursor-pointer"
+                style={{ color: t.accent2Fg, background: t.accent2Bg, borderRadius: R - 4 }}>
+                <Sparkles size={10} aria-hidden="true" />
+                {equivalents.length} 次提交
+                <ChevronDown size={10} aria-hidden="true"
+                  style={{ transform: smartExpanded ? "rotate(180deg)" : "none", transition: "transform 0.18s cubic-bezier(0.16, 1, 0.3, 1)" }} />
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-2 min-w-0">
             <Avatar author={commit.author} size={16} />
@@ -1492,6 +1539,57 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
               {formatRelativeTime(commit.date)}
             </span>
           </div>
+          {isSmartMerged && (
+            <div className="flex flex-col min-w-0">
+              <div className="flex items-center gap-1 min-w-0 overflow-hidden">
+                {equivalents.slice(0, 3).map((occurrence, index) => (
+                  <span key={occurrence.fullHash} className="contents">
+                    {index > 0 && <ArrowRight size={10} aria-hidden="true" className="flex-shrink-0" style={{ color: t.textFaint }} />}
+                    <button type="button"
+                      title={`查看 ${commitBranchName(occurrence)} · ${occurrence.fullHash}`}
+                      onClick={(e) => { e.stopPropagation(); onRelatedCommitClick?.(occurrence); }}
+                      className="flex items-center gap-1 min-w-0 px-1.5 py-0.5 cursor-pointer"
+                      style={{ color: t.textSec, background: t.inputBg, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 4 }}>
+                      <GitBranch size={10} aria-hidden="true" className="flex-shrink-0"
+                        style={{ color: branchColor(commitBranchName(occurrence)) }} />
+                      <span className="text-[11px] truncate">{commitBranchName(occurrence)}</span>
+                      <span className="text-[10px] font-mono flex-shrink-0" style={{ color: t.textFaint }}>{occurrence.hash}</span>
+                    </button>
+                  </span>
+                ))}
+                {equivalents.length > 3 && (
+                  <span className="text-[10px] flex-shrink-0" style={{ color: t.textMuted }}>+{equivalents.length - 3}</span>
+                )}
+              </div>
+              <div aria-hidden={!smartExpanded}
+                className="gk-smart-details"
+                data-expanded={smartExpanded ? "true" : "false"}>
+                <div className="min-h-0 overflow-hidden pt-1.5">
+                  <div style={{ background: t.inputBg, borderRadius: R - 3 }}>
+                    {equivalents.map((occurrence, index) => (
+                      <button key={occurrence.fullHash} type="button"
+                        tabIndex={smartExpanded ? 0 : -1}
+                        onClick={(e) => { e.stopPropagation(); onRelatedCommitClick?.(occurrence); }}
+                        className="w-full flex items-center gap-2 px-2 py-1.5 text-left cursor-pointer"
+                        style={{ borderTop: index > 0 ? `0.5px solid ${t.border}` : "none" }}>
+                        <span className="text-[10px] font-semibold w-7 flex-shrink-0" style={{ color: index === 0 ? t.accent2Fg : t.textMuted }}>
+                          {index === 0 ? "来源" : "遴选"}
+                        </span>
+                        <GitBranch size={10} aria-hidden="true" className="flex-shrink-0"
+                          style={{ color: branchColor(commitBranchName(occurrence)) }} />
+                        <span className="text-[11px] truncate" style={{ color: t.textSec }}>{commitBranchName(occurrence)}</span>
+                        <span className="text-[10px] font-mono flex-shrink-0" style={{ color: t.textFaint }}>{occurrence.hash}</span>
+                        <span className="text-[10px] ml-auto flex-shrink-0" style={{ color: t.textFaint }}>
+                          {formatRelativeTime(occurrence.committerDate ?? occurrence.date)}
+                        </span>
+                        <ChevronRight size={10} aria-hidden="true" className="flex-shrink-0" style={{ color: t.textFaint }} />
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -1674,8 +1772,9 @@ function FileDiffView({ files, selectedFile, onFileSelect, emptyHint = "无文�
   );
 }
 
-function CommitDetail({ commit, selectedFile, onFileSelect, onCherryPick, onCheckout, checkoutBranch }: {
+function CommitDetail({ commit, selectedFile, onFileSelect, onReveal, onCherryPick, onCheckout, checkoutBranch }: {
   commit: Commit; selectedFile: CommitFile | null; onFileSelect: (f: CommitFile | null) => void;
+  onReveal?: () => void;
   onCherryPick?: () => void; onCheckout?: () => void; checkoutBranch?: string | null;
 }) {
   const t = useTheme();
@@ -1715,6 +1814,20 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onCherryPick, onChec
             {copied ? <Check size={10} style={{ color: t.green }} /> : <Copy size={10} />}
             <span className="font-mono text-[11px]">{commit.hash}</span>
           </button>
+          {onReveal && (
+            <button onClick={onReveal}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 transition-colors duration-100 cursor-pointer"
+              style={{ background: t.inputBg, color: t.textMuted, borderRadius: R - 2,
+                border: `0.5px solid ${t.inputBorder}` }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = t.accentBg; e.currentTarget.style.color = t.accent; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = t.inputBg; e.currentTarget.style.color = t.textMuted; }}
+              title={selectedFile
+                ? `${fileManagerActionLabel()}：${selectedFile.path}`
+                : `${fileManagerActionLabel()}：仓库目录`}>
+              <FolderOpen size={11} />
+              <span className="text-[11px] font-medium">{fileManagerActionLabel()}</span>
+            </button>
+          )}
           {onCherryPick && (
             <button onClick={onCherryPick}
               className="flex items-center gap-1.5 px-2.5 py-1.5 transition-colors duration-100 cursor-pointer"
@@ -1880,8 +1993,16 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFile
   onDiscard: (file: string) => void; onDiscardAll: () => void;
 }) {
   const t = useTheme();
-  const [commitMsg, setCommitMsg] = useState("");
+  const [commitMsg, setCommitMsg] = useState(() => loadCommitDraft(projectKey));
   const [committing, setCommitting] = useState(false);
+
+  // This panel unmounts when the detail view closes. Persist one exact draft per
+  // repository so returning, switching projects, or restarting does not lose it.
+  useEffect(() => { setCommitMsg(loadCommitDraft(projectKey)); }, [projectKey]);
+  const updateCommitMsg = (message: string) => {
+    setCommitMsg(message);
+    saveCommitDraft(projectKey, message);
+  };
 
   // Committer: a remembered per-project choice wins; otherwise the default
   // identity. Selecting one persists it for this project.
@@ -1916,6 +2037,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFile
     setCommitting(true);
     try {
       await onCommit(commitMsg.trim(), staged.map((f) => f.path), identity);
+      saveCommitDraft(projectKey, "");
       setCommitMsg(""); onFileSelect(null);
     } catch (e) {
       toast.error(`提交失败：${e}`);
@@ -1957,7 +2079,8 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFile
 
   return (
     <div className="flex-shrink-0 flex flex-col overflow-hidden"
-      style={{ background: t.bgPanel, width: 340, borderRight: `0.5px solid ${t.border}` }}>
+      style={{ background: t.bgPanel, width: "clamp(260px, 23vw, 300px)",
+        borderRight: `0.5px solid ${t.border}` }}>
       <div className="flex-shrink-0" style={{ maxHeight: "42%", minHeight: 80, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <SectionHdr label="已暂存" count={staged.length} action="全部取消" onAction={unstageAll} />
         <div className="overflow-y-auto flex-1 py-1">
@@ -1991,7 +2114,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFile
 
       {/* Commit area */}
       <div className="flex-shrink-0 p-3" style={{ borderTop: `0.5px solid ${t.border}` }}>
-        <textarea value={commitMsg} onChange={(e) => setCommitMsg(e.target.value)}
+        <textarea value={commitMsg} onChange={(e) => updateCommitMsg(e.target.value)}
           placeholder="提交信息（必填）" rows={3}
           className="w-full resize-none text-xs p-2.5 outline-none transition-all"
           style={{ background: t.inputBg, color: t.text, fontFamily: "inherit",
@@ -2120,11 +2243,39 @@ function firstReadableFile(files: CommitFile[]): CommitFile | null {
   return files.find((f) => f.additions + f.deletions > 0) ?? files[0] ?? null;
 }
 
-// Same set of working files (by path + status)? Used to skip no-op status polls.
+// Same set of working files (including staging state)? Used to skip no-op refreshes.
 function sameWorking(a: WorkingFile[], b: WorkingFile[]): boolean {
   if (a.length !== b.length) return false;
-  const bm = new Map(b.map((f) => [f.path, f.status]));
-  return a.every((f) => bm.get(f.path) === f.status);
+  const bm = new Map(b.map((f) => [f.path, `${f.status}:${f.staged ? 1 : 0}`]));
+  return a.every((f) => bm.get(f.path) === `${f.status}:${f.staged ? 1 : 0}`);
+}
+
+function mergeWorkingPaths(previous: WorkingFile[], paths: string[], fresh: WorkingFile[]): WorkingFile[] {
+  const covers = (file: string, changed: string) => file === changed || file.startsWith(`${changed}/`);
+  const merged = new Map(
+    previous
+      .filter((file) => !paths.some((changed) => covers(file.path, changed)))
+      .map((file) => [file.path, file]),
+  );
+  for (const file of fresh) merged.set(file.path, file);
+  return [...merged.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+const REAL_CACHE_LIMIT = 2;
+const WATCHED_REPO_LIMIT = 2;
+const WARM_WATCH_TTL_MS = 5 * 60_000;
+const STATUS_DEBOUNCE_MS = 80;
+
+/** Keep the expensive history/graph cache bounded. `touch=false` updates a
+ * background repo without promoting it ahead of a repo the user actually used. */
+function cacheRealData(cache: Map<string, RealData>, path: string, data: RealData, touch = true): void {
+  if (touch) cache.delete(path);
+  cache.set(path, data);
+  while (cache.size > REAL_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    cache.delete(oldest);
+  }
 }
 
 // Per-repo UI state (hidden/pinned branches, collapsed folders) persisted in
@@ -2256,6 +2407,18 @@ function deletePrefMapEntry(storeKey: string, key: string): void {
 
 const IDENTITY_PREFS = "gitkit.projectIdentities";
 const ACCOUNT_PREFS  = "gitkit.projectGithubAccounts";
+const COMMIT_DRAFTS  = "gitkit.commitDrafts";
+
+function loadCommitDraft(projectKey: string): string {
+  if (!projectKey) return "";
+  const draft = loadPrefMap(COMMIT_DRAFTS)[projectKey];
+  return typeof draft === "string" ? draft : "";
+}
+function saveCommitDraft(projectKey: string, message: string): void {
+  if (!projectKey) return;
+  if (message) setPrefMapEntry(COMMIT_DRAFTS, projectKey, message);
+  else deletePrefMapEntry(COMMIT_DRAFTS, projectKey);
+}
 
 // Remembered committer per repo path. Returns null when the project has no
 // remembered choice (→ fall back to the default identity); "" means the user
@@ -4372,6 +4535,9 @@ export default function App() {
   const [commitQuery, setCommitQuery] = useState("");
   const deferredCommitQuery = useDeferredValue(commitQuery.trim().toLocaleLowerCase());
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const [smartMerge, setSmartMerge] = useState(() => localStorage.getItem("gitkit.smartMerge") !== "0");
+  const [expandedSmartRows, setExpandedSmartRows] = useState<Set<string>>(() => new Set());
+  useEffect(() => { localStorage.setItem("gitkit.smartMerge", smartMerge ? "1" : "0"); }, [smartMerge]);
   const [selectedFile, setSelectedFile]       = useState<CommitFile | null>(null);
   const [viewChanges, setViewChanges]         = useState(false);
   const [currentBranch, setCurrentBranch]     = useState(activeProject?.branch ?? "");
@@ -4440,8 +4606,7 @@ export default function App() {
   const openDetail = () => { setDetailClosing(false); setDetailOpen(true); };
   const closeDetail = () => { setDetailOpen(false); setDetailClosing(true); };
   const [gitBusy, setGitBusy] = useState<null | "fetch" | "pull" | "push">(null);
-  // Mirror gitBusy in a ref so the working-tree watcher can skip reloads during a
-  // git op without re-subscribing the watcher every time gitBusy flips.
+  // Mirror gitBusy for background jobs that must avoid overlapping a user Git op.
   const gitBusyRef = useRef(gitBusy);
   gitBusyRef.current = gitBusy;
   const [busyLabel, setBusyLabel] = useState<string | null>(null); // generic blocking-op overlay
@@ -4449,6 +4614,21 @@ export default function App() {
   const gitOpId = useRef<string | null>(null);                      // id of the running cancellable op
   const [cancelling, setCancelling] = useState(false);              // cancel requested, awaiting unwind
   const realCache = useRef<Map<string, RealData>>(new Map());
+  // Working-tree state is intentionally separate from the heavy history cache:
+  // it can paint as soon as `git status` finishes, without waiting for the graph.
+  const [workingSnapshot, setWorkingSnapshot] = useState<{ path: string; files: WorkingFile[] } | null>(null);
+  const workingCache = useRef<Map<string, WorkingFile[]>>(new Map());
+  const watchedPaths = useRef<string[]>([]); // LRU order: warm repo, active repo
+  const warmWatchTimer = useRef<number | null>(null);
+  const statusJobs = useRef<Map<string, {
+    timer: number | null;
+    inFlight: Promise<WorkingFile[]> | null;
+    rerun: boolean;
+    paths: Set<string>;
+    full: boolean;
+  }>>(new Map());
+  const activePathRef = useRef<string | undefined>(activeProject?.path);
+  activePathRef.current = activeProject?.path;
   const lastLoadedPath = useRef<string | null>(null);   // to tell a switch from a refresh
   const pendingViewReset = useRef(false);                // branch-changing reloads force a view reset
   const pendingJumpLatest = useRef(false);               // fetch/pull → jump to the newest commit
@@ -4483,13 +4663,16 @@ export default function App() {
   const commits    = view?.commits ?? [];
   const graphRows  = view?.graph ?? [];
   const stashes = view?.stashes ?? [];
-  const activeWorking = view?.working ?? [];
+  const activeWorking = workingSnapshot?.path === activeProject?.path
+    ? workingSnapshot.files
+    : view?.working ?? [];
   const changesCount = activeWorking.length;
   const remoteNames = remotes.map((r) => r.name);
 
   // ── persist per-repo UI state (hidden/pinned branches, collapsed folders) ──
   const prefsKey = activeProject?.path ?? "";
   const prefsLoadedFor = useRef<string | null>(null);
+  useEffect(() => { setExpandedSmartRows(new Set()); }, [prefsKey]);
   useEffect(() => {
     const p = loadUiPrefs(prefsKey);
     setHiddenBranches(p.hidden);
@@ -4592,21 +4775,47 @@ export default function App() {
 
   // Hidden branches drop out of the all-view graph — but a commit shared by a
   // visible branch stays.
-  const base = isReal && hiddenBranches.length > 0
+  const base = useMemo(() => isReal && hiddenBranches.length > 0
     ? commits.filter((c) => { const m = memberOf(c); return m.length === 0 || m.some((n) => !hiddenBranches.includes(n)); })
-    : commits;
+    : commits, [isReal, hiddenBranches, commits]);
   const scopedCommits = focusActive ? (focusInfo?.list ?? []) : base;
+  const smartMergeResult = useMemo(
+    () => focusActive
+      ? { commits: scopedCommits, mergedGroups: 0, hiddenCommits: 0 }
+      : buildSmartMergeCommits(scopedCommits, currentBranch),
+    [focusActive, scopedCommits, currentBranch],
+  );
+  const smartMergeActive = smartMerge && !focusActive && smartMergeResult.mergedGroups > 0;
+  const effectiveScopedCommits = smartMergeActive ? smartMergeResult.commits : scopedCommits;
   const displayCommits = deferredCommitQuery
-    ? scopedCommits.filter((c) => [
-        c.message, c.body, c.author.name, c.author.email, c.hash, c.fullHash,
-        c.branchLabel, ...(c.branchLabels ?? []), ...(c.tags ?? []),
-      ].filter(Boolean).join("\n").toLocaleLowerCase().includes(deferredCommitQuery))
-    : scopedCommits;
+    ? effectiveScopedCommits.filter((c) => {
+        const occurrences = c.equivalentCommits ?? [c];
+        return occurrences.some((occurrence) => [
+          occurrence.message, occurrence.body, occurrence.author.name, occurrence.author.email,
+          occurrence.hash, occurrence.fullHash, occurrence.branchLabel,
+          ...(occurrence.branchLabels ?? []), ...(occurrence.tags ?? []),
+        ].filter(Boolean).join("\n").toLocaleLowerCase().includes(deferredCommitQuery));
+      })
+    : effectiveScopedCommits;
   const displayGraph = (() => {
-    if (!deferredCommitQuery && (!isReal || (!focusActive && hiddenBranches.length === 0))) return graphRows;
+    if (!smartMergeActive && !deferredCommitQuery && (!isReal || (!focusActive && hiddenBranches.length === 0))) return graphRows;
     const set = new Set(displayCommits.map((c) => c.fullHash));
     return computeGraph(displayCommits.map((c) => ({ ...c, parents: c.parents.filter((p) => set.has(p)) })));
   })();
+
+  // Raw topology can place another branch's whole lane above the current HEAD.
+  // When Smart Merge is switched off, anchor the viewport to the checked-out
+  // branch so users can inspect the truth without having to hunt for it.
+  useEffect(() => {
+    if (smartMergeActive || focusActive || deferredCommitQuery || !dataReady) return;
+    const head = branches.find((branch) => branch.current)?.head;
+    if (!head) return;
+    const frame = requestAnimationFrame(() => {
+      const row = timelineScrollRef.current?.querySelector<HTMLElement>(`[data-commit-hash="${head}"]`);
+      row?.scrollIntoView({ block: "center" });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [smartMergeActive, focusActive, deferredCommitQuery, dataReady, branches]);
 
   // Busiest lane index across the visible graph — drives a SINGLE global lane step
   // so vertical lane lines stay aligned row-to-row.
@@ -4648,6 +4857,21 @@ export default function App() {
           } catch { setSelectedFile(first); }
         }
       } catch { /* keep summary without files */ }
+    }
+  };
+
+  const openTimelineCommit = (commit: Commit) => {
+    setViewChanges(false);
+    selectCommit(commit);
+    openDetail();
+  };
+
+  const revealCommitFile = async () => {
+    if (!activeProject) return;
+    try {
+      await revealInFileManager(activeProject.path, selectedFile?.path);
+    } catch (e) {
+      toast.error(`${fileManagerActionLabel()}失败：${e}`);
     }
   };
 
@@ -4718,6 +4942,215 @@ export default function App() {
   // We never re-fetch a cached repo on a plain switch; forced refreshes delete
   // the cache entry so they miss and re-fetch (and apply urgently, in place).
   const path = activeProject?.path;
+
+  // ── resource-bounded working-tree monitor ────────────────────────────────
+  // Native notifications are the primary signal. We keep at most the active
+  // repo plus one warm MRU repo, coalesce bursts, and never run periodic status
+  // polls while the app is idle.
+  const applyWorkingStatusRef = useRef<(repoPath: string, files: WorkingFile[]) => void>(() => {});
+  applyWorkingStatusRef.current = (repoPath, files) => {
+    workingCache.current.delete(repoPath);
+    workingCache.current.set(repoPath, files);
+    while (workingCache.current.size > WATCHED_REPO_LIMIT) {
+      const oldest = workingCache.current.keys().next().value as string | undefined;
+      if (!oldest) break;
+      workingCache.current.delete(oldest);
+    }
+
+    if (activePathRef.current === repoPath) setWorkingSnapshot({ path: repoPath, files });
+    setProjects((prev) => {
+      let changed = false;
+      const next = prev.map((project) => {
+        if (project.path !== repoPath || project.changes === files.length) return project;
+        changed = true;
+        return { ...project, changes: files.length };
+      });
+      return changed ? next : prev;
+    });
+
+    const cached = realCache.current.get(repoPath);
+    if (cached && !sameWorking(files, cached.working)) {
+      cacheRealData(realCache.current, repoPath, { ...cached, working: files }, false);
+    }
+    setRealData((prev) => {
+      if (!prev || prev.path !== repoPath || sameWorking(files, prev.working)) return prev;
+      return { ...prev, working: files };
+    });
+  };
+
+  const requestWorkingStatusRef = useRef<(
+    repoPath: string,
+    rerunIfBusy?: boolean,
+    forceFull?: boolean,
+  ) => Promise<WorkingFile[]>>(() => Promise.resolve([]));
+  requestWorkingStatusRef.current = (repoPath, rerunIfBusy = false, forceFull = false) => {
+    let job = statusJobs.current.get(repoPath);
+    if (!job) {
+      job = { timer: null, inFlight: null, rerun: false, paths: new Set(), full: false };
+      statusJobs.current.set(repoPath, job);
+    }
+    if (forceFull) {
+      job.full = true;
+      job.paths.clear();
+    }
+    if (job.timer !== null) {
+      window.clearTimeout(job.timer);
+      job.timer = null;
+    }
+    if (job.inFlight) {
+      if (rerunIfBusy || forceFull) job.rerun = true;
+      return job.inFlight;
+    }
+
+    const changedPaths = job.full ? [] : [...job.paths];
+    const full = job.full || changedPaths.length === 0;
+    job.full = false;
+    job.paths.clear();
+    const request = full ? loadStatus(repoPath) : loadStatusPaths(repoPath, changedPaths);
+    const task = request
+      .then((partial) => {
+        const previous = workingCache.current.get(repoPath)
+          ?? realCache.current.get(repoPath)?.working
+          ?? [];
+        const files = full ? partial : mergeWorkingPaths(previous, changedPaths, partial);
+        if (watchedPaths.current.includes(repoPath) || activePathRef.current === repoPath) {
+          applyWorkingStatusRef.current(repoPath, files);
+        }
+        return files;
+      })
+      .finally(() => {
+        job!.inFlight = null;
+        if (job!.rerun && watchedPaths.current.includes(repoPath)) {
+          job!.rerun = false;
+          queueMicrotask(() => { void requestWorkingStatusRef.current(repoPath).catch(() => {}); });
+        } else if (!watchedPaths.current.includes(repoPath) && activePathRef.current !== repoPath) {
+          statusJobs.current.delete(repoPath);
+        }
+      });
+    job.inFlight = task;
+    return task;
+  };
+
+  const scheduleWorkingStatusRef = useRef<(
+    repoPath: string,
+    immediate?: boolean,
+    paths?: string[],
+    full?: boolean,
+  ) => void>(() => {});
+  scheduleWorkingStatusRef.current = (repoPath, immediate = false, paths = [], full = immediate) => {
+    let job = statusJobs.current.get(repoPath);
+    if (!job) {
+      job = { timer: null, inFlight: null, rerun: false, paths: new Set(), full: false };
+      statusJobs.current.set(repoPath, job);
+    }
+    if (full || paths.length === 0) {
+      job.full = true;
+      job.paths.clear();
+    } else if (!job.full) {
+      for (const changed of paths) job.paths.add(changed);
+      if (job.paths.size > 256) {
+        job.full = true;
+        job.paths.clear();
+      }
+    }
+    if (job.timer !== null) window.clearTimeout(job.timer);
+    if (immediate) {
+      job.timer = null;
+      void requestWorkingStatusRef.current(repoPath, false, true).catch(() => {});
+    } else {
+      job.timer = window.setTimeout(() => {
+        job!.timer = null;
+        void requestWorkingStatusRef.current(repoPath, true).catch(() => {});
+      }, STATUS_DEBOUNCE_MS);
+    }
+  };
+
+  const dropWatcherRef = useRef<(repoPath: string) => void>(() => {});
+  dropWatcherRef.current = (repoPath) => {
+    watchedPaths.current = watchedPaths.current.filter((candidate) => candidate !== repoPath);
+    const job = statusJobs.current.get(repoPath);
+    if (job?.timer !== null && job?.timer !== undefined) window.clearTimeout(job.timer);
+    if (job) job.rerun = false;
+    if (!job?.inFlight) statusJobs.current.delete(repoPath);
+    workingCache.current.delete(repoPath);
+    void stopWatch(repoPath).catch(() => {});
+  };
+
+  // One app-wide Tauri listener serves both watcher slots. Focus/resume performs
+  // one authoritative active-repo reconciliation; there is no idle interval.
+  useEffect(() => {
+    let stopped = false;
+    let unlisten: (() => void) | null = null;
+    listen<WorkingTreeChanged>("working-tree-changed", (event) => {
+      const change = event.payload;
+      if (!stopped && watchedPaths.current.includes(change.path)) {
+        scheduleWorkingStatusRef.current(change.path, false, change.paths, change.full);
+      }
+    }).then((fn) => { if (stopped) fn(); else unlisten = fn; }).catch(() => {});
+
+    const refreshActive = () => {
+      const active = activePathRef.current;
+      if (active) scheduleWorkingStatusRef.current(active, true);
+    };
+    const onVisibility = () => { if (document.visibilityState === "visible") refreshActive(); };
+    window.addEventListener("focus", refreshActive);
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      stopped = true;
+      if (unlisten) unlisten();
+      window.removeEventListener("focus", refreshActive);
+      document.removeEventListener("visibilitychange", onVisibility);
+      if (warmWatchTimer.current !== null) window.clearTimeout(warmWatchTimer.current);
+      for (const job of statusJobs.current.values()) {
+        if (job.timer !== null) window.clearTimeout(job.timer);
+      }
+      for (const watched of watchedPaths.current) void stopWatch(watched).catch(() => {});
+      watchedPaths.current = [];
+      statusJobs.current.clear();
+    };
+  }, []);
+
+  // Promote the selected repo to the active watcher slot. Starting the watcher
+  // before the status read closes the switch race: an edit during the read queues
+  // exactly one follow-up reconciliation.
+  useEffect(() => {
+    if (!path) return;
+
+    const cachedWorking = workingCache.current.get(path) ?? realCache.current.get(path)?.working;
+    if (cachedWorking) setWorkingSnapshot({ path, files: cachedWorking });
+
+    const next = watchedPaths.current.filter((candidate) => candidate !== path);
+    next.push(path);
+    while (next.length > WATCHED_REPO_LIMIT) {
+      const evicted = next.shift();
+      if (evicted) dropWatcherRef.current(evicted);
+    }
+    watchedPaths.current = next;
+    void startWatch(path)
+      .catch(() => {})
+      .finally(() => scheduleWorkingStatusRef.current(path, true));
+
+    if (warmWatchTimer.current !== null) window.clearTimeout(warmWatchTimer.current);
+    const warm = next.length > 1 ? next[0] : undefined;
+    warmWatchTimer.current = warm
+      ? window.setTimeout(() => {
+          warmWatchTimer.current = null;
+          if (activePathRef.current !== warm) dropWatcherRef.current(warm);
+        }, WARM_WATCH_TTL_MS)
+      : null;
+  }, [path]);
+
+  // Closing a project releases its watcher immediately instead of waiting for
+  // LRU replacement or the warm-slot timeout.
+  const projectPathsKey = projects.map((project) => project.path).join("\0");
+  useEffect(() => {
+    const openPaths = new Set(projectPathsKey ? projectPathsKey.split("\0") : []);
+    for (const watched of [...watchedPaths.current]) {
+      if (!openPaths.has(watched)) dropWatcherRef.current(watched);
+    }
+  }, [projectPathsKey]);
+
   useEffect(() => {
     if (!path) {
       setSelectedCommit(null); setSelectedFile(null); setSelectedWorkingFile(null);
@@ -4778,11 +5211,16 @@ export default function App() {
 
     const cached = realCache.current.get(path);
     if (cached) {
+      // A cache hit is a real user access, so promote it in the bounded LRU.
+      cacheRealData(realCache.current, path, cached);
       const apply = () => {
-        setRealData(cached);
-        syncBranch(cached);
-        if (resetView) { applyView(cached); preselect(cached); }
-        else if (jumpLatest) preselect(cached, true);
+        // Status may have refreshed while this transition was queued.
+        const latest = realCache.current.get(path) ?? cached;
+        setRealData(latest);
+        setWorkingSnapshot({ path, files: workingCache.current.get(path) ?? latest.working });
+        syncBranch(latest);
+        if (resetView) { applyView(latest); preselect(latest); }
+        else if (jumpLatest) preselect(latest, true);
       };
       // Switch → defer the big timeline render (no freeze); refresh → urgent.
       if (isSwitch) startSwitch(apply); else apply();
@@ -4796,18 +5234,21 @@ export default function App() {
     }
     (async () => {
       try {
+        const statusPromise = requestWorkingStatusRef.current(path, false, true);
         const [branchList, remoteList, commitList, working, stashList_] = await Promise.all([
           loadBranches(path),
           loadRemotes(path),
           loadHistory(path),
-          loadStatus(path),
+          statusPromise,
           stashList(path),
         ]);
         if (cancelled) return;
         attributeBranches(commitList, branchList);
         const graph = computeGraph(commitList);
-        const data: RealData = { path, branches: branchList, remotes: remoteList, commits: commitList, graph, working, stashes: stashList_ };
-        realCache.current.set(path, data);
+        // A watcher event may have produced a newer status while history loaded.
+        const latestWorking = workingCache.current.get(path) ?? working;
+        const data: RealData = { path, branches: branchList, remotes: remoteList, commits: commitList, graph, working: latestWorking, stashes: stashList_ };
+        cacheRealData(realCache.current, path, data);
         if (cancelled) return;
         const apply = () => {
           setRealData(data);
@@ -4823,65 +5264,6 @@ export default function App() {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, reloadTick]);
-
-  // Watch the working tree for changes made outside the app (edits in an editor).
-  // Primary signal is a native filesystem watcher (backend `notify`), which fires
-  // within tens of ms of a save — no more waiting for a poll tick. A `git status`
-  // reload is coalesced (debounced) so an editor's burst of write events triggers
-  // one refresh, and the fresh file list is merged in while preserving the UI's
-  // staged selection. A slow interval + a refresh-on-focus stay as a safety net,
-  // and also pick up changes the watcher skips on purpose (terminal git add/commit
-  // only touch `.git/`, which the watcher filters out to avoid a reload loop).
-  useEffect(() => {
-    if (!path || !dataReady) return;
-    let stopped = false;
-    let debounce: number | null = null;
-
-    const reload = async () => {
-      if (stopped || gitBusyRef.current) return;
-      try {
-        const fresh = await loadStatus(path);
-        if (stopped) return;
-        setRealData((prev) => {
-          if (!prev || prev.path !== path || sameWorking(fresh, prev.working)) return prev;
-          const prevStaged = new Map(prev.working.map((f) => [f.path, f.staged]));
-          const merged = fresh.map((f) => ({ ...f, staged: prevStaged.get(f.path) ?? f.staged }));
-          const next = { ...prev, working: merged };
-          realCache.current.set(path, next);
-          return next;
-        });
-      } catch { /* ignore transient status errors */ }
-    };
-    const scheduleReload = () => {
-      if (debounce) window.clearTimeout(debounce);
-      debounce = window.setTimeout(reload, 150);
-    };
-
-    // Filesystem watcher (near-instant). If it can't start (e.g. running in a
-    // browser via `npm run dev`), the interval + focus fallbacks still cover it.
-    startWatch(path).catch(() => {});
-    let unlisten: (() => void) | null = null;
-    listen<string>("working-tree-changed", (e) => {
-      if (e.payload === path) scheduleReload();
-    }).then((fn) => { if (stopped) fn(); else unlisten = fn; }).catch(() => {});
-
-    // Safety net.
-    const id = window.setInterval(reload, 4000);
-    const onFocus = () => reload();
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onFocus);
-
-    return () => {
-      stopped = true;
-      if (debounce) window.clearTimeout(debounce);
-      window.clearInterval(id);
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onFocus);
-      if (unlisten) unlisten();
-      stopWatch(path).catch(() => {});
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [path, dataReady]);
 
   const doCreateBranch = async (name: string, base: string, mode: DirtyMode = "carry") => {
     if (!activeProject) return;
@@ -5726,7 +6108,7 @@ export default function App() {
             <div className="absolute inset-0 flex flex-col overflow-hidden">
               <div className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5"
                 style={{ borderBottom: `0.5px solid ${theme.border}`, background: theme.bg }}>
-                <label className="gk-search-field flex items-center gap-2 flex-1 max-w-[340px] px-2.5 py-1.5"
+                <label className="gk-search-field relative flex items-center gap-2 flex-1 max-w-[340px] px-2.5 py-1.5"
                   style={{ background: theme.bgPanel, border: `0.5px solid ${theme.inputBorder}`,
                     borderRadius: R - 3, boxShadow: theme.isDark ? "inset 0 1px 0 rgba(255,255,255,0.025)" : "inset 0 1px 0 rgba(255,255,255,0.75)" }}>
                   <Search size={13} aria-hidden="true" style={{ color: theme.textFaint }} />
@@ -5735,20 +6117,63 @@ export default function App() {
                     onKeyDown={(e) => { if (e.key === "Escape") { setCommitQuery(""); e.currentTarget.blur(); } }}
                     aria-label="搜索提交" placeholder="搜索消息、作者、分支或哈希…"
                     autoComplete="off" spellCheck={false}
-                    className="gk-search-input min-w-0 flex-1 bg-transparent text-xs outline-none"
+                    className="gk-search-input min-w-0 flex-1 bg-transparent pr-6 text-xs outline-none"
                     style={{ color: theme.text }} />
                   {commitQuery && (
                     <button type="button" onClick={() => { setCommitQuery(""); searchInputRef.current?.focus(); }}
-                      aria-label="清空搜索" className="flex items-center justify-center w-5 h-5"
+                      aria-label="清空搜索"
+                      className="absolute right-2.5 top-1/2 flex items-center justify-center w-5 h-5 -translate-y-1/2"
                       style={{ color: theme.textMuted, borderRadius: 5 }}>
                       <X size={11} aria-hidden="true" />
                     </button>
                   )}
                 </label>
+                {!focusActive && smartMergeResult.mergedGroups > 0 && (
+                  <button type="button" aria-pressed={smartMerge}
+                    title="仅合并相同变更的展示，不会修改 Git 历史"
+                    onClick={() => startTransition(() => setSmartMerge((on) => !on))}
+                    className="flex items-center gap-1.5 px-2 py-1.5 text-[11px] font-semibold cursor-pointer flex-shrink-0"
+                    style={{
+                      color: smartMerge ? theme.accent2Fg : theme.textMuted,
+                      background: smartMerge ? theme.accent2Bg : theme.inputBg,
+                      border: `0.5px solid ${smartMerge ? theme.accent2 + "66" : theme.inputBorder}`,
+                      borderRadius: R - 3,
+                    }}>
+                    <Sparkles size={11} aria-hidden="true" />
+                    智能合并
+                    <span className="relative inline-flex flex-shrink-0"
+                      style={{ width: 25, height: 15, borderRadius: 999,
+                        background: smartMerge ? theme.accent2 : theme.textFaint,
+                        transition: "background 0.14s" }}>
+                      <span className="absolute rounded-full"
+                        style={{ width: 11, height: 11, top: 2, left: smartMerge ? 12 : 2,
+                          background: "#fff", boxShadow: "0 1px 2px rgba(0,0,0,0.25)",
+                          transition: "left 0.16s cubic-bezier(0.32,0.72,0,1)" }} />
+                    </span>
+                  </button>
+                )}
                 <span className="ml-auto text-[11px] tabular-nums" style={{ color: theme.textFaint }}>
-                  {deferredCommitQuery ? `${displayCommits.length} 条结果` : `${displayCommits.length} 次提交`}
+                  {deferredCommitQuery
+                    ? `${displayCommits.length} 条结果`
+                    : smartMergeActive
+                      ? `${displayCommits.length} 个变更 · ${scopedCommits.length} 次提交`
+                      : `${displayCommits.length} 次提交`}
                 </span>
               </div>
+              {smartMergeActive && (
+                <div className="flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5"
+                  style={{ borderBottom: `0.5px solid ${theme.border}`, background: theme.accent2Bg }}>
+                  <Check size={11} aria-hidden="true" style={{ color: theme.accent2 }} />
+                  <span className="text-[11px] truncate" style={{ color: theme.accent2Fg }}>
+                    已将 {smartMergeResult.mergedGroups} 组相同变更合并展示，不会修改 Git 历史
+                  </span>
+                  <button type="button" onClick={() => startTransition(() => setSmartMerge(false))}
+                    className="ml-auto text-[11px] cursor-pointer flex-shrink-0"
+                    style={{ color: theme.accent2Fg }}>
+                    查看原始提交
+                  </button>
+                </div>
+              )}
               {focusActive && (
                 <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5"
                   style={{ borderBottom: `0.5px solid ${theme.border}`, background: theme.accentBg }}>
@@ -5848,17 +6273,26 @@ export default function App() {
                         graphInfo={displayGraph[i]}
                         selected={detailOpen && !viewChanges && (commit.isStash
                           ? selectedStash?.index === 0
-                          : selectedCommit?.hash === commit.hash)}
+                          : selectedCommit?.fullHash === commit.fullHash
+                            || commit.equivalentCommits?.some((c) => c.fullHash === selectedCommit?.fullHash) === true)}
                         highlight={hoverBranch != null && memberOf(commit).includes(hoverBranch)}
                         graphW={graphW}
                         laneStep={laneStep}
                         remoteNames={remoteNames}
+                        smartExpanded={expandedSmartRows.has(commit.patchId ?? commit.fullHash)}
+                        onToggleSmart={() => setExpandedSmartRows((previous) => {
+                          const key = commit.patchId ?? commit.fullHash;
+                          const next = new Set(previous);
+                          if (next.has(key)) next.delete(key); else next.add(key);
+                          return next;
+                        })}
+                        onRelatedCommitClick={openTimelineCommit}
                         onBranchDblClick={doSyncBranch}
                         onClick={() => {
                           // A stash node opens the stash panel (apply/drop), not commit detail.
                           // Only stash@{0} surfaces in --all, so index 0 is the match.
                           if (commit.isStash) { openStash({ index: 0, message: commit.message, date: commit.date }); return; }
-                          setViewChanges(false); selectCommit(commit); openDetail();
+                          openTimelineCommit(commit);
                         }}
                         onContextMenu={(e) => openCtx(e, commit.isStash
                           ? [
@@ -5889,12 +6323,12 @@ export default function App() {
               </div>
             </div>
 
-            {/* Detail panel — a sliding overlay covering the right ~3/4; the list
-                underneath stays full-width and clickable. Close with 返回 / Esc. */}
+            {/* Detail panel — code review is the primary task, so only a compact
+                240–300px timeline context remains visible on the left. */}
             {(detailOpen || detailClosing) && dataReady && (
               <div className={`absolute top-0 bottom-0 right-0 flex flex-col overflow-hidden ${detailOpen ? "gk-panel-in" : "gk-panel-out"}`}
                 onAnimationEnd={() => { if (!detailOpen) setDetailClosing(false); }}
-                style={{ width: "calc(100% - 380px)", background: theme.bgPanel,
+                style={{ width: "calc(100% - clamp(240px, 18vw, 300px))", background: theme.bgPanel,
                   // Above the timeline's hover popovers (ref chips use z-index 50),
                   // so an expanded branch-ref overlay never bleeds over the panel.
                   zIndex: 60,
@@ -5930,12 +6364,7 @@ export default function App() {
                         onDiscard={doDiscardFile}
                         onDiscardAll={doDiscardAll}
                         onFilesChange={(f) => {
-                          setRealData((prev) => {
-                            if (!prev) return prev;
-                            const next = { ...prev, working: f };
-                            if (path) realCache.current.set(path, next);
-                            return next;
-                          });
+                          if (path) applyWorkingStatusRef.current(path, f);
                           setSelectedWorkingFile(null);
                         }} />
                       {selectedWorkingFile ? (
@@ -5956,6 +6385,7 @@ export default function App() {
                   ) : selectedCommit ? (
                     <CommitDetail commit={selectedCommit} selectedFile={selectedFile}
                       onFileSelect={selectDetailFile}
+                      onReveal={isReal ? revealCommitFile : undefined}
                       onCherryPick={isReal ? () => requestCherryPick(selectedCommit) : undefined}
                       checkoutBranch={isReal ? syncTargetOf(selectedCommit) : null}
                       onCheckout={isReal ? () => doCheckoutSync(selectedCommit) : undefined} />

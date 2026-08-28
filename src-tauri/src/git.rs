@@ -3,10 +3,11 @@
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use std::collections::HashMap;
-use std::process::Command;
+use std::collections::{HashMap, HashSet};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::Emitter;
 
 /// macOS GUI apps (launched from Finder/Dock) inherit a minimal PATH — usually
@@ -102,6 +103,88 @@ fn run_git_auth(repo: &str, args: &[&str], token: Option<&str>) -> Result<String
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
+/// Compute stable patch ids for the visible history in one pipeline. Feeding a
+/// single `git log -p` stream into `git patch-id --stable` avoids spawning two
+/// git processes per commit when a repository is opened. Patch ids deliberately
+/// ignore commit metadata, so cherry-picked commits with the same diff match
+/// even though their hashes and parents differ.
+fn stable_patch_ids(repo: &str, limit: u32) -> Result<HashMap<String, String>, String> {
+    let max_count = format!("--max-count={limit}");
+    let mut producer = command("git");
+    producer
+        .arg("-C")
+        .arg(repo)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("PATH", augmented_path())
+        .args([
+            "log",
+            "--all",
+            "--topo-order",
+            "--no-merges",
+            max_count.as_str(),
+            "--pretty=format:commit %H",
+            "-p",
+            "--no-color",
+            "--no-ext-diff",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut producer = producer
+        .spawn()
+        .map_err(|e| format!("无法读取提交差异：{e}"))?;
+    let stdout = producer
+        .stdout
+        .take()
+        .ok_or_else(|| "无法读取提交差异".to_string())?;
+
+    let mut consumer = command("git");
+    consumer
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("PATH", augmented_path())
+        .args(["patch-id", "--stable"])
+        .stdin(Stdio::from(stdout))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let consumer_out = consumer
+        .spawn()
+        .and_then(|child| child.wait_with_output())
+        .map_err(|e| format!("无法计算提交变更标识：{e}"))?;
+    let producer_out = producer
+        .wait_with_output()
+        .map_err(|e| format!("无法读取提交差异：{e}"))?;
+
+    if !producer_out.status.success() {
+        let err = String::from_utf8_lossy(&producer_out.stderr)
+            .trim()
+            .to_string();
+        return Err(if err.is_empty() {
+            "读取提交差异失败".into()
+        } else {
+            err
+        });
+    }
+    if !consumer_out.status.success() {
+        let err = String::from_utf8_lossy(&consumer_out.stderr)
+            .trim()
+            .to_string();
+        return Err(if err.is_empty() {
+            "计算提交变更标识失败".into()
+        } else {
+            err
+        });
+    }
+
+    let mut ids = HashMap::new();
+    for line in String::from_utf8_lossy(&consumer_out.stdout).lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(patch_id), Some(commit_hash)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        ids.insert(commit_hash.to_string(), patch_id.to_string());
+    }
+    Ok(ids)
+}
+
 #[derive(Serialize)]
 pub struct RepoInfo {
     pub path: String,
@@ -134,6 +217,97 @@ pub async fn open_repo(path: String) -> Result<RepoInfo, String> {
                 current
             },
         })
+    })
+    .await
+}
+
+/// Reveal a working-tree file in the platform file manager. Historical commits
+/// can reference files that no longer exist; in that case, open the nearest
+/// existing parent directory instead. The relative path is validated so this
+/// command cannot be used to escape the repository root.
+#[tauri::command]
+pub async fn reveal_in_file_manager(path: String, file: Option<String>) -> Result<(), String> {
+    run_blocking(move || {
+        use std::path::{Component, Path, PathBuf};
+
+        let repo = Path::new(&path)
+            .canonicalize()
+            .map_err(|e| format!("无法访问仓库目录：{e}"))?;
+        let mut requested = repo.clone();
+        if let Some(relative) = file.as_deref().filter(|value| !value.trim().is_empty()) {
+            let relative = Path::new(relative);
+            if relative.is_absolute()
+                || relative.components().any(|part| {
+                    matches!(part, Component::Prefix(_) | Component::RootDir | Component::ParentDir)
+                })
+            {
+                return Err("文件路径不在当前仓库中".into());
+            }
+            requested.push(relative);
+        }
+
+        let target = if requested.exists() {
+            let canonical = requested
+                .canonicalize()
+                .map_err(|e| format!("无法访问文件位置：{e}"))?;
+            if !canonical.starts_with(&repo) {
+                return Err("文件路径不在当前仓库中".into());
+            }
+            canonical
+        } else {
+            let mut existing: PathBuf = requested;
+            while existing != repo && !existing.exists() {
+                existing.pop();
+            }
+            let canonical = existing
+                .canonicalize()
+                .map_err(|e| format!("无法访问文件位置：{e}"))?;
+            if !canonical.starts_with(&repo) {
+                return Err("文件路径不在当前仓库中".into());
+            }
+            canonical
+        };
+        let is_file = target.is_file();
+
+        #[cfg(target_os = "macos")]
+        let status = {
+            let mut cmd = command("open");
+            if is_file {
+                cmd.arg("-R");
+            }
+            cmd.arg(&target).status()
+        };
+
+        #[cfg(target_os = "windows")]
+        let status = {
+            let mut cmd = command("explorer.exe");
+            if is_file {
+                cmd.arg(format!("/select,{}", target.to_string_lossy()));
+            } else {
+                cmd.arg(&target);
+            }
+            cmd.status()
+        };
+
+        #[cfg(target_os = "linux")]
+        let status = {
+            let open_target = if is_file {
+                target.parent().unwrap_or(&repo)
+            } else {
+                &target
+            };
+            command("xdg-open").arg(open_target).status()
+        };
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        return Err("当前平台暂不支持打开文件管理器".into());
+
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        match status {
+            Ok(code) if code.success() => Ok(()),
+            Ok(_) => Err("文件管理器未能打开该位置".into()),
+            Err(e) => Err(format!("无法启动文件管理器：{e}")),
+        }
     })
     .await
 }
@@ -299,6 +473,8 @@ pub struct CommitInfo {
     pub author_name: String,
     pub author_email: String,
     pub date: String,
+    pub committer_date: String,
+    pub patch_id: Option<String>,
     pub refs: Vec<String>,
     pub subject: String,
     pub body: String,
@@ -311,8 +487,14 @@ pub struct CommitInfo {
 pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>, String> {
     run_blocking(move || {
     let limit = limit.unwrap_or(400);
+    // Patch-id is an enhancement: history must remain available even if an old
+    // or unusual Git installation cannot produce it.
+    let patch_ids = match stable_patch_ids(&path, limit) {
+        Ok(ids) => ids,
+        Err(_) => HashMap::new(),
+    };
     // Field sep \x1f, record sep \x1e.
-    let fmt = "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%D\x1f%s\x1f%b\x1e";
+    let fmt = "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%cI\x1f%D\x1f%s\x1f%b\x1e";
     let out = run_git(
         &path,
         &[
@@ -330,7 +512,7 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
             continue;
         }
         let f: Vec<&str> = rec.split('\x1f').collect();
-        if f.len() < 9 {
+        if f.len() < 10 {
             continue;
         }
         let parents = if f[2].trim().is_empty() {
@@ -338,10 +520,10 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
         } else {
             f[2].split_whitespace().map(|s| s.to_string()).collect()
         };
-        let refs = if f[6].trim().is_empty() {
+        let refs = if f[7].trim().is_empty() {
             vec![]
         } else {
-            f[6]
+            f[7]
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
@@ -354,9 +536,11 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
             author_name: f[3].to_string(),
             author_email: f[4].to_string(),
             date: f[5].to_string(),
+            committer_date: f[6].to_string(),
+            patch_id: patch_ids.get(f[0]).cloned(),
             refs,
-            subject: f[7].to_string(),
-            body: f[8].to_string(),
+            subject: f[8].to_string(),
+            body: f[9].to_string(),
             is_stash: false,
         });
     }
@@ -398,15 +582,7 @@ pub struct StatusEntry {
     pub staged: bool,
 }
 
-#[tauri::command]
-pub async fn git_status(path: String) -> Result<Vec<StatusEntry>, String> {
-    run_blocking(move || {
-    // `-z` emits NUL-separated, UNQUOTED paths. The default porcelain output wraps
-    // any path with a space, non-ASCII byte (e.g. 中文), or quote in C-style quotes
-    // (`core.quotepath=false` does NOT stop this), and the app then stored the
-    // literal quoted string — so staging that path on commit failed ("git 命令失败").
-    // `-uall` lists untracked files individually instead of collapsing directories.
-    let out = run_git(&path, &["status", "--porcelain", "-uall", "-z"])?;
+fn parse_status_entries(out: &str) -> Vec<StatusEntry> {
     let mut res = Vec::new();
     let mut fields = out.split('\0');
     while let Some(entry) = fields.next() {
@@ -431,7 +607,55 @@ pub async fn git_status(path: String) -> Result<Vec<StatusEntry>, String> {
             staged,
         });
     }
-    Ok(res)
+    res
+}
+
+fn read_git_status(path: &str, paths: &[String]) -> Result<Vec<StatusEntry>, String> {
+    // `-z` emits NUL-separated, UNQUOTED paths. `-uall` lists untracked files
+    // individually. `--no-optional-locks` prevents a read from rewriting the
+    // index and feeding back into the watcher.
+    let mut args = vec![
+        "--literal-pathspecs".to_string(),
+        "--no-optional-locks".to_string(),
+        "status".to_string(),
+        "--porcelain".to_string(),
+        "-uall".to_string(),
+        "-z".to_string(),
+    ];
+    if !paths.is_empty() {
+        args.push("--".to_string());
+        args.extend(paths.iter().cloned());
+    }
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_git(path, &refs).map(|out| parse_status_entries(&out))
+}
+
+#[tauri::command]
+pub async fn git_status(path: String) -> Result<Vec<StatusEntry>, String> {
+    run_blocking(move || read_git_status(&path, &[])).await
+}
+
+/// Incremental status for a coalesced batch of working-tree paths. Invalid or
+/// oversized batches fall back to the caller's next full reconciliation.
+#[tauri::command]
+pub async fn git_status_paths(path: String, paths: Vec<String>) -> Result<Vec<StatusEntry>, String> {
+    run_blocking(move || {
+        use std::path::{Component, Path};
+        if paths.is_empty() || paths.len() > 256 {
+            return read_git_status(&path, &[]);
+        }
+        for item in &paths {
+            let candidate = Path::new(item);
+            if item.is_empty()
+                || candidate.is_absolute()
+                || candidate.components().any(|part| {
+                    matches!(part, Component::Prefix(_) | Component::RootDir | Component::ParentDir)
+                })
+            {
+                return Err("工作区事件包含无效路径".into());
+            }
+        }
+        read_git_status(&path, &paths)
     })
     .await
 }
@@ -2232,16 +2456,58 @@ pub async fn git_clone(
 #[derive(Default)]
 pub struct WatchState(pub Mutex<HashMap<String, RecommendedWatcher>>);
 
-/// True when a path sits inside a `.git` directory. Used to drop git-internal
-/// churn (lock files, and the index rewrite that a plain `git status` itself can
-/// trigger) so watching doesn't feed back into an endless reload loop.
-fn path_in_git(p: &std::path::Path) -> bool {
-    p.components().any(|c| c.as_os_str() == ".git")
+const WATCH_PATH_LIMIT: usize = 256;
+
+#[derive(Default)]
+struct WatchBatch {
+    paths: HashSet<String>,
+    full: bool,
 }
 
-/// Start watching `path` recursively. Emits `working-tree-changed` (payload = the
-/// repo path) whenever a file OUTSIDE `.git/` changes. Idempotent — watching an
-/// already-watched repo is a no-op. The watcher lives in `WatchState` until
+#[derive(Clone, Serialize)]
+struct WorkingTreeChanged {
+    path: String,
+    paths: Vec<String>,
+    full: bool,
+}
+
+fn path_in_git(p: &std::path::Path) -> bool {
+    p.components().any(|component| component.as_os_str() == ".git")
+}
+
+fn git_relative_path(p: &std::path::Path) -> String {
+    p.components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Working-tree writes always affect status. Inside `.git`, only metadata that
+/// can change the visible working state is relevant; objects, logs and lock
+/// files are intentionally ignored to avoid event storms during fetches.
+fn path_triggers_status(p: &std::path::Path) -> bool {
+    let mut components = p.components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() != ".git" {
+            continue;
+        }
+        let Some(first) = components.next().map(|item| item.as_os_str()) else {
+            return false;
+        };
+        return first == "index"
+            || first == "HEAD"
+            || first == "packed-refs"
+            || first == "refs"
+            || first == "config"
+            || (first == "info"
+                && components.next().is_some_and(|item| item.as_os_str() == "exclude"));
+    }
+    true
+}
+
+/// Start watching `path` recursively. Emits one coalesced `working-tree-changed`
+/// event for working files or status-relevant Git metadata. Idempotent — watching
+/// an already-watched repo is a no-op. The watcher lives in `WatchState` until
 /// `stop_watch` removes (and thus drops) it.
 #[tauri::command]
 pub fn start_watch(
@@ -2254,10 +2520,75 @@ pub fn start_watch(
         return Ok(());
     }
     let repo = path.clone();
+    // `notify` can deliver several events for one editor save. Coalesce them
+    // before crossing the Rust/WebView boundary so idle and burst CPU stay low.
+    let emit_pending = Arc::new(AtomicBool::new(false));
+    let batch = Arc::new(Mutex::new(WatchBatch::default()));
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
-            if ev.paths.iter().any(|p| !path_in_git(p)) {
-                let _ = app.emit("working-tree-changed", &repo);
+            let mut relevant = false;
+            if let Ok(mut pending_batch) = batch.lock() {
+                if ev.need_rescan() {
+                    relevant = true;
+                    pending_batch.full = true;
+                    pending_batch.paths.clear();
+                }
+                for event_path in ev.paths.iter().filter(|p| path_triggers_status(p)) {
+                    relevant = true;
+                    if path_in_git(event_path) {
+                        pending_batch.full = true;
+                        pending_batch.paths.clear();
+                        continue;
+                    }
+                    if event_path.file_name().is_some_and(|name| {
+                        name == ".gitignore" || name == ".gitmodules"
+                    }) {
+                        pending_batch.full = true;
+                        pending_batch.paths.clear();
+                        continue;
+                    }
+                    if pending_batch.full {
+                        continue;
+                    }
+                    match event_path.strip_prefix(std::path::Path::new(&repo)) {
+                        Ok(relative) if !relative.as_os_str().is_empty() => {
+                            pending_batch.paths.insert(git_relative_path(relative));
+                            if pending_batch.paths.len() > WATCH_PATH_LIMIT {
+                                pending_batch.full = true;
+                                pending_batch.paths.clear();
+                            }
+                        }
+                        _ => {
+                            pending_batch.full = true;
+                            pending_batch.paths.clear();
+                        }
+                    }
+                }
+            }
+            if relevant && !emit_pending.swap(true, Ordering::AcqRel) {
+                let app = app.clone();
+                let repo = repo.clone();
+                let pending = Arc::clone(&emit_pending);
+                let batch = Arc::clone(&batch);
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    let (paths, full) = batch
+                        .lock()
+                        .map(|mut current| {
+                            let paths = current.paths.drain().collect();
+                            let full = current.full;
+                            current.full = false;
+                            (paths, full)
+                        })
+                        .unwrap_or_else(|_| (Vec::new(), true));
+                    // Clear before emitting: an event arriving during the status
+                    // refresh can schedule exactly one later reconciliation.
+                    pending.store(false, Ordering::Release);
+                    let _ = app.emit(
+                        "working-tree-changed",
+                        WorkingTreeChanged { path: repo, paths, full },
+                    );
+                });
             }
         }
     })
@@ -2274,4 +2605,23 @@ pub fn start_watch(
 pub fn stop_watch(state: tauri::State<'_, WatchState>, path: String) -> Result<(), String> {
     state.0.lock().map_err(|e| e.to_string())?.remove(&path);
     Ok(())
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::path_triggers_status;
+    use std::path::Path;
+
+    #[test]
+    fn filters_git_churn_but_keeps_status_metadata() {
+        assert!(path_triggers_status(Path::new("/repo/src/main.ts")));
+        assert!(path_triggers_status(Path::new("/repo/.git/index")));
+        assert!(path_triggers_status(Path::new("/repo/.git/HEAD")));
+        assert!(path_triggers_status(Path::new("/repo/.git/refs/heads/main")));
+        assert!(path_triggers_status(Path::new("/repo/.git/info/exclude")));
+        assert!(path_triggers_status(Path::new("/repo/.git/config")));
+        assert!(!path_triggers_status(Path::new("/repo/.git/objects/aa/bb")));
+        assert!(!path_triggers_status(Path::new("/repo/.git/logs/HEAD")));
+        assert!(!path_triggers_status(Path::new("/repo/.git/index.lock")));
+    }
 }
