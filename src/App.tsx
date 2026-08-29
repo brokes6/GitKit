@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useDeferredValue, startTransition, useTransition, createContext, useContext } from "react";
+import { useState, useEffect, useRef, useMemo, useDeferredValue, startTransition, useTransition, createContext, useContext, memo } from "react";
 import { createPortal } from "react-dom";
 import { Toaster, toast } from "sonner";
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
@@ -502,7 +502,7 @@ function Avatar({ author, size = 28 }: { author: Author; size?: number }) {
 
 // ─── GraphRowSVG ──────────────────────────────────────────────────────────────
 
-function GraphRowSVG({ info, height = ROW_H, width = GRAPH_W_MAX, step = LANE_STEP, dim = false, stash = false }: {
+const GraphRowSVG = memo(function GraphRowSVG({ info, height = ROW_H, width = GRAPH_W_MAX, step = LANE_STEP, dim = false, stash = false }: {
   info: GraphRowInfo; height?: number; width?: number; step?: number; dim?: boolean; stash?: boolean;
 }) {
   const t = useTheme();
@@ -565,7 +565,7 @@ function GraphRowSVG({ info, height = ROW_H, width = GRAPH_W_MAX, step = LANE_ST
       )}
     </svg>
   );
-}
+});
 
 // ─── glass helper ─────────────────────────────────────────────────────────────
 
@@ -1462,7 +1462,6 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
   onContextMenu?: (e: React.MouseEvent) => void;
 }) {
   const t = useTheme();
-  const [hovered, setHovered] = useState(false);
   const laneColor = graphInfo.colors?.dot ?? getLC(graphInfo.dotLane);
   const isMerge = commit.parents.length > 1;
   const equivalents = orderedEquivalentCommits(commit);
@@ -1483,18 +1482,19 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
   return (
     <div onClick={onClick}
       data-commit-hash={commit.fullHash}
+      data-selected={selected ? "true" : "false"}
+      data-highlight={highlight ? "true" : "false"}
       onContextMenu={onContextMenu}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      className="gk-smart-row relative cursor-pointer overflow-hidden"
-      style={{ "--gk-smart-row-height": `${rowH}px`, borderBottom: `0.5px solid ${t.border}`,
+      className="gk-smart-row gk-commit-row relative cursor-pointer overflow-hidden"
+      style={{ "--gk-smart-row-height": `${rowH}px`, "--gk-row-hover": t.rowHover,
+        borderBottom: `0.5px solid ${t.border}`,
         contentVisibility: "auto", containIntrinsicSize: `0 ${rowH}px` } as React.CSSProperties}>
       {/* Inset selection overlay keeps the graph topology readable. */}
-      <div className="absolute pointer-events-none"
+      <div className="gk-commit-row-state absolute pointer-events-none"
         style={{
           top: 2, bottom: 2, left: 5, right: 5,
           borderRadius: R - 3,
-          background: selected ? t.accentBg : highlight ? laneColor + "16" : hovered ? t.rowHover : "transparent",
+          background: selected ? t.accentBg : highlight ? laneColor + "16" : undefined,
           transition: "background 0.1s",
           boxShadow: highlight && !selected ? `inset 0 0 0 0.5px ${laneColor}44` : "none",
         }} />
@@ -1566,7 +1566,7 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
                 data-expanded={smartExpanded ? "true" : "false"}>
                 <div className="min-h-0 overflow-hidden pt-1.5">
                   <div style={{ background: t.inputBg, borderRadius: R - 3 }}>
-                    {equivalents.map((occurrence, index) => (
+                    {smartExpanded && equivalents.map((occurrence, index) => (
                       <button key={occurrence.fullHash} type="button"
                         tabIndex={smartExpanded ? 0 : -1}
                         onClick={(e) => { e.stopPropagation(); onRelatedCommitClick?.(occurrence); }}
@@ -4667,7 +4667,7 @@ export default function App() {
     ? workingSnapshot.files
     : view?.working ?? [];
   const changesCount = activeWorking.length;
-  const remoteNames = remotes.map((r) => r.name);
+  const remoteNames = useMemo(() => remotes.map((r) => r.name), [remotes]);
 
   // ── persist per-repo UI state (hidden/pinned branches, collapsed folders) ──
   const prefsKey = activeProject?.path ?? "";
@@ -4797,11 +4797,11 @@ export default function App() {
         ].filter(Boolean).join("\n").toLocaleLowerCase().includes(deferredCommitQuery));
       })
     : effectiveScopedCommits;
-  const displayGraph = (() => {
+  const displayGraph = useMemo(() => {
     if (!smartMergeActive && !deferredCommitQuery && (!isReal || (!focusActive && hiddenBranches.length === 0))) return graphRows;
     const set = new Set(displayCommits.map((c) => c.fullHash));
     return computeGraph(displayCommits.map((c) => ({ ...c, parents: c.parents.filter((p) => set.has(p)) })));
-  })();
+  }, [smartMergeActive, deferredCommitQuery, isReal, focusActive, hiddenBranches.length, graphRows, displayCommits]);
 
   // Raw topology can place another branch's whole lane above the current HEAD.
   // When Smart Merge is switched off, anchor the viewport to the checked-out
