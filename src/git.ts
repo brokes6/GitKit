@@ -286,16 +286,17 @@ export async function cloneRepo(
   return invoke<string>("git_clone", { url, dest, token: token ?? null, onProgress: channel });
 }
 
-export async function loadBranches(path: string): Promise<Branch[]> {
+export async function loadBranches(path: string, includeRemote = false): Promise<Branch[]> {
   const raw = await invoke<RBranch[]>("git_branches", { path });
   return raw
-    .filter((b) => !b.is_remote)
+    .filter((b) => (!b.is_remote || includeRemote) && !b.name.endsWith("/HEAD"))
     .map((b) => ({
       name: b.name,
       remote: b.upstream ?? undefined,
       ahead: b.ahead,
       behind: b.behind,
       current: b.current,
+      isRemote: b.is_remote,
       color: branchColor(b.name),
       head: b.head_hash,
       worktree: b.worktree ?? undefined,
@@ -312,7 +313,20 @@ export async function loadBranches(path: string): Promise<Branch[]> {
 //    branch shows its whole backbone even when another branch claimed the colour.
 export function attributeBranches(commits: Commit[], branches: Branch[]): void {
   const byHash = new Map(commits.map((c) => [c.fullHash, c]));
-  const order = [...branches].sort((a, b) => (b.current ? 1 : 0) - (a.current ? 1 : 0));
+  const order = branches.filter((b) => !b.isRemote || !b.name.endsWith("/HEAD"))
+    .sort((a, b) => Number(b.current) - Number(a.current) || Number(!!a.isRemote) - Number(!!b.isRemote));
+  // Use the configured upstream, not a matching leaf name: separate remotes
+  // may have unrelated branches with the same name. Tracking aliases share an
+  // identity so hiding a local branch also hides its upstream-only continuation.
+  const trackingNames = new Map<string, string>();
+  for (const b of order) {
+    if (!b.isRemote && b.remote && !trackingNames.has(b.remote)) trackingNames.set(b.remote, b.name);
+  }
+  const labelFor = (b: Branch) => b.isRemote ? trackingNames.get(b.name) ?? b.name : b.name;
+  for (const c of commits) {
+    c.branchLabel = undefined;
+    c.branchLabels = [];
+  }
 
   // primary label — first branch to reach a commit claims it
   const claimed = new Set<string>();
@@ -321,23 +335,35 @@ export function attributeBranches(commits: Commit[], branches: Branch[]): void {
     while (h && byHash.has(h) && !claimed.has(h)) {
       claimed.add(h);
       const c = byHash.get(h)!;
-      c.branchLabel = b.name;
+      c.branchLabel = labelFor(b);
       h = c.parents[0];
     }
   }
 
   // full membership — every branch's complete first-parent backbone
-  for (const c of commits) c.branchLabels = [];
   for (const b of order) {
+    const name = labelFor(b);
     let h = b.head;
     const seen = new Set<string>();
     while (h && byHash.has(h) && !seen.has(h)) {
       seen.add(h);
       const c = byHash.get(h)!;
-      if (!c.branchLabels!.includes(b.name)) c.branchLabels!.push(b.name);
+      if (!c.branchLabels!.includes(name)) c.branchLabels!.push(name);
       h = c.parents[0];
     }
   }
+}
+
+// Context for date-interleaved history. This describes first-parent ancestry,
+// not a ref pointing at this commit; real tip badges and smart-merge footers
+// already provide their own branch context.
+export function historyBranchContext(commit: Commit, previous?: Commit): string | undefined {
+  const name = commit.branchLabel;
+  if (!name || commit.isStash || (commit.equivalentCommits?.length ?? 0) > 1) return undefined;
+  if (commit.tags?.includes(name)) return undefined;
+  if (previous && !previous.isStash && (previous.equivalentCommits?.length ?? 0) <= 1
+    && previous.branchLabel === name) return undefined;
+  return name;
 }
 
 interface RRemote { name: string; url: string }

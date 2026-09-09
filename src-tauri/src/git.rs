@@ -119,7 +119,7 @@ fn stable_patch_ids(repo: &str, limit: u32) -> Result<HashMap<String, String>, S
         .args([
             "log",
             "--all",
-            "--topo-order",
+            "--date-order",
             "--no-merges",
             max_count.as_str(),
             "--pretty=format:commit %H",
@@ -500,7 +500,7 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
         &[
             "log",
             "--all",
-            "--topo-order",
+            "--date-order",
             &format!("--max-count={limit}"),
             &format!("--pretty=format:{fmt}"),
         ],

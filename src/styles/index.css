@@ -165,3 +165,52 @@ select:focus-visible,
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Workspace chrome shares the existing theme; only the status strip stays dark. */
+.gk-action-bar { height: 44px; }
+.gk-toolbar-project { flex: 0 1 auto; }
+.gk-toolbar-name { max-width: 108px; }
+.gk-toolbar-branch { max-width: 104px; }
+.gk-workspace {
+  --gk-project-width: 176px;
+  --gk-workspace-gap: 12px;
+  display: grid;
+  grid-template-columns: var(--gk-project-width) minmax(0, 1fr);
+  transition: grid-template-columns 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.gk-workspace[data-projects-open="false"] {
+  grid-template-columns: var(--gk-workspace-gap) minmax(0, 1fr);
+}
+.gk-project-disclosure {
+  opacity: 1;
+  transform: translateX(0);
+  visibility: visible;
+  transition: opacity 180ms ease-out, transform 220ms cubic-bezier(0.16, 1, 0.3, 1), visibility 0s;
+}
+.gk-workspace[data-projects-open="false"] .gk-project-disclosure {
+  opacity: 0;
+  transform: translateX(-12px);
+  visibility: hidden;
+  transition: opacity 120ms ease-in, transform 180ms ease-in, visibility 0s linear 180ms;
+}
+.gk-project-sidebar { width: var(--gk-project-width); height: 100%; padding-top: 8px; }
+.gk-branch-sidebar { width: 168px; }
+.gk-workspace-card { margin: 12px 12px 12px 0; border-radius: 14px; }
+.gk-status-bar { height: 28px; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+.gk-shell-button:not(:disabled):hover { background: var(--gk-shell-hover, var(--gk-project-hover)); }
+.gk-shell-button:disabled { opacity: 0.4; cursor: default; }
+.gk-project-item:not([data-project-active]):hover { background: var(--gk-project-hover); }
+.gk-project-close { opacity: 0; }
+.gk-project-item:hover .gk-project-close,
+.gk-project-item:focus-within .gk-project-close { opacity: 1; }
+.gk-project-item:has(.gk-project-close):hover .gk-project-count,
+.gk-project-item:has(.gk-project-close):focus-within .gk-project-count { opacity: 0; }
+.gk-project-close:hover { background: var(--gk-project-close-hover); }
+
+@media (max-width: 1100px) {
+  .gk-workspace { --gk-project-width: 160px; --gk-workspace-gap: 8px; }
+  .gk-branch-sidebar { width: 152px; }
+  .gk-workspace-card { margin-top: 8px; margin-right: 8px; margin-bottom: 8px; }
+  .gk-toolbar-name { max-width: 88px; }
+  .gk-toolbar-branch { max-width: 80px; }
+}

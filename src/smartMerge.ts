@@ -4,6 +4,47 @@ export function commitBranchName(commit: Commit): string {
   return commit.branchLabel ?? commit.branchLabels?.[0] ?? "未归属";
 }
 
+/** A logical group is dated by its latest occurrence, without changing the
+ * representative's identity or the original author/committer metadata. */
+export function commitHistoryDate(commit: Commit): string {
+  return (commit.equivalentCommits ?? [commit]).reduce((latest, occurrence) => {
+    const date = occurrence.committerDate ?? occurrence.date;
+    return Date.parse(date) > Date.parse(latest) ? date : latest;
+  }, commit.committerDate ?? commit.date);
+}
+
+// Date-prioritized topological traversal of the collapsed graph. A parent is
+// eligible only after every visible child, even when clocks disagree. Missing
+// parents outside the loaded history window impose no additional constraint.
+function orderLogicalHistory(commits: Commit[]): Commit[] | null {
+  const byHash = new Map(commits.map((commit) => [commit.fullHash, commit]));
+  const childCounts = new Map(commits.map((commit) => [commit.fullHash, 0]));
+  const index = new Map(commits.map((commit, i) => [commit.fullHash, i]));
+  const times = new Map(commits.map((commit) => [commit.fullHash, Date.parse(commitHistoryDate(commit)) || 0]));
+  for (const commit of commits) {
+    for (const parent of new Set(commit.parents)) {
+      if (byHash.has(parent)) childCounts.set(parent, childCounts.get(parent)! + 1);
+    }
+  }
+  const ready = commits.filter((commit) => childCounts.get(commit.fullHash) === 0);
+  const result: Commit[] = [];
+  while (ready.length) {
+    ready.sort((a, b) => times.get(b.fullHash)! - times.get(a.fullHash)!
+      || index.get(a.fullHash)! - index.get(b.fullHash)!);
+    const commit = ready.shift()!;
+    result.push(commit);
+    for (const parent of new Set(commit.parents)) {
+      if (!byHash.has(parent)) continue;
+      const count = childCounts.get(parent)! - 1;
+      childCounts.set(parent, count);
+      if (count === 0) ready.push(byHash.get(parent)!);
+    }
+  }
+  // Equivalent patches can occur in opposite orders on different branches.
+  // Their quotient would be cyclic; keep the real history in that case.
+  return result.length === commits.length ? result : null;
+}
+
 export function orderedEquivalentCommits(commit: Commit): Commit[] {
   const list = commit.equivalentCommits ?? [commit];
   return [...list].sort((a, b) => {
@@ -61,7 +102,7 @@ export function buildSmartMergeCommits(commits: Commit[], currentBranch: string)
   for (const commit of commits) {
     const group = safeGroups.get(commit.fullHash);
     if (!group) {
-      result.push(commit);
+      result.push({ ...commit, parents: [...new Set(commit.parents.map((parent) => canonicalHash.get(parent) ?? parent))] });
       continue;
     }
     if (emitted.has(group.key)) continue;
@@ -92,5 +133,8 @@ export function buildSmartMergeCommits(commits: Commit[], currentBranch: string)
       equivalentCommits: orderedEquivalentCommits({ ...representative, equivalentCommits: group.occurrences }),
     });
   }
-  return { commits: result, mergedGroups, hiddenCommits };
+  const ordered = orderLogicalHistory(result);
+  return ordered
+    ? { commits: ordered, mergedGroups, hiddenCommits }
+    : { commits, mergedGroups: 0, hiddenCommits: 0 };
 }

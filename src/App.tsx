@@ -9,12 +9,12 @@ import {
   Moon, Sun, Monitor, Plus, Minus, X, FolderOpen, ArrowRight,
   Pin, EyeOff, Eye, Folder, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
   Settings, UserPlus, Trash2, Star, Users, Github, Laptop, Sparkles, RotateCcw, TerminalSquare,
-  Tag as TagIcon, Square, DownloadCloud, Pencil, FolderGit2, Search,
+  Tag as TagIcon, Square, DownloadCloud, Pencil, FolderGit2, Search, PanelLeft, MoreHorizontal,
 } from "lucide-react";
 import {
   pickRepoFolder, openRepo, loadBranches, loadRemotes, loadHistory,
   loadStatus, loadStatusPaths, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
-  attributeBranches, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
+  attributeBranches, historyBranchContext, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
   createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, fetchAll, pull, push, gitlabTest, githubTest,
   createPullRequest, branchColor, setVibrancy, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitRemoteAdd,
@@ -22,7 +22,7 @@ import {
   cancelGitOp, isCancelled, checkUpdates, syncLocal, revealInFileManager,
 } from "./git";
 import type { DepInfo, Tag, RepoInfo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged } from "./git";
-import { buildSmartMergeCommits, commitBranchName, orderedEquivalentCommits } from "./smartMerge";
+import { buildSmartMergeCommits, commitBranchName, commitHistoryDate, orderedEquivalentCommits } from "./smartMerge";
 
 // ─── theme ────────────────────────────────────────────────────────────────────
 
@@ -430,7 +430,7 @@ export interface Commit {
 }
 // `worktree` — absolute path of the linked worktree holding this branch, when
 // one does. Such a branch can't be checked out or deleted until it's released.
-export interface Branch { name: string; remote?: string; ahead: number; behind: number; current: boolean; color: string; head?: string; worktree?: string }
+export interface Branch { name: string; remote?: string; isRemote?: boolean; ahead: number; behind: number; current: boolean; color: string; head?: string; worktree?: string }
 export interface Stash { index: number; message: string; date: string }
 export interface Remote { name: string; url: string; branches: string[] }
 export interface GraphRowInfo {
@@ -593,7 +593,6 @@ const THEME_META: Record<ThemeMode, { Icon: typeof Moon; label: string }> = {
 const IS_WINDOWS = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
 const WINDOW_CONTROL_WIDTH = 44;
 const WINDOW_CONTROLS_WIDTH = WINDOW_CONTROL_WIDTH * 3;
-const TITLEBAR_DRAG_STRIP_HEIGHT = 8;
 
 // Minimize / maximize / close for the borderless Windows window.
 function WindowControls() {
@@ -622,10 +621,8 @@ function WindowControls() {
   );
 }
 
-function TitleBar({ projects, activeId, themeMode, onThemeCycle, onSelectProject, onCloseProject, onOpenNew, onCloneNew, onOpenSettings }: {
-  projects: Project[]; activeId: string; themeMode: ThemeMode;
-  onThemeCycle: () => void; onSelectProject: (id: string) => void;
-  onCloseProject: (id: string) => void; onOpenNew: () => void; onCloneNew: () => void; onOpenSettings: () => void;
+function TitleBar({ themeMode, onThemeCycle, onOpenSettings }: {
+  themeMode: ThemeMode; onThemeCycle: () => void; onOpenSettings: () => void;
 }) {
   const t = useTheme();
   const { Icon, label } = THEME_META[themeMode];
@@ -633,16 +630,10 @@ function TitleBar({ projects, activeId, themeMode, onThemeCycle, onSelectProject
   return (
     <div data-tauri-drag-region className="relative h-12 flex items-stretch flex-shrink-0 select-none"
       style={{ ...glassStyle(t), paddingLeft: IS_WINDOWS ? 8 : 92, zIndex: 50 }}>
-      {/* Stays visually transparent while keeping a drag target above full tab rows. */}
-      <div data-tauri-drag-region aria-hidden="true" className="absolute top-0"
-        style={{
-          left: IS_WINDOWS ? 0 : 92,
-          right: IS_WINDOWS ? WINDOW_CONTROLS_WIDTH : 0,
-          height: TITLEBAR_DRAG_STRIP_HEIGHT,
-          zIndex: 1,
-        }} />
-      <ProjectTabBar projects={projects} activeId={activeId} embedded
-        onSelect={onSelectProject} onClose={onCloseProject} onAdd={onOpenNew} onClone={onCloneNew} />
+      <div data-tauri-drag-region className="flex flex-1 min-w-0 items-center gap-2.5 px-3">
+        <span className="pointer-events-none text-sm font-semibold" style={{ color: t.text }}>GitKit</span>
+        <span className="pointer-events-none text-xs" style={{ color: t.textMuted }}>Workspace</span>
+      </div>
       <div className="flex items-center gap-0.5 px-2 flex-shrink-0"
         style={{ borderLeft: `0.5px solid ${t.glassBorder}` }}>
         <button onClick={onThemeCycle} className={iconButton}
@@ -665,100 +656,67 @@ function TitleBar({ projects, activeId, themeMode, onThemeCycle, onSelectProject
   );
 }
 
-// ─── ProjectTab ───────────────────────────────────────────────────────────────
+// ─── Project sidebar ──────────────────────────────────────────────────────────
 
-function ProjectTab({ project, isActive, isLast, onSelect, onClose }: {
-  project: Project; isActive: boolean; isLast: boolean; onSelect: () => void; onClose?: () => void;
+function ProjectItem({ project, isActive, onSelect, onClose }: {
+  project: Project; isActive: boolean; onSelect: () => void; onClose?: () => void;
 }) {
   const t = useTheme();
-  const [hovered, setHovered] = useState(false);
   return (
-    <div role="tab" aria-selected={isActive} tabIndex={isActive ? 0 : -1}
-      className="relative flex items-center gap-2 px-3.5 cursor-pointer flex-shrink-0 select-none"
-      data-tab-active={isActive || undefined}
-      onClick={onSelect}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(); } }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      style={{
-        height: "100%",
-        minWidth: 142, maxWidth: 196,
-        background: isActive
-          ? (t.isDark ? "rgba(255,255,255,0.055)" : t.bgPanel)
-          : hovered ? t.rowHover : "transparent",
-        borderRight: isLast ? "none" : `0.5px solid ${t.glassBorder}`,
-        transition: "background 0.12s",
-      }}>
-      {/* Active indicator */}
-      {isActive && (
-        <div className="absolute bottom-0 left-3.5 right-3.5"
-          style={{ height: 2, background: t.accent, borderRadius: "2px 2px 0 0" }} />
-      )}
-      <div className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-        style={{ background: project.color, opacity: isActive ? 0.85 : 0.32,
-          transition: "opacity 0.15s" }} />
-      <div className="flex flex-col min-w-0 flex-1 text-left gap-px">
-        <span className="text-[13px] leading-tight truncate"
-          style={{ color: isActive ? t.text : t.textSec, fontWeight: isActive ? 600 : 450 }}>
-          {project.name}
+    <div className="gk-project-item relative flex items-center flex-shrink-0"
+      data-project-active={isActive || undefined}
+      style={{ background: isActive ? t.rowSelected : undefined, borderRadius: R - 2 }}>
+      <button type="button" onClick={onSelect} aria-current={isActive ? "true" : undefined}
+        title={`${project.name} · ${project.branch}\n${project.path}`}
+        className="flex items-center gap-2 w-full min-w-0 text-left cursor-pointer"
+        style={{ padding: "8px 26px 8px 8px", color: isActive ? t.accentFg : t.textSec }}>
+        <FolderGit2 size={15} className="flex-shrink-0" aria-hidden="true" />
+        <span className="flex flex-col min-w-0 gap-0.5">
+          <span className="text-xs leading-tight truncate" style={{ fontWeight: isActive ? 600 : 500,
+            color: isActive ? t.text : t.textSec }}>{project.name}</span>
+          <span className="text-[11px] leading-tight truncate" style={{ color: isActive ? t.accentFg : t.textMuted }}>
+            {project.branch || "未检出分支"}
+          </span>
         </span>
-        <span className="text-[11px] font-mono leading-tight truncate tabular-nums"
-          style={{ color: isActive ? t.textMuted : t.textFaint }}>
-          {project.branch}
-        </span>
-      </div>
-      {/* The changes badge stays in the layout at all times so the tab width never
-          shifts on hover; it just fades out to reveal the close button, which is
-          absolutely positioned (out of flow) and overlays the same slot. */}
+      </button>
       {project.changes > 0 && (
-        <span className="flex-shrink-0 text-[11px] font-bold px-1.5 py-px transition-opacity duration-100"
-          style={{ background: project.color + "20", color: project.color,
-            border: `1px solid ${project.color}44`, borderRadius: 20,
-            opacity: hovered && onClose ? 0 : 1 }}>
-          {project.changes}
-        </span>
+        <span className="gk-project-count absolute right-2 text-[10px] font-semibold tabular-nums pointer-events-none"
+          style={{ color: t.accentFg }}>{project.changes}</span>
       )}
-      {hovered && onClose && (
-        <button onClick={(e) => { e.stopPropagation(); onClose(); }}
-          className="absolute flex items-center justify-center w-5 h-5 transition-colors"
+      {onClose && (
+        <button type="button" onClick={(event) => {
+          const row = event.currentTarget.closest(".gk-project-item");
+          const neighbor = row?.nextElementSibling ?? row?.previousElementSibling;
+          neighbor?.querySelector<HTMLButtonElement>("button")?.focus();
+          onClose();
+        }}
+          className="gk-project-close absolute right-0.5 flex items-center justify-center w-7 h-7 cursor-pointer"
           aria-label={`关闭项目 ${project.name}`} title={`关闭 ${project.name}`}
-          style={{ right: 12, top: "50%", transform: "translateY(-50%)",
-            color: t.textMuted, borderRadius: 6, background: "transparent" }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = t.redBg; e.currentTarget.style.color = t.red; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textMuted; }}>
-          <X size={9} />
+          style={{ color: t.textMuted, borderRadius: R - 3 }}>
+          <X size={12} aria-hidden="true" />
         </button>
       )}
     </div>
   );
 }
 
-// ─── ProjectTabBar ────────────────────────────────────────────────────────────
+// ─── Repository navigation ───────────────────────────────────────────────────
 
-function ProjectTabBar({ projects, activeId, onSelect, onClose, onAdd, onClone, embedded = false }: {
-  projects: Project[]; activeId: string;
+function ProjectSidebar({ projects, activeId, open, onSelect, onClose, onAdd, onClone }: {
+  open: boolean; projects: Project[]; activeId: string;
   onSelect: (id: string) => void; onClose: (id: string) => void;
   onAdd: () => void; onClone: () => void;
-  embedded?: boolean;
 }) {
   const t = useTheme();
   const scrollRef = useRef<HTMLDivElement>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
   const addMenuRef = useRef<HTMLDivElement>(null);
   const [addMenuPos, setAddMenuPos] = useState<{ left: number; top: number } | null>(null);
-  const lastId = projects[projects.length - 1]?.id;
-  // Keep the active tab in view when it changes. If it's the last one, scroll
-  // all the way to the end so the trailing "+" button is revealed too.
   useEffect(() => {
-    const c = scrollRef.current;
-    if (!c) return;
-    if (activeId && activeId === lastId) {
-      c.scrollTo({ left: c.scrollWidth, behavior: "smooth" });
-    } else {
-      c.querySelector<HTMLElement>("[data-tab-active]")
-        ?.scrollIntoView({ behavior: "smooth", inline: "nearest", block: "nearest" });
-    }
-  }, [activeId, lastId, projects.length]);
+    if (!open) { setAddMenuPos(null); return; }
+    scrollRef.current?.querySelector<HTMLElement>("[data-project-active]")
+      ?.scrollIntoView({ block: "nearest" });
+  }, [activeId, projects.length, open]);
 
   useEffect(() => {
     if (!addMenuPos) return;
@@ -795,29 +753,30 @@ function ProjectTabBar({ projects, activeId, onSelect, onClose, onAdd, onClone, 
 
   return (
     <>
-      <div ref={scrollRef} data-tauri-drag-region role="tablist" aria-label="打开的项目"
-        className="flex items-stretch flex-1 min-w-0 select-none"
-        style={{ ...(embedded ? { background: "transparent" } : glassStyle(t)),
-          height: embedded ? 48 : 42, overflowX: "auto", scrollbarWidth: "none" }}>
-        <div style={{ width: "0.5px", background: t.glassBorder, flexShrink: 0 }} />
-        {projects.map((proj, i) => (
-          <ProjectTab key={proj.id} project={proj} isActive={proj.id === activeId}
-            isLast={i === projects.length - 1}
-            onSelect={() => onSelect(proj.id)}
-            onClose={projects.length > 1 ? () => onClose(proj.id) : undefined} />
-        ))}
-        <button ref={addButtonRef} onClick={toggleAddMenu}
-          className="flex items-center justify-center px-3.5 flex-shrink-0 transition-colors duration-100"
-          style={{ color: addMenuPos ? t.accent : t.textFaint,
-            background: addMenuPos ? t.accentBg : "transparent",
-            borderLeft: `0.5px solid ${t.glassBorder}` }}
-          onMouseEnter={(e) => { e.currentTarget.style.color = t.textSec; e.currentTarget.style.background = addMenuPos ? t.accentBg : t.rowHover; }}
-          onMouseLeave={(e) => { e.currentTarget.style.color = addMenuPos ? t.accent : t.textFaint; e.currentTarget.style.background = addMenuPos ? t.accentBg : "transparent"; }}
-          title="添加仓库" aria-label="添加仓库" aria-haspopup="menu" aria-expanded={!!addMenuPos}>
-          <Plus size={14} aria-hidden="true" />
-        </button>
-        <div data-tauri-drag-region className="flex-1" />
-      </div>
+      <aside id="project-sidebar" aria-label="项目" className="gk-project-sidebar flex flex-col flex-shrink-0 min-h-0 select-none"
+        style={{ background: "transparent",
+          "--gk-project-hover": t.rowHover, "--gk-project-close-hover": t.inputBg } as React.CSSProperties}>
+        <div className="flex items-center justify-between h-10 px-3 flex-shrink-0">
+          <span className="text-[11px] font-semibold" style={{ color: t.textMuted }}>仓库</span>
+          <button ref={addButtonRef} onClick={toggleAddMenu}
+            className="gk-shell-button flex items-center justify-center w-7 h-7 cursor-pointer"
+            style={{ color: addMenuPos ? t.accent : t.textMuted, borderRadius: R - 3 }}
+            title="添加仓库" aria-label="添加仓库" aria-haspopup="menu" aria-expanded={!!addMenuPos}>
+            <Plus size={15} aria-hidden="true" />
+          </button>
+        </div>
+        <nav ref={scrollRef} aria-label="打开的项目" className="flex flex-col flex-1 min-h-0 overflow-y-auto gap-0.5 px-2 pb-2">
+          {projects.map((proj) => (
+            <ProjectItem key={proj.id} project={proj} isActive={proj.id === activeId}
+              onSelect={() => onSelect(proj.id)}
+              onClose={projects.length > 1 ? () => onClose(proj.id) : undefined} />
+          ))}
+          {projects.length === 0 && <span className="px-2 py-3 text-xs" style={{ color: t.textMuted }}>暂无仓库</span>}
+        </nav>
+        <div className="px-3 py-2 text-[11px] flex-shrink-0" style={{ color: t.textMuted }}>
+          {projects.length} 个仓库
+        </div>
+      </aside>
 
       {addMenuPos && createPortal(
         <>
@@ -852,133 +811,151 @@ function ProjectTabBar({ projects, activeId, onSelect, onClose, onAdd, onClone, 
 
 // ─── ActionBar ────────────────────────────────────────────────────────────────
 
-function ActionBar({ onCreateBranch, onFetch, onPull, onPush, onCreateTag, onCherryPick, onStash, onCreatePR, pushCount = 0, busy }: {
-  onCreateBranch?: () => void;
-  onFetch?: () => void; onPull?: () => void; onPush?: () => void;
-  onCreateTag?: () => void;
-  onCherryPick?: () => void; onStash?: () => void; onCreatePR?: () => void;
+function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBranch, onFetch, onPull, onPush,
+  onCreateTag, onCherryPick, onStash, onCreatePR, pushCount = 0, busy }: {
+  project?: Project; branch: string; sidebarOpen: boolean; onToggleSidebar: () => void;
+  onCreateBranch?: () => void; onFetch?: () => void; onPull?: () => void; onPush?: () => void;
+  onCreateTag?: () => void; onCherryPick?: () => void; onStash?: () => void; onCreatePR?: () => void;
   pushCount?: number; busy?: null | "fetch" | "pull" | "push";
 }) {
   const t = useTheme();
-  // Hovering 推送 for >1s reveals a secondary menu (创建 Tag 并推送).
-  const [pushMenu, setPushMenu] = useState(false);
-  const pushTimer = useRef<number | null>(null);
-  const openPushTimer = () => {
-    if (pushTimer.current) clearTimeout(pushTimer.current);
-    pushTimer.current = window.setTimeout(() => setPushMenu(true), 1000);
-  };
-  const closePushMenu = () => {
-    if (pushTimer.current) { clearTimeout(pushTimer.current); pushTimer.current = null; }
-    setPushMenu(false);
-  };
-  const actions = [
-    { label: "获取",       icon: RefreshCw,      accent: false, badge: 0,         separated: false },
-    { label: "拉取",       icon: Download,       accent: false, badge: 0,         separated: false },
-    { label: "推送",       icon: Upload,         accent: false, badge: pushCount, separated: false },
-    { label: "新建分支",   icon: GitBranchPlus,  accent: false, badge: 0,         separated: true },
-    { label: "合并",       icon: GitMerge,       accent: false, badge: 0,         separated: false },
-    { label: "遴选",       icon: GitCommit,      accent: false, badge: 0,         separated: false },
-    { label: "储藏",       icon: Layers,         accent: false, badge: 0,         separated: false },
-    { label: "创建合并请求", icon: GitPullRequest, accent: true, badge: 0,         separated: true },
-  ] as const;
-
-  const handleClick = (label: string) => {
-    if (label === "获取") { onFetch?.(); return; }
-    if (label === "拉取") { onPull?.(); return; }
-    if (label === "推送") { onPush?.(); return; }
-    if (label === "新建分支") { onCreateBranch?.(); return; }
-    if (label === "遴选") { onCherryPick?.(); return; }
-    if (label === "储藏") { onStash?.(); return; }
-    if (label === "创建合并请求") { onCreatePR?.(); return; }
-    const msgs: Record<string, string> = {
-      "合并": "请选择要合并到 main 的分支",
+  const [morePos, setMorePos] = useState<{ x: number; y: number } | null>(null);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const moreMenu = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!morePos) return;
+    moreMenu.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    const close = () => setMorePos(null);
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { close(); moreButton.current?.focus(); }
     };
-    toast(msgs[label]);
-  };
-
-  const busyLabel = busy === "fetch" ? "获取" : busy === "pull" ? "拉取" : busy === "push" ? "推送" : null;
-
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("resize", close);
+    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("resize", close); };
+  }, [morePos]);
+  const actions = [
+    { label: "获取", Icon: RefreshCw, action: onFetch, op: "fetch" },
+    { label: "拉取", Icon: Download, action: onPull, op: "pull" },
+    { label: "推送", Icon: Upload, action: onPush, op: "push" },
+  ] as const;
+  const moreActions = [
+    { label: "遴选", Icon: GitCommit, action: onCherryPick },
+    { label: "储藏", Icon: Layers, action: onStash },
+    { label: "创建 Tag 并推送", Icon: TagIcon, action: onCreateTag },
+    { label: "创建合并请求", Icon: GitPullRequest, action: onCreatePR },
+  ];
   return (
-    <div className="h-[42px] flex items-center px-3 gap-0.5 flex-shrink-0 select-none"
-      aria-label="仓库操作" style={{ background: t.bgPanel, borderBottom: `0.5px solid ${t.border}`,
-        position: "relative", zIndex: 30 }}>
-      {actions.map((a) => {
-        const btn = (
-          <button key={a.label} onClick={() => handleClick(a.label)}
-            disabled={busyLabel === a.label}
-            aria-busy={busyLabel === a.label || undefined}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium transition-[color,background-color,opacity,transform] duration-150 cursor-pointer active:scale-[0.98]"
-            style={{ color: a.accent ? "#fff" : t.textSec, borderRadius: R - 3,
-              marginLeft: a.separated ? 8 : 0,
-              borderLeft: a.separated && !a.accent ? `0.5px solid ${t.border}` : "none",
-              paddingLeft: a.separated && !a.accent ? 14 : 10,
-              background: a.accent ? t.accent : "transparent",
-              boxShadow: a.accent ? (t.isDark ? "inset 0 1px 0 rgba(255,255,255,0.14)" : "inset 0 1px 0 rgba(255,255,255,0.24)") : "none" }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = a.accent ? t.accent : t.inputBg;
-              e.currentTarget.style.color = a.accent ? "#fff" : t.text;
-              if (a.accent) e.currentTarget.style.opacity = "0.88";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = a.accent ? t.accent : "transparent";
-              e.currentTarget.style.color = a.accent ? "#fff" : t.textSec;
-              e.currentTarget.style.opacity = "1";
-            }}>
-            <a.icon size={13} strokeWidth={1.8} aria-hidden="true" className={busyLabel === a.label ? "animate-spin" : undefined} />
-            <span>{a.label}</span>
-            {a.badge > 0 && (
-              <span className="flex items-center justify-center rounded-full text-[11px] font-bold ml-0.5"
-                style={{ minWidth: 16, height: 16, padding: "0 4px", background: t.accent, color: "#fff" }}>
-                {a.badge}
-              </span>
-            )}
-          </button>
-        );
-        // 推送 gets a hover-revealed secondary menu for tag-and-push.
-        if (a.label === "推送" && onCreateTag) {
-          return (
-            <div key={a.label} className="relative"
-              onMouseEnter={openPushTimer} onMouseLeave={closePushMenu}>
-              {btn}
-              {pushMenu && (
-                // paddingTop bridges the 4px gap so moving button→menu never
-                // leaves the hover area (the gap is a descendant, not open space).
-                <div className="absolute left-0 top-full" style={{ paddingTop: 4, zIndex: 80 }}>
-                  <div className="py-1 gk-modal-in"
-                    style={{ minWidth: 168, background: t.dialogBg, border: `0.5px solid ${t.glassBorder}`,
-                      borderRadius: R, boxShadow: t.shadowWindow }}>
-                    <button onClick={() => { closePushMenu(); onCreateTag(); }}
-                      className="flex items-center gap-2 w-full px-3 py-1.5 text-xs font-medium text-left cursor-pointer"
-                      style={{ color: t.textMuted }}
-                      onMouseEnter={(e) => { e.currentTarget.style.background = t.inputBg; e.currentTarget.style.color = t.text; }}
-                      onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textMuted; }}>
-                      <TagIcon size={12} /> 创建 Tag 并推送
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        }
-        return btn;
-      })}
+    <div className="gk-action-bar flex items-center gap-1.5 px-3 flex-shrink-0 select-none"
+      role="group" aria-label="仓库操作"
+      style={{ background: t.bg, borderBottom: `0.5px solid ${t.border}`, color: t.textSec,
+        "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
+      <button onClick={onToggleSidebar} aria-label={sidebarOpen ? "收起项目栏" : "展开项目栏"}
+        aria-expanded={sidebarOpen} aria-controls="project-sidebar" title={sidebarOpen ? "收起项目栏" : "展开项目栏"}
+        className="gk-shell-button flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer">
+        <PanelLeft size={17} aria-hidden="true" />
+      </button>
+      <div className="gk-toolbar-project flex items-center min-w-0 gap-2 px-2 mr-1"
+        style={{ borderRight: `0.5px solid ${t.border}` }}>
+        <span className="gk-toolbar-name text-xs font-semibold truncate" title={project?.path} style={{ color: t.text }}>{project?.name ?? "GitKit"}</span>
+        <span className="flex items-center gap-1 min-w-0" style={{ color: t.textMuted }}>
+          <GitBranch size={12} className="flex-shrink-0" aria-hidden="true" />
+          <span className="gk-toolbar-branch text-[11px] truncate" title={branch}>{project ? branch || "未检出分支" : "选择仓库"}</span>
+        </span>
+      </div>
+      {actions.map(({ label, Icon, action, op }) => (
+        <button key={op} onClick={action} disabled={!action || !!busy} aria-busy={busy === op || undefined}
+          className="gk-shell-button flex items-center justify-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
+          style={{ borderRadius: R - 3 }}>
+          <Icon size={15} aria-hidden="true" className={busy === op ? "animate-spin" : undefined} />
+          {label}
+          {op === "push" && pushCount > 0 && <span className="text-[10px] tabular-nums" style={{ color: t.accentFg }}>{pushCount}</span>}
+        </button>
+      ))}
+      <div className="flex-1" />
+      <button onClick={onCreateBranch} disabled={!onCreateBranch || !!busy}
+        className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
+        style={{ borderRadius: R - 3 }}>
+        <GitBranchPlus size={15} aria-hidden="true" /> 新建分支
+      </button>
+      <button disabled={!project || !!busy} onClick={() => toast(`请选择要合并到 ${branch || "当前分支"} 的分支`)}
+        className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
+        style={{ borderRadius: R - 3, background: t.accent, color: "#fff" }}>
+        <GitMerge size={15} aria-hidden="true" /> 合并
+      </button>
+      <button ref={moreButton} disabled={!project || !!busy} aria-label="更多仓库操作" title="更多仓库操作"
+        aria-haspopup="menu" aria-expanded={!!morePos}
+        onClick={() => {
+          if (morePos) { setMorePos(null); return; }
+          const rect = moreButton.current?.getBoundingClientRect();
+          if (rect) setMorePos({ x: Math.max(8, rect.right - 196), y: rect.bottom + 6 });
+        }} className="gk-shell-button flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer">
+        <MoreHorizontal size={18} aria-hidden="true" />
+      </button>
+      {morePos && createPortal(<>
+        <div className="fixed inset-0" style={{ zIndex: 80 }} onMouseDown={() => setMorePos(null)} />
+        <div ref={moreMenu} role="menu" aria-label="更多仓库操作" className="fixed p-1.5"
+          style={{ left: morePos.x, top: morePos.y, width: 196, zIndex: 81, background: t.dialogBg,
+            border: `0.5px solid ${t.border}`, borderRadius: R, boxShadow: t.shadowEl }}>
+          {moreActions.map(({ label, Icon, action }) => (
+            <button key={label} role="menuitem" disabled={!action} onClick={() => { setMorePos(null); action?.(); }}
+              className="gk-shell-button flex items-center gap-2.5 w-full px-2.5 py-2 text-left text-xs cursor-pointer"
+              style={{ color: t.text, borderRadius: R - 3, "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
+              <Icon size={14} aria-hidden="true" style={{ color: t.textMuted }} />{label}
+            </button>
+          ))}
+        </div>
+      </>, document.body)}
     </div>
+  );
+}
+
+function StatusBar({ project, branch, changes, ready, errored, busy, onShowChanges, onSearch }: {
+  project?: Project; branch?: Branch; changes: number; ready: boolean; errored: boolean;
+  busy: string | null; onShowChanges: () => void; onSearch: () => void;
+}) {
+  const syncLabel = branch?.remote
+    ? (branch.ahead || branch.behind ? `${branch.remote} · 待拉取 ${branch.behind} 个提交，待推送 ${branch.ahead} 个提交` : `${branch.remote} · 已同步`)
+    : "未设置上游";
+  const syncDescription = `${syncLabel}（基于最近获取的远程状态）`;
+  const SyncIcon = !branch?.remote ? Cloud : branch.ahead || branch.behind ? RefreshCw : Check;
+  return (
+    <footer className="gk-status-bar grid items-center gap-4 px-3 flex-shrink-0 text-[11px] select-none"
+      aria-label="仓库状态" style={{ background: "#111214", color: "#C8CBD1", "--gk-shell-hover": "#292B30" } as React.CSSProperties}>
+      <div className="flex items-center gap-1.5 min-w-0">
+        <GitBranch size={12} className="flex-shrink-0" aria-hidden="true" />
+        <span className="truncate" title={project ? branch?.name || project.branch : undefined}>
+          {project ? branch?.name || project.branch || "未检出分支" : "未打开仓库"}
+        </span>
+        {ready && !errored && <span className="flex flex-shrink-0" role="img" aria-label={syncDescription} title={syncDescription}>
+          <SyncIcon size={12} aria-hidden="true" />
+        </span>}
+      </div>
+      <div className="flex items-center justify-center min-w-0" role="status">
+        {busy ? <span className="truncate">{busy}</span> : errored ? <span>仓库加载失败</span> : project && !ready ? <span>正在加载仓库…</span> : ready ?
+          <button onClick={onShowChanges} className="gk-shell-button px-1 h-6 flex-shrink-0 cursor-pointer tabular-nums"
+            title={changes ? "工作区有修改，点击查看" : "工作区干净，点击查看"}
+            aria-label={`查看工作区，${changes} 个变更`}>{changes} 个变更</button>
+        : <span className="truncate">打开仓库以开始</span>}
+      </div>
+      <button onClick={onSearch} disabled={!project} className="gk-shell-button justify-self-end flex items-center gap-2 h-6 px-1 flex-shrink-0 cursor-pointer">
+        <Search size={12} aria-hidden="true" /> 搜索提交 <span style={{ color: "#9CA1AA" }}>{IS_WINDOWS ? "Ctrl F" : "⌘ F"}</span>
+      </button>
+    </footer>
   );
 }
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
-function SidebarSection({ label, open, onToggle }: { label: string; open: boolean; onToggle: () => void }) {
+function SidebarSection({ label, count, open, onToggle }: { label: string; count: number; open: boolean; onToggle: () => void }) {
   const t = useTheme();
   return (
-    <button onClick={onToggle}
-      className="flex items-center gap-1.5 w-full px-3 py-2.5 text-left transition-colors duration-150 cursor-pointer"
-      style={{ color: t.textFaint, borderRadius: R - 2 }}
-      onMouseEnter={(e) => (e.currentTarget.style.color = t.textMuted)}
-      onMouseLeave={(e) => (e.currentTarget.style.color = t.textFaint)}>
+    <button onClick={onToggle} aria-expanded={open}
+      className="gk-shell-button flex items-center gap-1.5 w-full h-8 px-3 text-left cursor-pointer"
+      style={{ color: t.textMuted, "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
       <ChevronRight size={10} className="flex-shrink-0 transition-transform duration-200"
         style={{ transform: open ? "rotate(90deg)" : "rotate(0deg)" }} />
-      <span className="text-[10px] font-semibold tracking-[0.06em]">{label}</span>
+      <span className="text-[11px] font-medium">{label}</span>
+      <span className="ml-auto text-[10px] tabular-nums">{count}</span>
     </button>
   );
 }
@@ -1032,11 +1009,10 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
   const toggleRemoteFolder = (k: string) => setOpenRemoteFolders((p) => p.includes(k) ? p.filter((x) => x !== k) : [...p, k]);
 
   const itemStyle = (active: boolean): React.CSSProperties => ({
-    borderRadius: R - 2,
-    margin: "2px 7px",
+    borderRadius: R - 3,
+    margin: "2px 8px",
     background: active ? t.rowSelected : "transparent",
-    boxShadow: active ? `inset 2px 0 0 ${t.accent}` : "none",
-    transition: "background 0.12s, box-shadow 0.12s",
+    transition: "background 0.12s",
   });
 
   // The current (checked-out) branch is marked with a deepened neutral pill
@@ -1053,14 +1029,14 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onFocus(b.name); } }}
         onContextMenu={(e) => onBranchContext?.(e, b)}
         className="group flex items-center gap-2 pr-2 cursor-pointer"
-        style={{ ...itemStyle(active), background: baseBg, paddingLeft: indent ? 26 : 12, height: 32 }}
+        style={{ ...itemStyle(active), background: baseBg, paddingLeft: indent ? 24 : 10, height: 30 }}
         title={b.worktree
           ? `${b.name}\n已被工作树占用：${b.worktree}\n无法直接切换或删除`
           : `单击只看此分支 · 双击切换到 ${b.name}`}
         onMouseEnter={(e) => { onHoverBranch(b.name); if (!active) e.currentTarget.style.background = b.current ? currentBgHover : t.rowHover; }}
         onMouseLeave={(e) => { onHoverBranch(null); if (!active) e.currentTarget.style.background = baseBg; }}>
-        <div className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-          style={{ background: b.color, opacity: b.current ? 0.9 : 0.42 }} />
+        <GitBranch size={12} className="flex-shrink-0" aria-hidden="true"
+          style={{ color: active ? t.accent : b.current ? b.color : t.textMuted }} />
         <span className="text-xs flex-1 truncate"
           style={{ color: active ? t.accentFg : b.current ? t.text : t.textSec, fontWeight: b.current ? 600 : 400 }}>
           {leaf ?? b.name}
@@ -1081,8 +1057,9 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
             <EyeOff size={11} />
           </button>
         </div>
-        {/* default: ahead/behind counters (current branch no longer needs a tick) */}
+        {/* Checked-out branch and synchronization counts. */}
         <div className="flex group-hover:hidden items-center gap-1 flex-shrink-0">
+          {b.current && <span title="当前检出分支" aria-label="当前检出分支" className="w-1 h-1 rounded-full" style={{ background: t.textMuted }} />}
           {b.ahead  > 0 && <span className="text-[11px]" style={{ color: t.green + "cc" }}>↑{b.ahead}</span>}
           {b.behind > 0 && <span className="text-[11px]" style={{ color: t.amber + "cc" }}>↓{b.behind}</span>}
         </div>
@@ -1101,14 +1078,14 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
       <div key={`${remoteName}/${leaf}`}
         onDoubleClick={() => onSyncRemote?.(remoteName, leaf)}
         onContextMenu={(e) => onRemoteContext?.(e, remoteName, leaf)}
-        className="flex items-center gap-2 pr-2 py-1 cursor-pointer select-none"
-        style={{ paddingLeft: pad, borderRadius: R - 2, margin: "0 8px 0 0",
-          background: isCurrent ? t.rowCurrent : "transparent", transition: "background 0.12s" }}
+        className="flex items-center gap-2 pr-2 cursor-pointer select-none"
+        style={{ height: 30, paddingLeft: pad, borderRadius: R - 3, margin: "2px 8px",
+          background: "transparent", transition: "background 0.12s" }}
         title={hasLocal ? `双击切换到本地分支 ${leaf}` : `双击将 ${remoteName}/${leaf} 同步到本地并检出`}
-        onMouseEnter={(e) => { if (!isCurrent) e.currentTarget.style.background = t.rowHover; }}
-        onMouseLeave={(e) => { if (!isCurrent) e.currentTarget.style.background = "transparent"; }}>
-        <GitBranch size={10} className="flex-shrink-0" style={{ color: isCurrent ? t.accent : t.textFaint }} />
-        <span className="text-[11px] truncate flex-1" style={{ color: isCurrent ? t.accentFg : t.textMuted }}>{label}</span>
+        onMouseEnter={(e) => { e.currentTarget.style.background = t.rowHover; }}
+        onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
+        <GitBranch size={12} className="flex-shrink-0" style={{ color: isCurrent ? t.accent : t.textFaint }} />
+        <span className="text-xs truncate flex-1" style={{ color: isCurrent ? t.accentFg : t.textSec }}>{label}</span>
         {hasLocal
           ? <Laptop size={10} className="flex-shrink-0" style={{ color: t.textFaint }} />
           : <Download size={10} className="flex-shrink-0" style={{ color: t.textFaint }} />}
@@ -1129,20 +1106,16 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
   const hiddenBranches = branches.filter((b) => hidden.includes(b.name));
 
   return (
-    <div className="w-[212px] flex-shrink-0 flex flex-col overflow-y-auto select-none"
-      style={{ background: t.sidebarBg,
-        backdropFilter: "blur(12px) saturate(110%)",
-        WebkitBackdropFilter: "blur(12px) saturate(110%)",
-        borderRight: `0.5px solid ${t.glassBorder}` }}>
+    <div className="gk-branch-sidebar flex-shrink-0 flex flex-col overflow-y-auto select-none"
+      style={{ background: "transparent", borderRight: `0.5px solid ${t.border}` }}>
 
-      <div className="pt-2.5">
+      <div className="pt-2">
         {/* Global "all branches" view toggle — active when no branch is focused */}
         <button onClick={onShowAll}
-          className="flex items-center gap-2 mx-[7px] mb-1 px-2.5 cursor-pointer"
-          style={{ height: 32, borderRadius: R - 2,
+          className="flex items-center gap-2 mx-2 mb-2 px-2.5 cursor-pointer"
+          style={{ height: 30, width: "calc(100% - 16px)", borderRadius: R - 3,
             background: focusBranch === null ? t.accentBg : "transparent",
-            color: focusBranch === null ? t.accentFg : t.textSec,
-            boxShadow: focusBranch === null ? `inset 2px 0 0 ${t.accent}` : "none" }}
+            color: focusBranch === null ? t.accentFg : t.textSec }}
           onMouseEnter={(e) => { if (focusBranch !== null) e.currentTarget.style.background = t.rowHover; }}
           onMouseLeave={(e) => { if (focusBranch !== null) e.currentTarget.style.background = "transparent"; }}>
           <LayoutGrid size={13} className="flex-shrink-0"
@@ -1150,7 +1123,7 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
           <span className="text-xs font-medium flex-1 text-left truncate">全部视图</span>
           {focusBranch === null && <Check size={12} strokeWidth={2.2} style={{ color: t.accent }} />}
         </button>
-        <SidebarSection label="分支" open={branchesOpen} onToggle={() => setBranchesOpen(!branchesOpen)} />
+        <SidebarSection label="本地分支" count={visible.length} open={branchesOpen} onToggle={() => setBranchesOpen(!branchesOpen)} />
         <SidebarDisclosure open={branchesOpen} className="pb-2">
             {pinnedBranches.length > 0 && (
               <>
@@ -1221,11 +1194,11 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
         </SidebarDisclosure>
       </div>
 
-      <div className="pt-1" style={{ borderTop: `0.5px solid ${t.border}` }}>
-        <SidebarSection label="远程" open={remotesOpen} onToggle={() => setRemotesOpen(!remotesOpen)} />
+      <div className="pt-2">
+        <SidebarSection label="远程仓库" count={remotes.length} open={remotesOpen} onToggle={() => setRemotesOpen(!remotesOpen)} />
         <SidebarDisclosure open={remotesOpen} className="pb-2">
             {remotes.length === 0 && (
-              <div className="px-4 py-1.5 text-[11px]" style={{ color: t.textFaint }}>无远程</div>
+              <div className="px-7 py-1.5 text-[11px]" style={{ color: t.textMuted }}>无远程</div>
             )}
             {remotes.map((r) => {
               const open = openRemotes.includes(r.name);
@@ -1258,7 +1231,7 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
                     });
                     return (
                       <>
-                        {rootLeaves.map((leaf) => renderRemoteLeaf(r.name, leaf, leaf, 40))}
+                        {rootLeaves.map((leaf) => renderRemoteLeaf(r.name, leaf, leaf, 24))}
                         {Array.from(folders.keys()).sort().map((folder) => {
                           const key = `${r.name}/${folder}`;
                           const isCol = !openRemoteFolders.includes(key); // default collapsed
@@ -1267,7 +1240,7 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
                             <div key={key}>
                               <div onClick={() => toggleRemoteFolder(key)}
                                 className="flex items-center gap-1.5 px-3 cursor-pointer"
-                                style={{ color: t.textSec, height: 28, paddingLeft: 40 }}
+                                style={{ color: t.textSec, height: 30, paddingLeft: 32 }}
                                 onMouseEnter={(e) => (e.currentTarget.style.color = t.text)}
                                 onMouseLeave={(e) => (e.currentTarget.style.color = t.textSec)}>
                                 <ChevronRight size={11} className="flex-shrink-0 transition-transform duration-200"
@@ -1277,7 +1250,7 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
                                 <span className="text-[11px] flex-shrink-0" style={{ color: t.textFaint }}>{list.length}</span>
                               </div>
                               <SidebarDisclosure open={!isCol}>
-                                {list.map((leaf) => renderRemoteLeaf(r.name, leaf, leaf.slice(folder.length + 1), 56))}
+                                {list.map((leaf) => renderRemoteLeaf(r.name, leaf, leaf.slice(folder.length + 1), 36))}
                               </SidebarDisclosure>
                             </div>
                           );
@@ -1292,11 +1265,11 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
         </SidebarDisclosure>
       </div>
 
-      <div className="pt-1" style={{ borderTop: `0.5px solid ${t.border}` }}>
-        <SidebarSection label="储藏" open={stashesOpen} onToggle={() => setStashesOpen(!stashesOpen)} />
+      <div className="pt-2">
+        <SidebarSection label="储藏" count={stashes.length} open={stashesOpen} onToggle={() => setStashesOpen(!stashesOpen)} />
         <SidebarDisclosure open={stashesOpen} className="pb-2">
             {stashes.length === 0 && (
-              <div className="px-3 py-1.5 text-[11px]" style={{ color: t.textFaint, margin: "0 8px" }}>
+              <div className="px-7 py-1.5 text-[11px]" style={{ color: t.textMuted }}>
                 暂无储藏
               </div>
             )}
@@ -1354,25 +1327,25 @@ function remoteRefName(tag: string, remoteNames: string[]): string | null {
 //  local — local branch only (not on remote at this commit);  remote — remote-only;
 //  tag — a version tag.
 type RefKind = "head" | "local" | "remote" | "both" | "tag";
-function refBadges(tags: string[], remoteNames: string[]): { name: string; kind: RefKind }[] {
+function refBadges(tags: string[], remoteNames: string[]): { name: string; kind: RefKind; colorName?: string }[] {
   let head = false;
   const localNames: string[] = [];
-  const remoteSimple = new Map<string, boolean>();
+  const remoteSimple = new Map<string, string>();
   for (const tag of tags) {
     if (tag === "HEAD") { head = true; continue; }
     if (tag.endsWith("/HEAD")) continue;
     const rem = remoteRefName(tag, remoteNames);
-    if (rem !== null) remoteSimple.set(rem, true);
+    if (rem !== null) remoteSimple.set(rem, tag);
     else localNames.push(tag);
   }
-  const out: { name: string; kind: RefKind }[] = [];
+  const out: { name: string; kind: RefKind; colorName?: string }[] = [];
   if (head) out.push({ name: "HEAD", kind: "head" });
   for (const name of localNames) {
     if (/^v\d/.test(name)) { out.push({ name, kind: "tag" }); continue; }
     if (remoteSimple.has(name)) { out.push({ name, kind: "both" }); remoteSimple.delete(name); }
     else out.push({ name, kind: "local" });
   }
-  for (const name of remoteSimple.keys()) out.push({ name, kind: "remote" });
+  for (const [name, fullName] of remoteSimple) out.push({ name, kind: "remote", colorName: fullName });
   return out;
 }
 
@@ -1409,12 +1382,12 @@ function InlineRefs({ tags, remoteNames, onDblClick }: {
 // none so hovering it doesn't steal the pointer from the wrapper (no flicker); the
 // wrapper keeps the hover + the double-click-to-checkout target.
 function RefPill({ b, onDblClick }: {
-  b: { kind: string; name: string }; onDblClick?: (name: string) => void;
+  b: { kind: string; name: string; colorName?: string }; onDblClick?: (name: string) => void;
 }) {
   const t = useTheme();
   const ref = useRef<HTMLSpanElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
-  const c = b.kind === "tag" ? t.amber : branchColor(b.name);
+  const c = b.kind === "tag" ? t.amber : branchColor(b.colorName ?? b.name);
   const hasLocal = b.kind === "local" || b.kind === "both";
   const hasRemote = b.kind === "remote" || b.kind === "both";
   const tip = b.kind === "both" ? "本地 + 远端(已同步)" : b.kind === "local" ? "仅本地(未推送)"
@@ -1454,8 +1427,9 @@ function RefPill({ b, onDblClick }: {
 }
 
 
-function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GRAPH_W_MAX, laneStep = LANE_STEP, remoteNames = [], smartExpanded = false, onToggleSmart, onRelatedCommitClick, onBranchDblClick, onClick, onContextMenu }: {
+function CommitRow({ commit, branchContext, graphInfo, selected, highlight = false, graphW = GRAPH_W_MAX, laneStep = LANE_STEP, remoteNames = [], smartExpanded = false, onToggleSmart, onRelatedCommitClick, onBranchDblClick, onClick, onContextMenu }: {
   commit: Commit; graphInfo: GraphRowInfo; selected: boolean; highlight?: boolean; graphW?: number; laneStep?: number;
+  branchContext?: string;
   remoteNames?: string[]; smartExpanded?: boolean; onToggleSmart?: () => void;
   onRelatedCommitClick?: (commit: Commit) => void;
   onBranchDblClick?: (name: string) => void; onClick: () => void;
@@ -1466,14 +1440,12 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
   const isMerge = commit.parents.length > 1;
   const equivalents = orderedEquivalentCommits(commit);
   const isSmartMerged = equivalents.length > 1;
-  // Refs (branch tips / HEAD / tags) only ever sit on their tip commit, so they
-  // render inline once — no separate gutter column, no per-commit backbone list.
   const hasRefs = refBadges(commit.tags ?? [], remoteNames).length > 0;
   // Deterministic height (all content is single-line) → no per-row measurement,
   // which lets us use content-visibility for smooth scrolling on long histories.
   // Merges no longer take their own row — the glyph sits inline on the message line.
   const parts: number[] = [];
-  if (hasRefs) parts.push(20);   // inline ref-capsule line (tip commits only)
+  if (hasRefs || branchContext) parts.push(20); // refs or a branch transition
   parts.push(22, 20);            // message + meta
   // Keep the compact association and its disclosure in one flex child. The
   // inner grid owns the reveal, so the collapsed row keeps its original height.
@@ -1504,9 +1476,15 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
           <GraphRowSVG info={graphInfo} height={rowH} width={graphW} step={laneStep} stash={commit.isStash} />
         </div>
         <div className="flex-1 min-w-0 flex flex-col justify-center py-2.5 pr-3 gap-1.5">
-          {/* Branch/HEAD/tag capsules — coloured to match their lane, shown once on
-              the tip commit, right next to the message. */}
-          <InlineRefs tags={commit.tags ?? []} remoteNames={remoteNames} onDblClick={onBranchDblClick} />
+          {(hasRefs || branchContext) && <div className="flex items-center gap-2 min-w-0">
+            <InlineRefs tags={commit.tags ?? []} remoteNames={remoteNames} onDblClick={onBranchDblClick} />
+            {branchContext && <span className="flex items-center gap-1 min-w-0 text-[11px] font-mono"
+              title={`${branchContext} · 分支历史（沿第一父提交追溯）`}
+              aria-label={`分支历史：${branchContext}`} style={{ color: t.textMuted }}>
+              <GitBranch size={11} className="flex-shrink-0" aria-hidden="true" style={{ color: laneColor }} />
+              <span className="truncate">{branchContext}</span>
+            </span>}
+          </div>}
           {/* Merge: a small lane-coloured glyph inline on the message line — the
               coloured graph lines now carry the "who merged into whom", so no badge row. */}
           <div className="flex items-center gap-1.5 min-w-0">
@@ -1535,8 +1513,9 @@ function CommitRow({ commit, graphInfo, selected, highlight = false, graphW = GR
             <Avatar author={commit.author} size={16} />
             <span className="text-[12px] truncate" style={{ color: t.textMuted }}>{commit.author.name}</span>
             <span className="text-[11px] font-mono flex-shrink-0" style={{ color: t.textFaint }}>{commit.hash}</span>
-            <span className="text-[11px] ml-auto flex-shrink-0" style={{ color: t.textFaint }}>
-              {formatRelativeTime(commit.date)}
+            <span className="text-[11px] ml-auto flex-shrink-0" style={{ color: t.textFaint }}
+              title={`${isSmartMerged ? "最近一次提交" : "提交时间"}：${formatFullDate(commitHistoryDate(commit))}`}>
+              {formatRelativeTime(commitHistoryDate(commit))}
             </span>
           </div>
           {isSmartMerged && (
@@ -1794,8 +1773,8 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onReveal, onCherryPi
             <div className="text-xs mt-0.5" style={{ color: t.textMuted }}>{commit.author.email}</div>
           </div>
           <div className="text-right flex-shrink-0">
-            <div className="text-xs" style={{ color: t.textMuted }}>{formatRelativeTime(commit.date)}</div>
-            <div className="text-[12px] mt-0.5" style={{ color: t.textFaint }}>{formatFullDate(commit.date)}</div>
+            <div className="text-xs" style={{ color: t.textMuted }}>{formatRelativeTime(commit.committerDate ?? commit.date)}</div>
+            <div className="text-[12px] mt-0.5" style={{ color: t.textFaint }} title="提交时间">{formatFullDate(commit.committerDate ?? commit.date)}</div>
           </div>
         </div>
         <div className="text-sm font-semibold leading-snug mb-2" style={{ color: t.text }}>{commit.message}</div>
@@ -2566,6 +2545,97 @@ function Modal({ title, Icon, onClose, width = 480, children, footer }: {
         )}
       </div>
     </div>
+  );
+}
+
+function CommitSearchDialog({ commits, projectName, ready, errored, onClose, onSelect }: {
+  commits: Commit[]; projectName: string; ready: boolean; errored: boolean;
+  onClose: () => void; onSelect: (commit: Commit) => void;
+}) {
+  const t = useTheme();
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const deferredQuery = useDeferredValue(normalizedQuery);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const matches = useMemo(() => deferredQuery ? commits.filter((commit) => [
+    commit.message, commit.body, commit.author.name, commit.author.email,
+    commit.hash, commit.fullHash, commit.branchLabel,
+    ...(commit.branchLabels ?? []), ...(commit.tags ?? []),
+  ].filter(Boolean).join("\n").toLocaleLowerCase().includes(deferredQuery)) : commits, [commits, deferredQuery]);
+  const results = matches.slice(0, 80);
+  const searching = normalizedQuery !== deferredQuery;
+  useEffect(() => {
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    inputRef.current?.focus();
+    const dialog = inputRef.current?.closest('[role="dialog"]');
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || !dialog) return;
+      const controls = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input'));
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    };
+    window.addEventListener("keydown", trapFocus);
+    return () => { window.removeEventListener("keydown", trapFocus); previous?.focus(); };
+  }, []);
+  useEffect(() => { resultsRef.current?.scrollTo({ top: 0 }); }, [deferredQuery]);
+  return (
+    <Modal title="搜索提交" Icon={Search} width={620} onClose={onClose}>
+      <label className="gk-search-field flex items-center gap-2.5 h-12 flex-shrink-0 px-3"
+        style={{ background: t.inputBg, border: `0.5px solid ${t.inputBorder}`, borderRadius: R }}>
+        <Search size={16} className="flex-shrink-0" aria-hidden="true" style={{ color: t.textMuted }} />
+        <input ref={inputRef} value={query} onChange={(event) => setQuery(event.target.value)}
+          aria-label="搜索提交" placeholder="搜索消息、作者、分支或哈希…" autoComplete="off" spellCheck={false}
+          className="gk-search-input min-w-0 flex-1 h-6 bg-transparent text-sm leading-6 outline-none"
+          style={{ color: t.text }} onKeyDown={(event) => {
+            if (event.key === "ArrowDown") { event.preventDefault(); resultsRef.current?.querySelector<HTMLButtonElement>("button")?.focus(); }
+            if (event.key === "Enter" && results[0] && !searching && ready && !errored) { event.preventDefault(); onSelect(results[0]); }
+          }} />
+        <span className="w-6 h-6 flex-shrink-0">
+          {query && <button type="button" aria-label="清空搜索" onClick={() => { setQuery(""); inputRef.current?.focus(); }}
+            className="flex items-center justify-center w-6 h-6 cursor-pointer" style={{ color: t.textMuted }}><X size={14} /></button>}
+        </span>
+      </label>
+      <div className="flex items-center gap-3 text-[11px]" style={{ color: t.textMuted }}>
+        <span className="truncate" title={projectName}>{projectName} · 已加载的提交</span>
+        <span className="ml-auto flex-shrink-0" role="status">
+          {errored ? "加载失败" : !ready ? "正在加载…" : searching ? "搜索中…" : deferredQuery ? `${matches.length} 条结果` : "最近提交"}
+        </span>
+      </div>
+      <div ref={resultsRef} className="gk-search-results overflow-y-auto min-h-0" style={{ height: 320 }}
+        aria-label="搜索结果" aria-busy={searching || !ready} onKeyDown={(event) => {
+          if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+          const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+          const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
+          event.preventDefault();
+          if (event.key === "ArrowUp" && index <= 0) { inputRef.current?.focus(); return; }
+          const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : index + (event.key === "ArrowDown" ? 1 : -1);
+          buttons[Math.max(0, Math.min(next, buttons.length - 1))]?.focus();
+        }}>
+        {errored || !ready || results.length === 0 ? (
+          <div className="h-full flex flex-col items-center justify-center gap-2 text-xs text-center" style={{ color: t.textMuted }}>
+            <Search size={24} aria-hidden="true" />
+            <span>{errored ? "仓库加载失败，请关闭搜索后重试" : !ready ? "正在读取提交…" : deferredQuery ? "没有匹配的提交，试试其他关键词" : "这个仓库还没有提交"}</span>
+          </div>
+        ) : results.map((commit) => (
+          <button key={commit.fullHash} type="button" disabled={searching} onClick={() => onSelect(commit)}
+            className="gk-shell-button flex items-start gap-2.5 w-full px-3 py-3 text-left cursor-pointer"
+            style={{ borderRadius: R - 3, color: t.text, "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
+            <GitCommit size={15} className="flex-shrink-0 mt-0.5" aria-hidden="true" style={{ color: t.accent }} />
+            <span className="flex flex-col gap-1 min-w-0 flex-1">
+              <span className="text-xs font-medium truncate" title={commit.message}>{commit.message}</span>
+              <span className="text-[11px] truncate" style={{ color: t.textMuted }}>{commit.author.name} · {commit.hash} · {commit.branchLabel || "提交"}</span>
+            </span>
+            <span className="text-[11px] flex-shrink-0" title={`提交时间：${formatFullDate(commit.committerDate ?? commit.date)}`} style={{ color: t.textMuted }}>{formatRelativeTime(commit.committerDate ?? commit.date)}</span>
+          </button>
+        ))}
+      </div>
+      <div className="flex justify-between gap-3 text-[11px]" style={{ color: t.textMuted }}>
+        <span>{matches.length > 80 ? "显示前 80 条，输入更具体的关键词可缩小范围" : "↑ ↓ 选择 · Enter 打开"}</span>
+        <span className="flex-shrink-0">Esc 关闭</span>
+      </div>
+    </Modal>
   );
 }
 
@@ -4526,15 +4596,14 @@ export default function App() {
   // ── project state (restored from last session) ──
   const [projects, setProjects] = useState<Project[]>(loadProjects);
   const [activeProjectId, setActiveProjectId] = useState<string>(loadActiveProjectId);
+  const [projectSidebarOpen, setProjectSidebarOpen] = useState(true);
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? projects[0];
   const isReal = !!activeProject;
   useEffect(() => { saveProjects(projects); }, [projects]);
   useEffect(() => { localStorage.setItem("gitkit.activeProjectId", activeProjectId); }, [activeProjectId]);
 
   const [selectedCommit, setSelectedCommit]   = useState<Commit | null>(null);
-  const [commitQuery, setCommitQuery] = useState("");
-  const deferredCommitQuery = useDeferredValue(commitQuery.trim().toLocaleLowerCase());
-  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [smartMerge, setSmartMerge] = useState(() => localStorage.getItem("gitkit.smartMerge") !== "0");
   const [expandedSmartRows, setExpandedSmartRows] = useState<Set<string>>(() => new Set());
   useEffect(() => { localStorage.setItem("gitkit.smartMerge", smartMerge ? "1" : "0"); }, [smartMerge]);
@@ -4556,12 +4625,12 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
         if (document.querySelector('[role="dialog"]')) return;
         e.preventDefault();
-        searchInputRef.current?.focus();
+        if (activeProject) setSearchOpen(true);
       }
     };
     window.addEventListener("keydown", focusSearch);
     return () => window.removeEventListener("keydown", focusSearch);
-  }, []);
+  }, [activeProject]);
 
   // Right-click menu. Native (webview) menu is suppressed everywhere except text
   // fields; only elements that call openCtx get an actual menu.
@@ -4787,27 +4856,18 @@ export default function App() {
   );
   const smartMergeActive = smartMerge && !focusActive && smartMergeResult.mergedGroups > 0;
   const effectiveScopedCommits = smartMergeActive ? smartMergeResult.commits : scopedCommits;
-  const displayCommits = deferredCommitQuery
-    ? effectiveScopedCommits.filter((c) => {
-        const occurrences = c.equivalentCommits ?? [c];
-        return occurrences.some((occurrence) => [
-          occurrence.message, occurrence.body, occurrence.author.name, occurrence.author.email,
-          occurrence.hash, occurrence.fullHash, occurrence.branchLabel,
-          ...(occurrence.branchLabels ?? []), ...(occurrence.tags ?? []),
-        ].filter(Boolean).join("\n").toLocaleLowerCase().includes(deferredCommitQuery));
-      })
-    : effectiveScopedCommits;
+  const displayCommits = effectiveScopedCommits;
   const displayGraph = useMemo(() => {
-    if (!smartMergeActive && !deferredCommitQuery && (!isReal || (!focusActive && hiddenBranches.length === 0))) return graphRows;
+    if (!smartMergeActive && (!isReal || (!focusActive && hiddenBranches.length === 0))) return graphRows;
     const set = new Set(displayCommits.map((c) => c.fullHash));
     return computeGraph(displayCommits.map((c) => ({ ...c, parents: c.parents.filter((p) => set.has(p)) })));
-  }, [smartMergeActive, deferredCommitQuery, isReal, focusActive, hiddenBranches.length, graphRows, displayCommits]);
+  }, [smartMergeActive, isReal, focusActive, hiddenBranches.length, graphRows, displayCommits]);
 
   // Raw topology can place another branch's whole lane above the current HEAD.
   // When Smart Merge is switched off, anchor the viewport to the checked-out
   // branch so users can inspect the truth without having to hunt for it.
   useEffect(() => {
-    if (smartMergeActive || focusActive || deferredCommitQuery || !dataReady) return;
+    if (smartMergeActive || focusActive || !dataReady) return;
     const head = branches.find((branch) => branch.current)?.head;
     if (!head) return;
     const frame = requestAnimationFrame(() => {
@@ -4815,7 +4875,7 @@ export default function App() {
       row?.scrollIntoView({ block: "center" });
     });
     return () => cancelAnimationFrame(frame);
-  }, [smartMergeActive, focusActive, deferredCommitQuery, dataReady, branches]);
+  }, [smartMergeActive, focusActive, dataReady, branches]);
 
   // Busiest lane index across the visible graph — drives a SINGLE global lane step
   // so vertical lane lines stay aligned row-to-row.
@@ -5235,15 +5295,16 @@ export default function App() {
     (async () => {
       try {
         const statusPromise = requestWorkingStatusRef.current(path, false, true);
-        const [branchList, remoteList, commitList, working, stashList_] = await Promise.all([
-          loadBranches(path),
+        const [historyBranches, remoteList, commitList, working, stashList_] = await Promise.all([
+          loadBranches(path, true),
           loadRemotes(path),
           loadHistory(path),
           statusPromise,
           stashList(path),
         ]);
         if (cancelled) return;
-        attributeBranches(commitList, branchList);
+        attributeBranches(commitList, historyBranches);
+        const branchList = historyBranches.filter((b) => !b.isRemote);
         const graph = computeGraph(commitList);
         // A watcher event may have produced a newer status while history loaded.
         const latestWorking = workingCache.current.get(path) ?? working;
@@ -6014,13 +6075,12 @@ export default function App() {
               border: `0.5px solid ${theme.glassBorder}`, color: theme.text,
               fontSize: 12, fontFamily: "inherit", borderRadius: R } }} />
 
-          <TitleBar projects={projects} activeId={activeProjectId}
-            themeMode={themeMode} onThemeCycle={cycleTheme}
-            onSelectProject={handleSelectProject} onCloseProject={handleCloseProject}
-            onOpenNew={handleOpenNew} onCloneNew={() => setCloneOpen(true)}
+          <TitleBar themeMode={themeMode} onThemeCycle={cycleTheme}
             onOpenSettings={() => setSettingsOpen(true)} />
 
-          <ActionBar onCreateBranch={activeProject ? () => setCreateBranchOpen(true) : undefined}
+          <ActionBar project={activeProject} branch={dataReady ? currentBranch : activeProject?.branch ?? ""}
+            sidebarOpen={projectSidebarOpen} onToggleSidebar={() => setProjectSidebarOpen((open) => !open)}
+            onCreateBranch={activeProject ? () => setCreateBranchOpen(true) : undefined}
             onFetch={activeProject ? () => runGitAction("fetch") : undefined}
             onPull={activeProject ? () => runGitAction("pull") : undefined}
             onPush={activeProject ? () => runGitAction("push") : undefined}
@@ -6031,6 +6091,13 @@ export default function App() {
             pushCount={branches.find((b) => b.current)?.ahead ?? 0}
             busy={gitBusy} />
 
+          <div className="gk-workspace flex-1 min-h-0 overflow-hidden" data-projects-open={projectSidebarOpen}>
+            <div className="gk-project-disclosure min-w-0 min-h-0 overflow-hidden" aria-hidden={!projectSidebarOpen}
+              ref={(element) => { if (element) element.inert = !projectSidebarOpen; }}>
+              <ProjectSidebar open={projectSidebarOpen} projects={projects} activeId={activeProject?.id ?? ""}
+                onSelect={handleSelectProject} onClose={handleCloseProject}
+                onAdd={handleOpenNew} onClone={() => setCloneOpen(true)} />
+            </div>
           {!activeProject ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-4" style={{ background: theme.bg }}>
               <FolderOpen size={40} style={{ color: theme.textFaint, opacity: 0.4 }} />
@@ -6053,7 +6120,8 @@ export default function App() {
               </div>
             </div>
           ) : (
-          <div className="flex flex-1 overflow-hidden">
+          <div className="gk-workspace-card flex flex-1 min-w-0 overflow-hidden"
+            style={{ background: theme.bgPanel, boxShadow: theme.shadowEl }}>
             <Sidebar branches={branches} remotes={remotes} stashes={stashes}
               currentBranch={currentBranch} focusBranch={focusBranch}
               hidden={hiddenBranches} setHidden={setHiddenBranches}
@@ -6107,27 +6175,8 @@ export default function App() {
             <div className="relative flex-1 overflow-hidden">
             <div className="absolute inset-0 flex flex-col overflow-hidden">
               <div className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5"
-                style={{ borderBottom: `0.5px solid ${theme.border}`, background: theme.bg }}>
-                <label className="gk-search-field relative flex items-center gap-2 flex-1 max-w-[340px] px-2.5 py-1.5"
-                  style={{ background: theme.bgPanel, border: `0.5px solid ${theme.inputBorder}`,
-                    borderRadius: R - 3, boxShadow: theme.isDark ? "inset 0 1px 0 rgba(255,255,255,0.025)" : "inset 0 1px 0 rgba(255,255,255,0.75)" }}>
-                  <Search size={13} aria-hidden="true" style={{ color: theme.textFaint }} />
-                  <input ref={searchInputRef} value={commitQuery}
-                    onChange={(e) => setCommitQuery(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Escape") { setCommitQuery(""); e.currentTarget.blur(); } }}
-                    aria-label="搜索提交" placeholder="搜索消息、作者、分支或哈希…"
-                    autoComplete="off" spellCheck={false}
-                    className="gk-search-input min-w-0 flex-1 bg-transparent pr-6 text-xs outline-none"
-                    style={{ color: theme.text }} />
-                  {commitQuery && (
-                    <button type="button" onClick={() => { setCommitQuery(""); searchInputRef.current?.focus(); }}
-                      aria-label="清空搜索"
-                      className="absolute right-2.5 top-1/2 flex items-center justify-center w-5 h-5 -translate-y-1/2"
-                      style={{ color: theme.textMuted, borderRadius: 5 }}>
-                      <X size={11} aria-hidden="true" />
-                    </button>
-                  )}
-                </label>
+                style={{ borderBottom: `0.5px solid ${theme.border}`, background: "transparent" }}>
+                <span className="text-xs font-medium" style={{ color: theme.textSec }}>提交历史</span>
                 {!focusActive && smartMergeResult.mergedGroups > 0 && (
                   <button type="button" aria-pressed={smartMerge}
                     title="仅合并相同变更的展示，不会修改 Git 历史"
@@ -6153,9 +6202,7 @@ export default function App() {
                   </button>
                 )}
                 <span className="ml-auto text-[11px] tabular-nums" style={{ color: theme.textFaint }}>
-                  {deferredCommitQuery
-                    ? `${displayCommits.length} 条结果`
-                    : smartMergeActive
+                  {smartMergeActive
                       ? `${displayCommits.length} 个变更 · ${scopedCommits.length} 次提交`
                       : `${displayCommits.length} 次提交`}
                 </span>
@@ -6189,40 +6236,6 @@ export default function App() {
                 </div>
               )}
               <div ref={timelineScrollRef} className="flex-1 overflow-y-auto">
-                {/* Uncommitted-changes item — sticky at the top of the timeline so it
-                    stays visible while the commit list scrolls under it. The wrapper
-                    carries an opaque bg (row states are translucent) to cover the rows
-                    passing beneath. */}
-                {changesCount > 0 && (() => {
-                  const sel = detailOpen && viewChanges;
-                  return (
-                  <div className="sticky top-0" style={{ zIndex: 20, background: theme.bg }}>
-                  {/* A restrained semantic marker keeps working changes visible without
-                      competing with the active blue interaction colour. */}
-                  <button onClick={() => { setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
-                    className="relative w-full flex items-center gap-3 px-4 py-3 cursor-pointer text-left transition-colors"
-                    style={{ borderBottom: `0.5px solid ${theme.border}`,
-                      background: sel ? theme.accentBg : theme.bgPanel,
-                      boxShadow: `inset 2px 0 0 ${sel ? theme.accent : theme.amber}` }}
-                    onMouseEnter={(e) => { if (!sel) e.currentTarget.style.background = theme.rowHover; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = sel ? theme.accentBg : theme.bgPanel; }}>
-                    <div className="flex items-center justify-center flex-shrink-0"
-                      style={{ width: 28, height: 28, borderRadius: R - 3, background: theme.amber + "16" }}>
-                      <FileText size={14} strokeWidth={1.8} style={{ color: theme.amber }} />
-                    </div>
-                    <div className="flex flex-col min-w-0 flex-1">
-                      <span className="text-sm font-semibold truncate"
-                        style={{ color: theme.text }}>未提交的更改</span>
-                      <span className="text-[11px]" style={{ color: theme.textMuted }}>提交到 {currentBranch}</span>
-                    </div>
-                    <span className="flex items-center justify-center text-[11px] font-semibold flex-shrink-0 tabular-nums"
-                      style={{ minWidth: 22, height: 20, padding: "0 6px", borderRadius: 6,
-                        background: theme.amber + "14", color: theme.amber,
-                        border: `0.5px solid ${theme.amber}38` }}>{changesCount}</span>
-                  </button>
-                  </div>
-                  );
-                })()}
                 {errored ? (
                   <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center" style={{ color: theme.red }}>
                     <span className="text-xs font-medium">读取失败</span>
@@ -6246,13 +6259,7 @@ export default function App() {
                   <div key={activeProject?.path} className="gk-reveal">
                     {/* A branch sitting exactly on its base has no commits of its
                         own — say so instead of rendering an empty timeline. */}
-                    {deferredCommitQuery && displayCommits.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center gap-1.5 px-6 py-16 text-center">
-                        <Search size={18} style={{ color: theme.textFaint }} />
-                        <span className="text-xs font-medium" style={{ color: theme.textSec }}>没有匹配的提交</span>
-                        <span className="text-[11px]" style={{ color: theme.textMuted }}>尝试消息、作者、分支名或提交哈希</span>
-                      </div>
-                    ) : focusActive && displayCommits.length === 0 && (
+                    {focusActive && displayCommits.length === 0 && (
                       <div className="flex flex-col items-center justify-center gap-1.5 px-6 py-16 text-center">
                         <GitBranch size={18} style={{ color: theme.textFaint }} />
                         <span className="text-xs font-medium" style={{ color: theme.textSec }}>该分支还没有独立提交</span>
@@ -6270,6 +6277,7 @@ export default function App() {
                         // changes so text and graph geometry paint together.
                         key={`${commit.fullHash}:${graphW}:${laneStep}`}
                         commit={commit}
+                        branchContext={historyBranchContext(commit, displayCommits[i - 1])}
                         graphInfo={displayGraph[i]}
                         selected={detailOpen && !viewChanges && (commit.isStash
                           ? selectedStash?.index === 0
@@ -6323,12 +6331,12 @@ export default function App() {
               </div>
             </div>
 
-            {/* Detail panel — code review is the primary task, so only a compact
-                240–300px timeline context remains visible on the left. */}
+            {/* Keep timeline context when space allows; on narrower content
+                areas, give the file list and diff the full available width. */}
             {(detailOpen || detailClosing) && dataReady && (
               <div className={`absolute top-0 bottom-0 right-0 flex flex-col overflow-hidden ${detailOpen ? "gk-panel-in" : "gk-panel-out"}`}
                 onAnimationEnd={() => { if (!detailOpen) setDetailClosing(false); }}
-                style={{ width: "calc(100% - clamp(240px, 18vw, 300px))", background: theme.bgPanel,
+                style={{ width: "min(100%, max(760px, calc(100% - clamp(240px, 18vw, 300px))))", background: theme.bgPanel,
                   // Above the timeline's hover popovers (ref chips use z-index 50),
                   // so an expanded branch-ref overlay never bleeds over the panel.
                   zIndex: 60,
@@ -6402,7 +6410,23 @@ export default function App() {
             </div>
           </div>
           )}
+          </div>
+          <StatusBar project={activeProject} branch={branches.find((b) => b.current)} changes={changesCount}
+            ready={dataReady} errored={errored}
+            busy={gitBusy === "fetch" ? "正在获取…" : gitBusy === "pull" ? "正在拉取…" : gitBusy === "push" ? "正在推送…" : busyLabel}
+            onShowChanges={() => { setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
+            onSearch={() => setSearchOpen(true)} />
         </div>
+
+        {searchOpen && activeProject && (
+          <CommitSearchDialog key={activeProject.id} commits={commits} projectName={activeProject.name}
+            ready={dataReady} errored={errored} onClose={() => setSearchOpen(false)}
+            onSelect={(commit) => {
+              setSearchOpen(false);
+              if (commit.isStash) { void openStash({ index: 0, message: commit.message, date: commit.date }); return; }
+              openTimelineCommit(commit);
+            }} />
+        )}
 
         {settingsOpen && (
           <SettingsDialog identities={identities} setIdentities={setIdentities}
