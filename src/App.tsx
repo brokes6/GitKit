@@ -631,7 +631,7 @@ function TitleBar({ themeMode, onThemeCycle, onOpenSettings }: {
     <div data-tauri-drag-region className="relative h-12 flex items-stretch flex-shrink-0 select-none"
       style={{ ...glassStyle(t), paddingLeft: IS_WINDOWS ? 8 : 92, zIndex: 50 }}>
       <div data-tauri-drag-region className="flex flex-1 min-w-0 items-center gap-2.5 px-3">
-        <span className="pointer-events-none text-sm font-semibold" style={{ color: t.text }}>GitKit</span>
+        <span className="gk-heading pointer-events-none text-sm font-semibold" style={{ color: t.text }}>GitKit</span>
         <span className="pointer-events-none text-xs" style={{ color: t.textMuted }}>Workspace</span>
       </div>
       <div className="flex items-center gap-0.5 px-2 flex-shrink-0"
@@ -909,26 +909,40 @@ function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBran
   );
 }
 
-function StatusBar({ project, branch, changes, ready, errored, busy, onShowChanges, onSearch }: {
+function StatusBar({ project, branch, changes, ready, errored, busy, checkProgress, onShowChanges, onSearch }: {
   project?: Project; branch?: Branch; changes: number; ready: boolean; errored: boolean;
-  busy: string | null; onShowChanges: () => void; onSearch: () => void;
+  busy: string | null; checkProgress: CheckProgress | null; onShowChanges: () => void; onSearch: () => void;
 }) {
+  const t = useTheme();
   const syncLabel = branch?.remote
     ? (branch.ahead || branch.behind ? `${branch.remote} · 待拉取 ${branch.behind} 个提交，待推送 ${branch.ahead} 个提交` : `${branch.remote} · 已同步`)
     : "未设置上游";
   const syncDescription = `${syncLabel}（基于最近获取的远程状态）`;
   const SyncIcon = !branch?.remote ? Cloud : branch.ahead || branch.behind ? RefreshCw : Check;
+  const statusSurface = t.isDark ? "#2B2D31" : "#E1E3E7";
+  const statusText = t.isDark ? "#D5D7DC" : "#4E535C";
+  const statusMuted = t.isDark ? "#A4A8B0" : "#717780";
+  const statusHover = t.isDark ? "#3A3C42" : "#D3D6DC";
   return (
     <footer className="gk-status-bar grid items-center gap-4 px-3 flex-shrink-0 text-[11px] select-none"
-      aria-label="仓库状态" style={{ background: "#111214", color: "#C8CBD1", "--gk-shell-hover": "#292B30" } as React.CSSProperties}>
-      <div className="flex items-center gap-1.5 min-w-0">
-        <GitBranch size={12} className="flex-shrink-0" aria-hidden="true" />
-        <span className="truncate" title={project ? branch?.name || project.branch : undefined}>
-          {project ? branch?.name || project.branch || "未检出分支" : "未打开仓库"}
-        </span>
-        {ready && !errored && <span className="flex flex-shrink-0" role="img" aria-label={syncDescription} title={syncDescription}>
-          <SyncIcon size={12} aria-hidden="true" />
-        </span>}
+      aria-label="仓库状态" style={{ background: statusSurface, color: statusText, "--gk-shell-hover": statusHover } as React.CSSProperties}>
+      <div className="flex items-center gap-1.5 min-w-0" role={checkProgress ? "status" : undefined}>
+        {checkProgress ? (
+          <>
+            <span className="truncate tabular-nums">定时检查 {checkProgress.current} / {checkProgress.total}</span>
+            <RefreshCw size={12} className="animate-spin flex-shrink-0" aria-hidden="true" />
+          </>
+        ) : (
+          <>
+            <GitBranch size={12} className="flex-shrink-0" aria-hidden="true" />
+            <span className="truncate" title={project ? branch?.name || project.branch : undefined}>
+              {project ? branch?.name || project.branch || "未检出分支" : "未打开仓库"}
+            </span>
+            {ready && !errored && <span className="flex flex-shrink-0" role="img" aria-label={syncDescription} title={syncDescription}>
+              <SyncIcon size={12} aria-hidden="true" />
+            </span>}
+          </>
+        )}
       </div>
       <div className="flex items-center justify-center min-w-0" role="status">
         {busy ? <span className="truncate">{busy}</span> : errored ? <span>仓库加载失败</span> : project && !ready ? <span>正在加载仓库…</span> : ready ?
@@ -938,7 +952,7 @@ function StatusBar({ project, branch, changes, ready, errored, busy, onShowChang
         : <span className="truncate">打开仓库以开始</span>}
       </div>
       <button onClick={onSearch} disabled={!project} className="gk-shell-button justify-self-end flex items-center gap-2 h-6 px-1 flex-shrink-0 cursor-pointer">
-        <Search size={12} aria-hidden="true" /> 搜索提交 <span style={{ color: "#9CA1AA" }}>{IS_WINDOWS ? "Ctrl F" : "⌘ F"}</span>
+        <Search size={12} aria-hidden="true" /> 搜索提交 <span style={{ color: statusMuted }}>{IS_WINDOWS ? "Ctrl F" : "⌘ F"}</span>
       </button>
     </footer>
   );
@@ -2528,7 +2542,7 @@ function Modal({ title, Icon, onClose, width = 480, children, footer }: {
           <div className="flex items-center justify-center rounded-full flex-shrink-0" style={{ width: 30, height: 30, background: t.accentBg }}>
             <Icon size={15} style={{ color: t.accent }} />
           </div>
-          <span className="text-sm font-semibold flex-1" style={{ color: t.text }}>{title}</span>
+          <span className="gk-heading text-sm font-semibold flex-1" style={{ color: t.text }}>{title}</span>
           <button {...press(onClose)}
             aria-label={`关闭${title}`} title="关闭"
             className="flex items-center justify-center w-7 h-7 cursor-pointer" style={{ color: t.textMuted, borderRadius: R - 3 }}
@@ -3419,7 +3433,7 @@ function IdentitySettings({ identities, setIdentities, defaultId, setDefaultId }
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <span className="text-sm font-semibold" style={{ color: t.text }}>提交者身份</span>
+        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>提交者身份</span>
         <span className="text-[11px]" style={{ color: t.textFaint }}>
           维护多套 name / email,提交时按所选身份注入,不改动全局 git 配置。
         </span>
@@ -3544,7 +3558,7 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <span className="text-sm font-semibold" style={{ color: t.text }}>{title}</span>
+        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{title}</span>
         <span className="text-[11px]" style={{ color: t.textFaint }}>{desc}</span>
       </div>
 
@@ -3709,7 +3723,7 @@ function GithubAccountsSettings() {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <span className="text-sm font-semibold" style={{ color: t.text }}>GitHub 集成</span>
+        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>GitHub 集成</span>
         <span className="text-[11px]" style={{ color: t.textFaint }}>
           维护多套 GitHub 账号(公有版留空地址,企业版填实例根地址)。推送 / 建 PR 时按远程地址自动匹配;匹配到多个账号会弹窗让你选择,只有一个则直接使用。
         </span>
@@ -3822,7 +3836,7 @@ function AppearanceSettings({ vibrancy, setVibrancy, paletteId, setPaletteId, th
     <div className="flex flex-col gap-6">
       {/* Theme palette + mode */}
       <div className="flex flex-col gap-1">
-        <span className="text-sm font-semibold" style={{ color: t.text }}>主题配色</span>
+        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>主题配色</span>
         <span className="text-[11px]" style={{ color: t.textFaint }}>
           选择配色方案与明暗模式。跟随系统时按 macOS 外观自动切换亮/暗。
         </span>
@@ -3882,7 +3896,7 @@ function AppearanceSettings({ vibrancy, setVibrancy, paletteId, setPaletteId, th
 
       {/* Vibrancy toggle */}
       <div className="flex flex-col gap-1">
-        <span className="text-sm font-semibold" style={{ color: t.text }}>毛玻璃背景</span>
+        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>毛玻璃背景</span>
         <span className="text-[11px]" style={{ color: t.textFaint }}>
           启用 macOS 原生 vibrancy,窗口透出桌面模糊。关闭则使用不透明底色。
         </span>
@@ -3922,7 +3936,7 @@ function DailyCheckSettings({ cfg, setCfg, onRunNow, busy, progress, projectCoun
   return (
     <div className="flex flex-col gap-4 max-w-[620px]">
       <div className="flex flex-col gap-1.5">
-        <span className="text-base font-semibold" style={{ color: t.text }}>定时检查更新</span>
+        <span className="gk-heading text-base font-semibold" style={{ color: t.text }}>定时检查更新</span>
         <span className="text-xs leading-relaxed max-w-[62ch]" style={{ color: t.textMuted }}>
           每天自动获取已打开项目的远程分支。发现新提交后显示汇总窗口，并在应用位于后台时提醒你。
         </span>
@@ -4031,7 +4045,7 @@ function UpdateSettings() {
   return (
     <div className="flex flex-col gap-5">
       <div className="flex flex-col gap-1">
-        <span className="text-sm font-semibold" style={{ color: t.text }}>软件更新</span>
+        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>软件更新</span>
         <span className="text-[11px]" style={{ color: t.textFaint }}>
           从发布服务器检查新版本。更新包经签名校验后下载、安装并重启。
         </span>
@@ -4045,7 +4059,7 @@ function UpdateSettings() {
           <GitBranch size={18} style={{ color: t.accent }} />
         </div>
         <div className="flex flex-col min-w-0 flex-1">
-          <span className="text-xs font-semibold" style={{ color: t.text }}>GitKit</span>
+          <span className="gk-heading text-xs font-semibold" style={{ color: t.text }}>GitKit</span>
           <span className="text-[11px] font-mono" style={{ color: t.textMuted }}>
             当前版本 {version ? `v${version}` : "—"}
           </span>
@@ -4125,7 +4139,7 @@ function DependencySettings() {
     <div className="flex flex-col gap-5">
       <div className="flex items-start justify-between gap-3">
         <div className="flex flex-col gap-1">
-          <span className="text-sm font-semibold" style={{ color: t.text }}>环境依赖</span>
+          <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>环境依赖</span>
           <span className="text-[11px]" style={{ color: t.textFaint }}>
             检测 GitKit 调用的命令行工具是否在应用可见的 PATH 上。
           </span>
@@ -4228,7 +4242,7 @@ function ProjectPrefsSettings({ identities }: { identities: Identity[] }) {
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-1">
-        <span className="text-sm font-semibold" style={{ color: t.text }}>已保存的项目配置</span>
+        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>已保存的项目配置</span>
         <span className="text-[11px]" style={{ color: t.textFaint }}>
           这里是各个项目记住的选择：推送 / 拉取使用的 GitHub 账号,以及提交时使用的身份。删除后该项目会恢复为每次询问 / 使用默认身份。
         </span>
@@ -4308,13 +4322,13 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId, vi
     <div className="fixed inset-0 flex items-center justify-center" style={{ zIndex: 200 }}>
       <div className="absolute inset-0 gk-overlay-in" style={{ background: "rgba(0,0,0,0.45)" }} {...press(onClose)} />
       <div role="dialog" aria-modal="true" aria-labelledby="settings-title"
-        className="relative flex flex-col gk-modal-in" style={{ width: "min(780px, calc(100vw - 48px))",
-        height: "min(520px, calc(100vh - 48px))",
+        className="relative flex flex-col gk-modal-in" style={{ width: "min(900px, calc(100vw - 48px))",
+        height: "min(600px, calc(100vh - 48px))",
         background: t.dialogBg,
         border: `0.5px solid ${t.glassBorder}`, borderRadius: R + 2, boxShadow: t.shadowWindow, overflow: "hidden" }}>
         <div className="flex-shrink-0 flex items-center gap-2.5 px-4 py-3" style={{ borderBottom: `0.5px solid ${t.border}` }}>
           <Settings size={15} style={{ color: t.accent }} />
-          <span id="settings-title" className="text-sm font-semibold flex-1" style={{ color: t.text }}>设置</span>
+          <span id="settings-title" className="gk-heading text-sm font-semibold flex-1" style={{ color: t.text }}>设置</span>
           <button {...press(onClose)}
             aria-label="关闭设置" title="关闭"
             className="flex items-center justify-center w-7 h-7 cursor-pointer" style={{ color: t.textMuted, borderRadius: R - 3 }}
@@ -4672,6 +4686,7 @@ export default function App() {
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailClosing, setDetailClosing] = useState(false); // keep mounted for the exit slide
+  const detailPanelRef = useRef<HTMLDivElement>(null);
   const openDetail = () => { setDetailClosing(false); setDetailOpen(true); };
   const closeDetail = () => { setDetailOpen(false); setDetailClosing(true); };
   const [gitBusy, setGitBusy] = useState<null | "fetch" | "pull" | "push">(null);
@@ -4713,12 +4728,22 @@ export default function App() {
   // main thread for ~1s. `switching` is true until the new timeline is painted.
   const [switching, startSwitch] = useTransition();
 
-  // Esc closes the detail overlay.
+  // Esc or a pointer press outside the drawer closes the detail overlay.
   useEffect(() => {
     if (!detailOpen) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeDetail(); };
+    const onMouseDown = (e: MouseEvent) => {
+      if (detailPanelRef.current?.contains(e.target as Node)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeDetail();
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onMouseDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onMouseDown, true);
+    };
   }, [detailOpen]);
 
   // Data belongs to the active project only when its path matches. On a tab
@@ -5569,7 +5594,6 @@ export default function App() {
     if (list.length === 0) { if (manual) toast("还没有打开任何项目"); return; }
     checkRunning.current = true;
     setCheckBusy(true);
-    const tid = manual ? toast.loading(`正在检查 ${list.length} 个项目…`) : undefined;
     const rows: UpdateRow[] = [];
     // Sequential on purpose: parallel fetches across repos fight over the network
     // and can trigger several credential prompts at once.
@@ -5606,14 +5630,13 @@ export default function App() {
     const failed = rows.length - updated.length;
     if (updated.length === 0) {
       if (manual) {
-        if (failed) toast.error(`检查完成,${failed} 个项目检查失败`, { id: tid });
-        else toast.success("所有项目都已是最新", { id: tid });
+        if (failed) toast.error(`检查完成,${failed} 个项目检查失败`);
+        else toast.success("所有项目都已是最新");
       } else if (failed) {
         toast.error(`定时检查：${failed} 个项目检查失败`);
       }
       return;
     }
-    if (tid) toast.dismiss(tid);
     setUpdateRows(rows);
     if (!manual) {
       try {
@@ -6334,7 +6357,7 @@ export default function App() {
             {/* Keep timeline context when space allows; on narrower content
                 areas, give the file list and diff the full available width. */}
             {(detailOpen || detailClosing) && dataReady && (
-              <div className={`absolute top-0 bottom-0 right-0 flex flex-col overflow-hidden ${detailOpen ? "gk-panel-in" : "gk-panel-out"}`}
+              <div ref={detailPanelRef} className={`absolute top-0 bottom-0 right-0 flex flex-col overflow-hidden ${detailOpen ? "gk-panel-in" : "gk-panel-out"}`}
                 onAnimationEnd={() => { if (!detailOpen) setDetailClosing(false); }}
                 style={{ width: "min(100%, max(760px, calc(100% - clamp(240px, 18vw, 300px))))", background: theme.bgPanel,
                   // Above the timeline's hover popovers (ref chips use z-index 50),
@@ -6414,6 +6437,7 @@ export default function App() {
           <StatusBar project={activeProject} branch={branches.find((b) => b.current)} changes={changesCount}
             ready={dataReady} errored={errored}
             busy={gitBusy === "fetch" ? "正在获取…" : gitBusy === "pull" ? "正在拉取…" : gitBusy === "push" ? "正在推送…" : busyLabel}
+            checkProgress={checkProgress}
             onShowChanges={() => { setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
             onSearch={() => setSearchOpen(true)} />
         </div>

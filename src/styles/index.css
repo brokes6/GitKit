@@ -1,12 +1,18 @@
 @import './tailwind.css';
 @import './theme.css';
 
-/* Mac-native system font stack (offline, no web fonts) */
+:root {
+  --gk-font-ui: "Manrope Variable", -apple-system, BlinkMacSystemFont,
+    "SF Pro Text", "PingFang SC", system-ui, "Helvetica Neue", sans-serif;
+  --gk-font-heading: "Sora Variable", "Manrope Variable", -apple-system,
+    BlinkMacSystemFont, "SF Pro Display", "PingFang SC", system-ui, sans-serif;
+}
+
+/* Bundled Latin faces with native Chinese fallbacks keep the desktop UI fully offline. */
 html, body {
   margin: 0;
   overflow: hidden;
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
-    system-ui, "Helvetica Neue", sans-serif;
+  font-family: var(--gk-font-ui);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   font-feature-settings: "kern", "liga", "calt";
@@ -14,7 +20,13 @@ html, body {
 #root { height: 100vh; }
 
 button, input, textarea, select, [role="tab"], [role="button"] {
+  font-family: inherit;
   -webkit-tap-highlight-color: transparent;
+}
+
+h1, h2, h3, h4, .gk-heading {
+  font-family: var(--gk-font-heading);
+  letter-spacing: -0.015em;
 }
 
 button:focus-visible,
