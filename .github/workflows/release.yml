@@ -14,6 +14,8 @@ jobs:
   build:
     strategy:
       fail-fast: false
+      # 两个平台都会合并并上传同一个 latest.json，串行执行可避免 Release 资源竞态。
+      max-parallel: 1
       matrix:
         include:
           # macOS：通用二进制，一个包同时覆盖 Intel(x86_64) 与 Apple Silicon(arm64)
@@ -66,7 +68,7 @@ jobs:
           grep -m1 '^version' src-tauri/Cargo.toml
 
       - name: Build & release (Tauri)
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 自动更新包的 minisign 签名（客户端用内置 pubkey 校验）
@@ -88,5 +90,6 @@ jobs:
           releaseDraft: true
           prerelease: false
           # 合并各平台的 latest.json，供 updater 插件消费
-          includeUpdaterJson: true
+          uploadUpdaterJson: true
+          retryAttempts: 3
           args: ${{ matrix.args }}
