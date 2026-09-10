@@ -232,6 +232,11 @@ export async function revealInFileManager(path: string, file?: string): Promise<
   await invoke("reveal_in_file_manager", { path, file: file ?? null });
 }
 
+/** Open origin (or the first web-compatible remote) in the system browser. */
+export async function openRepositoryRemote(path: string): Promise<string> {
+  return invoke<string>("open_repository_remote", { path });
+}
+
 /** Start watching a repo's working tree; the backend emits `working-tree-changed`
  *  (payload = the repo path) for worktree edits and status-relevant Git metadata.
  *  Idempotent. */

@@ -75,6 +75,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             git::open_repo,
             git::reveal_in_file_manager,
+            git::open_repository_remote,
             git::git_branches,
             git::git_remotes,
             git::git_log,

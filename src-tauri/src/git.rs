@@ -1959,16 +1959,103 @@ fn github_api_base(url: &str) -> String {
 }
 
 /// Open a URL in the user's default browser (cross-platform: macOS `open`,
-/// Windows `cmd /C start`, other unix `xdg-open`). Best-effort; errors ignored.
-fn open_in_browser(url: &str) {
+/// Windows `cmd /C start`, other unix `xdg-open`).
+fn open_in_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(url).spawn();
+    return command("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法打开系统浏览器：{e}"));
     #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd")
+    return command("cmd")
         .args(["/C", "start", "", url])
-        .spawn();
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法打开系统浏览器：{e}"));
     #[cfg(all(unix, not(target_os = "macos")))]
-    let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    return command("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("无法打开系统浏览器：{e}"));
+
+    #[allow(unreachable_code)]
+    Err("当前系统不支持打开浏览器".into())
+}
+
+/// Convert the common Git remote forms into a credential-free repository web
+/// URL. Supports HTTPS, ssh://, git://, and scp-style SSH remotes.
+fn remote_web_url(remote: &str) -> Option<String> {
+    fn build(host: &str, path: &str, keep_port: bool) -> Option<String> {
+        let host = host.rsplit('@').next()?.trim();
+        let host = if keep_port {
+            host
+        } else {
+            host.split(':').next()?
+        };
+        let path = path.split(['?', '#']).next()?.trim_matches('/');
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        if host.is_empty()
+            || path.is_empty()
+            || host.chars().any(char::is_whitespace)
+            || path.chars().any(char::is_whitespace)
+            || path.contains('\\')
+        {
+            return None;
+        }
+        Some(format!("https://{host}/{path}"))
+    }
+
+    let remote = remote.trim();
+    if let Some(rest) = remote.strip_prefix("https://") {
+        let (host, path) = rest.split_once('/')?;
+        return build(host, path, true);
+    }
+    if let Some(rest) = remote.strip_prefix("http://") {
+        let (host, path) = rest.split_once('/')?;
+        return build(host, path, true).map(|url| url.replacen("https://", "http://", 1));
+    }
+    if let Some(rest) = remote
+        .strip_prefix("ssh://")
+        .or_else(|| remote.strip_prefix("git://"))
+    {
+        let (host, path) = rest.split_once('/')?;
+        return build(host, path, false);
+    }
+    let without_user = remote.rsplit('@').next()?;
+    let (host, path) = without_user.split_once(':')?;
+    build(host, path, false)
+}
+
+/// Open the repository's origin (or first web-compatible remote) in the
+/// system browser. Parsing happens locally; no network request is made here.
+#[tauri::command]
+pub async fn open_repository_remote(path: String) -> Result<String, String> {
+    run_blocking(move || {
+        let output = run_git(&path, &["remote", "-v"])?;
+        let mut origin = None;
+        let mut fallback = None;
+        for line in output.lines() {
+            let mut fields = line.split_whitespace();
+            let name = fields.next().unwrap_or("");
+            let remote = fields.next().unwrap_or("");
+            let Some(web_url) = remote_web_url(remote) else {
+                continue;
+            };
+            if name == "origin" {
+                origin.get_or_insert(web_url);
+            } else {
+                fallback.get_or_insert(web_url);
+            }
+        }
+        let web_url = origin
+            .or(fallback)
+            .ok_or_else(|| "未找到可在浏览器中打开的远程仓库地址".to_string())?;
+        open_in_browser(&web_url)?;
+        Ok(web_url)
+    })
+    .await
 }
 
 /// Create a merge/pull request on the remote and open it in the browser.
@@ -2057,7 +2144,7 @@ pub async fn create_pull_request(
     };
 
     if !web_url.is_empty() {
-        open_in_browser(&web_url);
+        let _ = open_in_browser(&web_url);
     }
     Ok(web_url)
 }
@@ -2609,7 +2696,7 @@ pub fn stop_watch(state: tauri::State<'_, WatchState>, path: String) -> Result<(
 
 #[cfg(test)]
 mod watch_tests {
-    use super::path_triggers_status;
+    use super::{path_triggers_status, remote_web_url};
     use std::path::Path;
 
     #[test]
@@ -2623,5 +2710,22 @@ mod watch_tests {
         assert!(!path_triggers_status(Path::new("/repo/.git/objects/aa/bb")));
         assert!(!path_triggers_status(Path::new("/repo/.git/logs/HEAD")));
         assert!(!path_triggers_status(Path::new("/repo/.git/index.lock")));
+    }
+
+    #[test]
+    fn converts_git_remotes_to_credential_free_web_urls() {
+        assert_eq!(
+            remote_web_url("git@github.com:openai/codex.git").as_deref(),
+            Some("https://github.com/openai/codex")
+        );
+        assert_eq!(
+            remote_web_url("ssh://git@gitlab.example.com:2222/team/app.git").as_deref(),
+            Some("https://gitlab.example.com/team/app")
+        );
+        assert_eq!(
+            remote_web_url("https://token@github.com/openai/codex.git?key=value").as_deref(),
+            Some("https://github.com/openai/codex")
+        );
+        assert_eq!(remote_web_url("../local-repo"), None);
     }
 }

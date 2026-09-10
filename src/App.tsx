@@ -10,6 +10,7 @@ import {
   Pin, EyeOff, Eye, Folder, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
   Settings, UserPlus, Trash2, Star, Users, Github, Laptop, Sparkles, RotateCcw, TerminalSquare,
   Tag as TagIcon, Square, DownloadCloud, Pencil, FolderGit2, Search, PanelLeft, MoreHorizontal,
+  CircleDot, ArrowDown, ArrowUp, ExternalLink,
 } from "lucide-react";
 import {
   pickRepoFolder, openRepo, loadBranches, loadRemotes, loadHistory,
@@ -19,7 +20,7 @@ import {
   createPullRequest, branchColor, setVibrancy, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
-  cancelGitOp, isCancelled, checkUpdates, syncLocal, revealInFileManager,
+  cancelGitOp, isCancelled, checkUpdates, syncLocal, revealInFileManager, openRepositoryRemote,
 } from "./git";
 import type { DepInfo, Tag, RepoInfo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged } from "./git";
 import { buildSmartMergeCommits, commitBranchName, commitHistoryDate, orderedEquivalentCommits } from "./smartMerge";
@@ -658,12 +659,13 @@ function TitleBar({ themeMode, onThemeCycle, onOpenSettings }: {
 
 // ─── Project sidebar ──────────────────────────────────────────────────────────
 
-function ProjectItem({ project, isActive, onSelect, onClose }: {
+function ProjectItem({ project, isActive, onSelect, onClose, onContextMenu }: {
   project: Project; isActive: boolean; onSelect: () => void; onClose?: () => void;
+  onContextMenu: (event: React.MouseEvent) => void;
 }) {
   const t = useTheme();
   return (
-    <div className="gk-project-item relative flex items-center flex-shrink-0"
+    <div className="gk-project-item relative flex items-center flex-shrink-0" onContextMenu={onContextMenu}
       data-project-active={isActive || undefined}
       style={{ background: isActive ? t.rowSelected : undefined, borderRadius: R - 2 }}>
       <button type="button" onClick={onSelect} aria-current={isActive ? "true" : undefined}
@@ -702,9 +704,10 @@ function ProjectItem({ project, isActive, onSelect, onClose }: {
 
 // ─── Repository navigation ───────────────────────────────────────────────────
 
-function ProjectSidebar({ projects, activeId, open, onSelect, onClose, onAdd, onClone }: {
+function ProjectSidebar({ projects, activeId, open, onSelect, onClose, onContextMenu, onAdd, onClone }: {
   open: boolean; projects: Project[]; activeId: string;
   onSelect: (id: string) => void; onClose: (id: string) => void;
+  onContextMenu: (event: React.MouseEvent, project: Project) => void;
   onAdd: () => void; onClone: () => void;
 }) {
   const t = useTheme();
@@ -769,6 +772,7 @@ function ProjectSidebar({ projects, activeId, open, onSelect, onClose, onAdd, on
           {projects.map((proj) => (
             <ProjectItem key={proj.id} project={proj} isActive={proj.id === activeId}
               onSelect={() => onSelect(proj.id)}
+              onContextMenu={(event) => onContextMenu(event, proj)}
               onClose={projects.length > 1 ? () => onClose(proj.id) : undefined} />
           ))}
           {projects.length === 0 && <span className="px-2 py-3 text-xs" style={{ color: t.textMuted }}>暂无仓库</span>}
@@ -914,19 +918,36 @@ function StatusBar({ project, branch, changes, ready, errored, busy, checkProgre
   busy: string | null; checkProgress: CheckProgress | null; onShowChanges: () => void; onSearch: () => void;
 }) {
   const t = useTheme();
+  const remoteName = branch?.remote?.split("/")[0];
   const syncLabel = branch?.remote
-    ? (branch.ahead || branch.behind ? `${branch.remote} · 待拉取 ${branch.behind} 个提交，待推送 ${branch.ahead} 个提交` : `${branch.remote} · 已同步`)
+    ? (branch.ahead || branch.behind ? `${remoteName} 待同步` : `${remoteName} 已同步`)
     : "未设置上游";
   const syncDescription = `${syncLabel}（基于最近获取的远程状态）`;
   const SyncIcon = !branch?.remote ? Cloud : branch.ahead || branch.behind ? RefreshCw : Check;
+  const behind = branch?.behind ?? 0;
+  const ahead = branch?.ahead ?? 0;
   const statusSurface = t.isDark ? "#2B2D31" : "#E1E3E7";
   const statusText = t.isDark ? "#D5D7DC" : "#4E535C";
   const statusMuted = t.isDark ? "#A4A8B0" : "#717780";
-  const statusHover = t.isDark ? "#3A3C42" : "#D3D6DC";
+  const statusPill = t.isDark ? "rgba(255,255,255,0.09)" : "rgba(78,83,92,0.08)";
+  const statusHover = t.isDark ? "rgba(255,255,255,0.14)" : "rgba(78,83,92,0.13)";
+  const statusDivider = t.isDark ? "rgba(255,255,255,0.16)" : "rgba(78,83,92,0.18)";
+  const statusKey = t.isDark ? "rgba(255,255,255,0.11)" : "rgba(78,83,92,0.11)";
+  const statusBorder = t.isDark ? "rgba(255,255,255,0.06)" : "rgba(78,83,92,0.07)";
   return (
-    <footer className="gk-status-bar grid items-center gap-4 px-3 flex-shrink-0 text-[11px] select-none"
-      aria-label="仓库状态" style={{ background: statusSurface, color: statusText, "--gk-shell-hover": statusHover } as React.CSSProperties}>
-      <div className="flex items-center gap-1.5 min-w-0" role={checkProgress ? "status" : undefined}>
+    <footer className="gk-status-bar grid items-center gap-4 px-2 flex-shrink-0 text-[11px] select-none"
+      aria-label="仓库状态" style={{
+        background: statusSurface,
+        color: statusText,
+        "--gk-status-text": statusText,
+        "--gk-status-muted": statusMuted,
+        "--gk-status-pill": statusPill,
+        "--gk-status-pill-hover": statusHover,
+        "--gk-status-divider": statusDivider,
+        "--gk-status-key": statusKey,
+        "--gk-status-border": statusBorder,
+      } as React.CSSProperties}>
+      <div className="gk-status-context flex items-center gap-1.5 min-w-0" role={checkProgress ? "status" : undefined}>
         {checkProgress ? (
           <>
             <span className="truncate tabular-nums">定时检查 {checkProgress.current} / {checkProgress.total}</span>
@@ -938,21 +959,40 @@ function StatusBar({ project, branch, changes, ready, errored, busy, checkProgre
             <span className="truncate" title={project ? branch?.name || project.branch : undefined}>
               {project ? branch?.name || project.branch || "未检出分支" : "未打开仓库"}
             </span>
-            {ready && !errored && <span className="flex flex-shrink-0" role="img" aria-label={syncDescription} title={syncDescription}>
+            {ready && !errored && <span className="flex items-center flex-shrink-0" role="img" aria-label={syncDescription} title={syncDescription}>
               <SyncIcon size={12} aria-hidden="true" />
+              <span className="gk-status-sync-copy ml-1.5 whitespace-nowrap">{syncLabel}</span>
             </span>}
           </>
         )}
       </div>
       <div className="flex items-center justify-center min-w-0" role="status">
-        {busy ? <span className="truncate">{busy}</span> : errored ? <span>仓库加载失败</span> : project && !ready ? <span>正在加载仓库…</span> : ready ?
-          <button onClick={onShowChanges} className="gk-shell-button px-1 h-6 flex-shrink-0 cursor-pointer tabular-nums"
+        {busy ? <span className="gk-status-pill px-3 truncate">{busy}</span>
+          : errored ? <span className="gk-status-pill px-3">仓库加载失败</span>
+          : project && !ready ? <span className="gk-status-pill px-3">正在加载仓库…</span>
+          : ready ?
+          <button onClick={onShowChanges} className="gk-status-pill gk-shell-button flex items-center gap-2 px-3 flex-shrink-0 cursor-pointer tabular-nums"
             title={changes ? "工作区有修改，点击查看" : "工作区干净，点击查看"}
-            aria-label={`查看工作区，${changes} 个变更`}>{changes} 个变更</button>
-        : <span className="truncate">打开仓库以开始</span>}
+            aria-label={`查看工作区，${changes} 个变更，待拉取 ${behind} 个提交，待推送 ${ahead} 个提交`}>
+            <CircleDot size={12} aria-hidden="true" />
+            <span className="font-medium">{changes} 个变更</span>
+            <span className="gk-status-divider" aria-hidden="true" />
+            <span className="flex items-center gap-1" title={`待拉取 ${behind} 个提交`}>
+              <ArrowDown size={12} aria-hidden="true" />{behind}
+            </span>
+            <span className="flex items-center gap-1" title={`待推送 ${ahead} 个提交`}>
+              <ArrowUp size={12} aria-hidden="true" />{ahead}
+            </span>
+            <span className="gk-status-divider" aria-hidden="true" />
+            <span className="gk-status-state-copy whitespace-nowrap">{changes ? "工作区有修改" : "工作区干净"}</span>
+          </button>
+        : <span className="gk-status-pill px-3 truncate">打开仓库以开始</span>}
       </div>
-      <button onClick={onSearch} disabled={!project} className="gk-shell-button justify-self-end flex items-center gap-2 h-6 px-1 flex-shrink-0 cursor-pointer">
-        <Search size={12} aria-hidden="true" /> 搜索提交 <span style={{ color: statusMuted }}>{IS_WINDOWS ? "Ctrl F" : "⌘ F"}</span>
+      <button onClick={onSearch} disabled={!project}
+        className="gk-status-pill gk-shell-button justify-self-end flex items-center gap-2 pl-2.5 pr-1 flex-shrink-0 cursor-pointer">
+        <Search size={12} aria-hidden="true" />
+        <span className="whitespace-nowrap">搜索提交</span>
+        <kbd className="gk-status-key flex items-center px-1.5 font-[inherit]">{IS_WINDOWS ? "Ctrl F" : "⌘ F"}</kbd>
       </button>
     </footer>
   );
@@ -6029,6 +6069,45 @@ export default function App() {
     setActiveProjectId(id);
   };
 
+  const handlePinProject = (project: Project) => {
+    if (projects[0]?.id === project.id) {
+      toast(`${project.name} 已在顶部`);
+      return;
+    }
+    setProjects((prev) => {
+      const index = prev.findIndex((item) => item.id === project.id);
+      if (index <= 0) return prev;
+      return [prev[index], ...prev.slice(0, index), ...prev.slice(index + 1)];
+    });
+    toast.success(`已置顶 ${project.name}`);
+  };
+
+  const handleRevealProject = async (project: Project) => {
+    try {
+      await revealInFileManager(project.path);
+    } catch (error) {
+      toast.error(`无法打开仓库目录：${error}`);
+    }
+  };
+
+  const handleCopyProjectName = async (project: Project) => {
+    try {
+      await navigator.clipboard.writeText(project.name);
+      toast.success(`已复制项目名称：${project.name}`);
+    } catch (error) {
+      toast.error(`复制项目名称失败：${error}`);
+    }
+  };
+
+  const handleOpenProjectRemote = async (project: Project) => {
+    try {
+      const url = await openRepositoryRemote(project.path);
+      toast.success("已在浏览器中打开远程仓库", { description: url });
+    } catch (error) {
+      toast.error(`无法打开远程仓库：${error}`);
+    }
+  };
+
   const handleCloseProject = (id: string) => {
     setProjects((prev) => {
       const remaining = prev.filter((p) => p.id !== id);
@@ -6119,6 +6198,16 @@ export default function App() {
               ref={(element) => { if (element) element.inert = !projectSidebarOpen; }}>
               <ProjectSidebar open={projectSidebarOpen} projects={projects} activeId={activeProject?.id ?? ""}
                 onSelect={handleSelectProject} onClose={handleCloseProject}
+                onContextMenu={(event, project) => openCtx(event, [
+                  { label: "置顶", Icon: Pin, onClick: () => handlePinProject(project) },
+                  { sep: true },
+                  { label: IS_WINDOWS ? "在文件资源管理器中打开所在目录" : "在访达中打开所在目录", Icon: FolderOpen,
+                    onClick: () => { void handleRevealProject(project); } },
+                  { label: "复制项目名称", Icon: Copy, onClick: () => { void handleCopyProjectName(project); } },
+                  { sep: true },
+                  { label: "在 GitHub / GitLab 中打开", Icon: ExternalLink,
+                    onClick: () => { void handleOpenProjectRemote(project); } },
+                ])}
                 onAdd={handleOpenNew} onClone={() => setCloneOpen(true)} />
             </div>
           {!activeProject ? (
@@ -6363,6 +6452,8 @@ export default function App() {
                   // Above the timeline's hover popovers (ref chips use z-index 50),
                   // so an expanded branch-ref overlay never bleeds over the panel.
                   zIndex: 60,
+                  borderTopLeftRadius: 14,
+                  borderBottomLeftRadius: 14,
                   borderLeft: `0.5px solid ${theme.border}`,
                   boxShadow: theme.isDark ? "-12px 0 34px rgba(0,0,0,0.32)" : "-12px 0 34px rgba(0,0,0,0.10)" }}>
                 <div className="flex-shrink-0 flex items-center gap-1 px-2.5 py-2"

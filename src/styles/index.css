@@ -178,7 +178,8 @@ select:focus-visible,
   }
 }
 
-/* Workspace chrome shares the existing theme; only the status strip stays dark. */
+/* The status strip keeps the current theme's neutral chrome and uses one
+   capsule geometry for its primary state and trailing action. */
 .gk-action-bar { height: 44px; }
 .gk-toolbar-project { flex: 0 1 auto; }
 .gk-toolbar-name { max-width: 108px; }
@@ -208,7 +209,36 @@ select:focus-visible,
 .gk-project-sidebar { width: var(--gk-project-width); height: 100%; padding-top: 8px; }
 .gk-branch-sidebar { width: 168px; }
 .gk-workspace-card { margin: 12px 12px 12px 0; border-radius: 14px; }
-.gk-status-bar { height: 28px; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+.gk-status-bar {
+  height: 28px;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+}
+.gk-status-context { color: var(--gk-status-muted); }
+.gk-status-pill {
+  height: 22px;
+  border: 0.5px solid var(--gk-status-border);
+  border-radius: 11px;
+  background: var(--gk-status-pill);
+  color: var(--gk-status-text);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1;
+  --gk-shell-hover: var(--gk-status-pill-hover);
+}
+.gk-status-divider {
+  width: 1px;
+  height: 12px;
+  flex: 0 0 auto;
+  background: var(--gk-status-divider);
+}
+.gk-status-key {
+  height: 16px;
+  border-radius: 6px;
+  background: var(--gk-status-key);
+  color: var(--gk-status-muted);
+  font-size: 10px;
+  line-height: 1;
+}
 .gk-shell-button:not(:disabled):hover { background: var(--gk-shell-hover, var(--gk-project-hover)); }
 .gk-shell-button:disabled { opacity: 0.4; cursor: default; }
 .gk-project-item:not([data-project-active]):hover { background: var(--gk-project-hover); }
@@ -225,4 +255,5 @@ select:focus-visible,
   .gk-workspace-card { margin-top: 8px; margin-right: 8px; margin-bottom: 8px; }
   .gk-toolbar-name { max-width: 88px; }
   .gk-toolbar-branch { max-width: 80px; }
+  .gk-status-sync-copy { display: none; }
 }
