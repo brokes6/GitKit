@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, useDeferredValue, startTransition, useTransition, createContext, useContext, memo } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useDeferredValue, startTransition, useTransition, createContext, useContext, memo } from "react";
 import { createPortal } from "react-dom";
 import { Toaster, toast } from "sonner";
 import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
@@ -458,6 +458,7 @@ export interface WorkingFile {
 type GitOperationKind = "fetch" | "pull" | "push";
 interface OperationContext {
   project: string;
+  path: string;
   branch: string;
   target?: string;
 }
@@ -843,9 +844,12 @@ function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBran
   const [morePos, setMorePos] = useState<{ x: number; y: number } | null>(null);
   const moreButton = useRef<HTMLButtonElement>(null);
   const moreMenu = useRef<HTMLDivElement>(null);
+  const focusMoreMenuOnOpen = useRef(false);
   useEffect(() => {
     if (!morePos) return;
-    moreMenu.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    if (focusMoreMenuOnOpen.current) {
+      moreMenu.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    }
     const close = () => setMorePos(null);
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") { close(); moreButton.current?.focus(); }
@@ -911,8 +915,11 @@ function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBran
       </button>
       <button ref={moreButton} disabled={!project || !!busy} aria-label="更多仓库操作" title="更多仓库操作"
         aria-haspopup="menu" aria-expanded={!!morePos}
-        onClick={() => {
+        onClick={(event) => {
           if (morePos) { setMorePos(null); return; }
+          // Keyboard-triggered clicks have detail=0. Preserve first-item focus
+          // for keyboard navigation without showing a focus ring on mouse open.
+          focusMoreMenuOnOpen.current = event.detail === 0;
           const rect = moreButton.current?.getBoundingClientRect();
           if (rect) setMorePos({ x: Math.max(8, rect.right - 196), y: rect.bottom + 6 });
         }} className="gk-shell-button flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer">
@@ -920,7 +927,7 @@ function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBran
       </button>
       {morePos && createPortal(<>
         <div className="fixed inset-0" style={{ zIndex: 80 }} onMouseDown={() => setMorePos(null)} />
-        <div ref={moreMenu} role="menu" aria-label="更多仓库操作" className="fixed p-1.5"
+        <div ref={moreMenu} role="menu" aria-label="更多仓库操作" className="gk-action-menu fixed p-1.5"
           style={{ left: morePos.x, top: morePos.y, width: 196, zIndex: 81, background: t.dialogBg,
             border: `0.5px solid ${t.border}`, borderRadius: R, boxShadow: t.shadowEl }}>
           {moreActions.map(({ label, Icon, action }) => (
@@ -936,7 +943,7 @@ function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBran
   );
 }
 
-function OperationCapsule({ kind, title, context, progress, outcome, settledPhase, cancelling, onCancel, onEngagementChange }: {
+function OperationCapsule({ kind, title, context, progress, outcome, settledPhase, cancelling, closing, onCancel, onEngagementChange }: {
   kind: GitOperationKind | "other";
   title: string;
   context: OperationContext;
@@ -944,12 +951,16 @@ function OperationCapsule({ kind, title, context, progress, outcome, settledPhas
   outcome: OperationOutcome;
   settledPhase?: string;
   cancelling: boolean;
+  closing: boolean;
   onCancel: () => void;
   onEngagementChange: (engaged: boolean) => void;
 }) {
   const t = useTheme();
+  const [copyState, setCopyState] = useState<"idle" | "copying" | "copied" | "failed">("idle");
   const running = outcome === "running";
   const cancellable = running && (kind === "fetch" || kind === "pull");
+  const errorAction = outcome === "error";
+  const actionVisible = cancellable || errorAction;
   const pct = progress?.percent;
   const summaryPct = outcome === "success" ? 100 : pct;
   const phase = cancelling
@@ -959,10 +970,53 @@ function OperationCapsule({ kind, title, context, progress, outcome, settledPhas
   const statusColor = outcome === "success" ? t.green : outcome === "error" ? t.red
     : outcome === "cancelled" ? t.textMuted : t.accent;
   const StatusIcon = running ? RefreshCw : outcome === "success" ? Check : outcome === "error" ? AlertTriangle : X;
-  const barScale = outcome === "success" ? 1 : pct != null ? pct / 100 : running ? undefined : 1;
+  const barInset = outcome === "success" ? 0 : pct != null ? 100 - pct : running ? undefined : 0;
+  useEffect(() => { setCopyState("idle"); }, [outcome, settledPhase, context.path]);
+  const copyErrorForAI = async () => {
+    if (!errorAction || copyState === "copying") return;
+    setCopyState("copying");
+    try {
+      const appVersion = await getAppVersion();
+      const safeError = phase
+        .replace(/(https?:\/\/)[^/\s@]+@/gi, "$1[REDACTED]@")
+        .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,})\b/g, "[REDACTED_TOKEN]")
+        .replace(/(authorization:\s*(?:bearer|basic)\s+)\S+/gi, "$1[REDACTED]");
+      const operation = kind === "fetch" ? "获取（Fetch）" : kind === "pull" ? "拉取（Pull）"
+        : kind === "push" ? "推送（Push）" : "切换分支";
+      const report = [
+        "请分析以下 GitKit 操作错误，并给出可能原因和安全的排查步骤。",
+        "",
+        "## 环境",
+        `- GitKit 版本：${appVersion ? `v${appVersion}` : "未知"}`,
+        `- 系统环境：${navigator.platform || "未知"}`,
+        `- 运行环境：${navigator.userAgent || "未知"}`,
+        `- 语言：${navigator.language || "未知"}`,
+        `- 时间：${new Date().toISOString()}`,
+        "",
+        "## 操作与仓库",
+        `- 操作：${operation}`,
+        `- 项目：${context.project}`,
+        `- 仓库路径：${context.path}`,
+        `- 当前分支：${context.branch || "未检出分支"}`,
+        ...(context.target ? [`- 目标分支：${context.target}`] : []),
+        "",
+        "## 错误信息",
+        safeError,
+      ].join("\n");
+      await navigator.clipboard.writeText(report);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  };
+  const CopyStatusIcon = copyState === "copied" ? Check : copyState === "failed" ? AlertTriangle : Copy;
+  const copyLabel = copyState === "copying" ? "正在整理…" : copyState === "copied" ? "已复制，可直接粘贴"
+    : copyState === "failed" ? "复制失败，请重试" : "复制错误信息给 AI";
   return (
-    <aside className="gk-operation-capsule fixed" tabIndex={0} role="status" aria-live="polite"
+    <aside className="gk-operation-capsule fixed" tabIndex={0}
+      role={outcome === "error" ? "alert" : "status"} aria-live={outcome === "error" ? "assertive" : "polite"}
       data-outcome={outcome}
+      data-closing={closing || undefined}
       onMouseEnter={() => onEngagementChange(true)}
       onMouseLeave={(e) => {
         const focused = e.currentTarget.contains(document.activeElement) ? document.activeElement : null;
@@ -1000,27 +1054,45 @@ function OperationCapsule({ kind, title, context, progress, outcome, settledPhas
         </div>
         <div className="gk-operation-progress mt-3 overflow-hidden" aria-hidden="true">
           <div className={running && pct == null ? "gk-operation-indeterminate" : undefined}
-            style={{ transform: barScale != null ? `scaleX(${barScale})` : undefined }} />
+            style={{ clipPath: barInset != null ? `inset(0 ${barInset}% 0 0 round 999px)` : undefined }} />
         </div>
-        <div className="flex items-center gap-2 mt-2 min-w-0">
-          <span className="text-[11px] flex-shrink-0" style={{ color: t.textSec }}>{phase}</span>
+        <div className={`flex gap-2 mt-2 min-w-0 ${outcome === "error" ? "items-start" : "items-center"}`}>
+          <span className={outcome === "error"
+            ? "gk-operation-error text-[11px] leading-relaxed break-words"
+            : "text-[11px] flex-shrink-0"}
+            style={{ color: outcome === "error" ? t.red : t.textSec }} title={outcome === "error" ? phase : undefined}>
+            {phase}
+          </span>
           {progress?.raw && !cancelling && running && (
             <span className="text-[10px] font-mono truncate flex-1" style={{ color: t.textFaint }} title={progress.raw}>
               {progress.raw}
             </span>
           )}
         </div>
-        {cancellable && (
-          <div className="flex justify-end mt-3">
-            <button onClick={onCancel} disabled={cancelling}
-              className="gk-operation-cancel px-3 py-1.5 text-[11px] font-medium"
-              style={{ color: cancelling ? t.textFaint : t.textMuted, borderRadius: R - 2,
-                border: `0.5px solid ${t.inputBorder}`, cursor: cancelling ? "not-allowed" : "pointer",
-                "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
-              {cancelling ? "取消中" : "取消"}
-            </button>
+        <div className="gk-operation-action-slot" data-visible={actionVisible || undefined} aria-hidden={!actionVisible}>
+          <div className="overflow-hidden">
+            <div className="flex justify-end pt-3">
+              {cancellable ? (
+                <button onClick={onCancel} disabled={cancelling}
+                  className="gk-operation-cancel px-3 py-1.5 text-[11px] font-medium"
+                  style={{ color: cancelling ? t.textFaint : t.textMuted, borderRadius: R - 2,
+                    border: `0.5px solid ${t.inputBorder}`, cursor: cancelling ? "not-allowed" : "pointer",
+                    "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
+                  {cancelling ? "取消中" : "取消"}
+                </button>
+              ) : errorAction ? (
+                <button onClick={copyErrorForAI} disabled={copyState === "copying"}
+                  className="gk-operation-copy flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium"
+                  style={{ color: copyState === "copied" ? t.green : copyState === "failed" ? t.red : t.textSec,
+                    background: copyState === "copied" ? t.greenBg : copyState === "failed" ? t.redBg : "transparent",
+                    borderRadius: R - 2, border: `0.5px solid ${t.inputBorder}`,
+                    cursor: copyState === "copying" ? "wait" : "pointer", "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
+                  <CopyStatusIcon size={12} aria-hidden="true" /> {copyLabel}
+                </button>
+              ) : null}
+            </div>
           </div>
-        )}
+        </div>
       </div>
     </aside>
   );
@@ -4164,6 +4236,8 @@ function DailyCheckSettings({ cfg, setCfg, onRunNow, busy, progress, projectCoun
 function UpdateSettings() {
   const t = useTheme();
   const [version, setVersion] = useState<string>("");
+  const statusShellRef = useRef<HTMLDivElement>(null);
+  const statusContentRef = useRef<HTMLDivElement>(null);
   useEffect(() => { getAppVersion().then(setVersion).catch(() => {}); }, []);
 
   type UpState =
@@ -4176,6 +4250,20 @@ function UpdateSettings() {
   const downloadPct = up.kind === "downloading"
     ? Math.max(0, Math.min(100, Math.round(up.pct * 100)))
     : null;
+  const statusLayoutKey = up.kind === "avail"
+    ? `${up.kind}:${up.version}:${up.notes ?? ""}`
+    : up.kind === "downloading" ? `${up.kind}:${downloadPct === 100}` : up.kind;
+
+  useLayoutEffect(() => {
+    const shell = statusShellRef.current;
+    const content = statusContentRef.current;
+    if (!shell || !content) return;
+    const currentHeight = shell.getBoundingClientRect().height;
+    const nextHeight = up.kind === "idle" ? 0 : content.scrollHeight;
+    shell.style.height = `${currentHeight}px`;
+    const frame = requestAnimationFrame(() => { shell.style.height = `${nextHeight}px`; });
+    return () => cancelAnimationFrame(frame);
+  }, [statusLayoutKey]);
 
   const check = async () => {
     setUp({ kind: "checking" });
@@ -4232,12 +4320,15 @@ function UpdateSettings() {
           </button>
         </div>
 
-        {up.kind !== "idle" && (
-          <div className="gk-update-state px-4 py-3.5" aria-live="polite"
-            style={{ borderTop: `0.5px solid ${t.border}`,
-              background: up.kind === "uptodate" ? t.greenBg
-                : up.kind === "avail" ? t.accentBg
-                  : up.kind === "err" ? t.redBg : t.inputBg }}>
+        <div ref={statusShellRef} className="gk-update-state-shell" aria-live="polite"
+          aria-hidden={up.kind === "idle"}
+          data-open={up.kind !== "idle" || undefined}
+          style={{ boxShadow: up.kind === "idle" ? "none" : `inset 0 0.5px ${t.border}`,
+            background: up.kind === "uptodate" ? t.greenBg
+              : up.kind === "avail" ? t.accentBg
+                : up.kind === "err" ? t.redBg : t.inputBg }}>
+          <div ref={statusContentRef} className={up.kind === "idle" ? "" : "px-4 py-3.5"}>
+            {up.kind !== "idle" && <div key={up.kind} className="gk-update-state">
             {up.kind === "checking" && (
               <div className="flex flex-col gap-3">
                 <div className="flex items-center gap-2.5">
@@ -4318,7 +4409,7 @@ function UpdateSettings() {
                 </div>
                 <div className="gk-update-progress"
                   style={{ "--gk-update-accent": t.accent, "--gk-update-track": t.inputBorder } as React.CSSProperties}>
-                  <span style={{ transform: `scaleX(${downloadPct / 100})` }} />
+                  <span style={{ clipPath: `inset(0 ${100 - downloadPct}% 0 0 round 999px)` }} />
                 </div>
               </div>
             )}
@@ -4338,8 +4429,9 @@ function UpdateSettings() {
                 </div>
               </div>
             )}
+            </div>}
           </div>
-        )}
+        </div>
       </section>
     </div>
   );
@@ -4758,14 +4850,17 @@ function ContextMenu({ x, y, items, onClose }: {
 }) {
   const t = useTheme();
   const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState({ left: x, top: y });
-  useEffect(() => {
+  const [pos, setPos] = useState({ left: x, top: y, originX: "left", originY: "top" });
+  useLayoutEffect(() => {
     const el = ref.current; if (!el) return;
     const r = el.getBoundingClientRect();
     let left = x, top = y;
-    if (left + r.width  > window.innerWidth  - 8) left = window.innerWidth  - r.width  - 8;
-    if (top  + r.height > window.innerHeight - 8) top  = window.innerHeight - r.height - 8;
-    setPos({ left: Math.max(8, left), top: Math.max(8, top) });
+    const opensLeft = left + r.width > window.innerWidth - 8;
+    const opensUp = top + r.height > window.innerHeight - 8;
+    if (opensLeft) left = window.innerWidth - r.width - 8;
+    if (opensUp) top = window.innerHeight - r.height - 8;
+    setPos({ left: Math.max(8, left), top: Math.max(8, top),
+      originX: opensLeft ? "right" : "left", originY: opensUp ? "bottom" : "top" });
   }, [x, y]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -4776,12 +4871,14 @@ function ContextMenu({ x, y, items, onClose }: {
     <>
       <div className="fixed inset-0" style={{ zIndex: 200 }}
         onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
-      <div ref={ref} className="fixed" style={{
+      <div ref={ref} className="gk-context-menu fixed" style={{
         top: pos.top, left: pos.left, zIndex: 201, minWidth: 176,
+        transformOrigin: `${pos.originX} ${pos.originY}`,
+        "--gk-menu-enter-y": pos.originY === "bottom" ? "5px" : "-5px",
         background: t.dialogBg,
         backdropFilter: "blur(24px) saturate(180%)", WebkitBackdropFilter: "blur(24px) saturate(180%)",
         border: `0.5px solid ${t.glassBorder}`, borderRadius: R, boxShadow: t.shadowWindow, padding: 5,
-      }}>
+      } as React.CSSProperties}>
         {items.map((it, i) => it.sep ? (
           <div key={i} style={{ height: "0.5px", background: t.border, margin: "4px 6px" }} />
         ) : (
@@ -4925,11 +5022,17 @@ export default function App() {
   const gitBusyRef = useRef(gitBusy);
   gitBusyRef.current = gitBusy;
   const [busyLabel, setBusyLabel] = useState<string | null>(null); // generic long-running operation
-  // The operation lock and its visual lifetime are deliberately separate: once
-  // an expanded capsule settles, keep its final state until the pointer leaves.
+  // The operation lock and its visual lifetime are deliberately separate. A
+  // result stays readable for at least two seconds, and an engaged capsule waits
+  // for the pointer to leave before starting its exit animation.
   const [operationDisplay, setOperationDisplay] = useState<OperationDisplay | null>(null);
+  const [operationClosing, setOperationClosing] = useState(false);
   const operationEngagedRef = useRef(false);
   const operationRunningRef = useRef(false);
+  const operationOutcomeRef = useRef<OperationOutcome | null>(null);
+  const operationErrorInspectedRef = useRef(false);
+  const operationSettledAtRef = useRef<number | null>(null);
+  const operationDismissTimer = useRef<number | null>(null);
   const gitOpId = useRef<string | null>(null);                      // id of the running cancellable op
   const [cancelling, setCancelling] = useState(false);              // cancel requested, awaiting unwind
   const realCache = useRef<Map<string, RealData>>(new Map());
@@ -4953,8 +5056,43 @@ export default function App() {
   const pendingJumpLatest = useRef(false);               // fetch/pull → jump to the newest commit
   const timelineScrollRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => () => {
+    if (operationDismissTimer.current != null) window.clearTimeout(operationDismissTimer.current);
+  }, []);
+  const cancelOperationDismiss = () => {
+    if (operationDismissTimer.current != null) window.clearTimeout(operationDismissTimer.current);
+    operationDismissTimer.current = null;
+    setOperationClosing(false);
+  };
+  const dismissOperationDisplay = () => {
+    if (operationDismissTimer.current != null) window.clearTimeout(operationDismissTimer.current);
+    setOperationClosing(true);
+    operationDismissTimer.current = window.setTimeout(() => {
+      operationDismissTimer.current = null;
+      operationSettledAtRef.current = null;
+      operationOutcomeRef.current = null;
+      operationErrorInspectedRef.current = false;
+      setOperationDisplay(null);
+      setOperationClosing(false);
+    }, 180);
+  };
+  const scheduleOperationDismiss = (delay?: number) => {
+    if (operationDismissTimer.current != null) window.clearTimeout(operationDismissTimer.current);
+    const elapsed = operationSettledAtRef.current == null ? 2_000 : Date.now() - operationSettledAtRef.current;
+    const remaining = delay ?? Math.max(0, 2_000 - elapsed);
+    if (remaining === 0) { dismissOperationDisplay(); return; }
+    setOperationClosing(false);
+    operationDismissTimer.current = window.setTimeout(() => {
+      operationDismissTimer.current = null;
+      dismissOperationDisplay();
+    }, remaining);
+  };
   const beginOperationDisplay = (display: Omit<OperationDisplay, "outcome" | "progress">) => {
+    cancelOperationDismiss();
     operationRunningRef.current = true;
+    operationOutcomeRef.current = "running";
+    operationErrorInspectedRef.current = false;
+    operationSettledAtRef.current = null;
     setOperationDisplay({ ...display, outcome: "running", progress: null });
   };
   const updateOperationProgress = (progress: GitProgress) => {
@@ -4962,13 +5100,23 @@ export default function App() {
   };
   const settleOperationDisplay = (outcome: Exclude<OperationOutcome, "running">, title: string, phase: string) => {
     operationRunningRef.current = false;
-    setOperationDisplay((current) => operationEngagedRef.current && current
-      ? { ...current, outcome, title, phase }
-      : null);
+    operationOutcomeRef.current = outcome;
+    operationErrorInspectedRef.current = outcome === "error" && operationEngagedRef.current;
+    operationSettledAtRef.current = Date.now();
+    setOperationDisplay((current) => current ? { ...current, outcome, title, phase } : current);
+    if (outcome !== "error" && !operationEngagedRef.current) scheduleOperationDismiss();
   };
   const setOperationEngaged = (engaged: boolean) => {
     operationEngagedRef.current = engaged;
-    if (!engaged && !operationRunningRef.current) setOperationDisplay(null);
+    if (engaged) {
+      cancelOperationDismiss();
+      if (!operationRunningRef.current && operationOutcomeRef.current === "error") {
+        operationErrorInspectedRef.current = true;
+      }
+    } else if (!operationRunningRef.current) {
+      if (operationOutcomeRef.current !== "error") scheduleOperationDismiss();
+      else if (operationErrorInspectedRef.current) scheduleOperationDismiss(2_000);
+    }
   };
 
   // View switches (focus a branch / 全部视图) can rebuild a large list — mark
@@ -5788,7 +5936,7 @@ export default function App() {
     beginOperationDisplay({
       kind,
       title: `${verbs[kind]}中`,
-      context: { project: activeProject.name, branch: currentBranch },
+      context: { project: activeProject.name, path: p, branch: currentBranch },
     });
     setGitBusy(kind);
     setCancelling(false);
@@ -5828,8 +5976,7 @@ export default function App() {
       } else {
         outcome = "error";
         outcomeTitle = `${verbs[kind]}失败`;
-        outcomePhase = "详细错误已通过通知显示";
-        toast.error(`${outcomeTitle}：${e}`, { id: tid });
+        outcomePhase = String(e);
       }
     } finally {
       setGitBusy(null);
@@ -6093,7 +6240,7 @@ export default function App() {
     beginOperationDisplay({
       kind: "other",
       title: `正在切换到 ${branch}…`,
-      context: { project: activeProject.name, branch: currentBranch, target: branch },
+      context: { project: activeProject.name, path: p, branch: currentBranch, target: branch },
     });
     setBusyLabel(`正在切换到 ${branch}…`);
     let outcome: Exclude<OperationOutcome, "running"> = "success";
@@ -6114,8 +6261,7 @@ export default function App() {
     } catch (e) {
       outcome = "error";
       outcomeTitle = "切换失败";
-      outcomePhase = "详细错误已通过通知显示";
-      toast.error(`切换失败：${e}`);
+      outcomePhase = String(e);
     } finally {
       setBusyLabel(null);
       settleOperationDisplay(outcome, outcomeTitle, outcomePhase);
@@ -6959,6 +7105,7 @@ export default function App() {
             outcome={operationDisplay.outcome}
             settledPhase={operationDisplay.phase}
             cancelling={cancelling}
+            closing={operationClosing}
             onCancel={cancelGitAction}
             onEngagementChange={setOperationEngaged} />
         )}
