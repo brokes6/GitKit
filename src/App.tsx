@@ -425,6 +425,8 @@ export interface Commit {
   branchLabel?: string;       // primary branch (drives lane colour)
   branchLabels?: string[];    // every branch whose first-parent backbone reaches here
   isStash?: boolean;          // stash tip — rendered as a single collapsed node
+  stashIndex?: number;        // reflog position used by apply/drop/detail actions
+  stashBranch?: string;       // branch recorded in the stash reflog subject
   // Smart-merge presentation only. The commits remain independent Git objects;
   // this list lets one logical row disclose every matching branch/hash.
   equivalentCommits?: Commit[];
@@ -432,7 +434,7 @@ export interface Commit {
 // `worktree` — absolute path of the linked worktree holding this branch, when
 // one does. Such a branch can't be checked out or deleted until it's released.
 export interface Branch { name: string; remote?: string; isRemote?: boolean; ahead: number; behind: number; current: boolean; color: string; head?: string; worktree?: string }
-export interface Stash { index: number; message: string; date: string }
+export interface Stash { index: number; message: string; branch: string; date: string }
 export interface Remote { name: string; url: string; branches: string[] }
 export interface GraphRowInfo {
   passthrough: number[]; dotLane: number; hasTopLine: boolean; hasBottomLine: boolean;
@@ -452,6 +454,21 @@ export interface WorkingFile {
   // Set for untracked previews rendered by reading the file directly.
   previewKind?: "text" | "binary" | "too_large" | "empty" | "missing";
   previewTruncated?: boolean; previewSize?: number;
+}
+type GitOperationKind = "fetch" | "pull" | "push";
+interface OperationContext {
+  project: string;
+  branch: string;
+  target?: string;
+}
+type OperationOutcome = "running" | "success" | "error" | "cancelled";
+interface OperationDisplay {
+  kind: GitOperationKind | "other";
+  title: string;
+  context: OperationContext;
+  progress: GitProgress | null;
+  outcome: OperationOutcome;
+  phase?: string;
 }
 export interface Project {
   id: string; name: string; branch: string; color: string; changes: number; path: string;
@@ -820,7 +837,7 @@ function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBran
   project?: Project; branch: string; sidebarOpen: boolean; onToggleSidebar: () => void;
   onCreateBranch?: () => void; onFetch?: () => void; onPull?: () => void; onPush?: () => void;
   onCreateTag?: () => void; onCherryPick?: () => void; onStash?: () => void; onCreatePR?: () => void;
-  pushCount?: number; busy?: null | "fetch" | "pull" | "push";
+  pushCount?: number; busy?: null | GitOperationKind | "other";
 }) {
   const t = useTheme();
   const [morePos, setMorePos] = useState<{ x: number; y: number } | null>(null);
@@ -866,15 +883,21 @@ function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBran
           <span className="gk-toolbar-branch text-[11px] truncate" title={branch}>{project ? branch || "未检出分支" : "选择仓库"}</span>
         </span>
       </div>
-      {actions.map(({ label, Icon, action, op }) => (
-        <button key={op} onClick={action} disabled={!action || !!busy} aria-busy={busy === op || undefined}
-          className="gk-shell-button flex items-center justify-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
-          style={{ borderRadius: R - 3 }}>
-          <Icon size={15} aria-hidden="true" className={busy === op ? "animate-spin" : undefined} />
-          {label}
-          {op === "push" && pushCount > 0 && <span className="text-[10px] tabular-nums" style={{ color: t.accentFg }}>{pushCount}</span>}
-        </button>
-      ))}
+      {actions.map(({ label, Icon, action, op }) => {
+        const running = busy === op;
+        return (
+          <button key={op} onClick={action} disabled={!action || !!busy} aria-busy={running || undefined}
+            data-running={running || undefined}
+            className="gk-shell-button gk-git-action flex items-center justify-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
+            style={{ borderRadius: R - 3,
+              "--gk-action-accent": t.accentFg,
+              "--gk-action-active-bg": t.accentBg } as React.CSSProperties}>
+            <Icon size={15} aria-hidden="true" className="gk-git-action-icon" />
+            {label}
+            {op === "push" && pushCount > 0 && <span className="text-[10px] tabular-nums" style={{ color: t.accentFg }}>{pushCount}</span>}
+          </button>
+        );
+      })}
       <div className="flex-1" />
       <button onClick={onCreateBranch} disabled={!onCreateBranch || !!busy}
         className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
@@ -913,9 +936,99 @@ function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBran
   );
 }
 
-function StatusBar({ project, branch, changes, ready, errored, busy, checkProgress, onShowChanges, onSearch }: {
+function OperationCapsule({ kind, title, context, progress, outcome, settledPhase, cancelling, onCancel, onEngagementChange }: {
+  kind: GitOperationKind | "other";
+  title: string;
+  context: OperationContext;
+  progress: GitProgress | null;
+  outcome: OperationOutcome;
+  settledPhase?: string;
+  cancelling: boolean;
+  onCancel: () => void;
+  onEngagementChange: (engaged: boolean) => void;
+}) {
+  const t = useTheme();
+  const running = outcome === "running";
+  const cancellable = running && (kind === "fetch" || kind === "pull");
+  const pct = progress?.percent;
+  const summaryPct = outcome === "success" ? 100 : pct;
+  const phase = cancelling
+    ? "正在取消…"
+    : settledPhase ?? progress?.phase
+      ?? (kind === "push" ? "正在等待远程响应…" : kind === "other" ? "正在更新工作区…" : "正在连接远程…");
+  const statusColor = outcome === "success" ? t.green : outcome === "error" ? t.red
+    : outcome === "cancelled" ? t.textMuted : t.accent;
+  const StatusIcon = running ? RefreshCw : outcome === "success" ? Check : outcome === "error" ? AlertTriangle : X;
+  const barScale = outcome === "success" ? 1 : pct != null ? pct / 100 : running ? undefined : 1;
+  return (
+    <aside className="gk-operation-capsule fixed" tabIndex={0} role="status" aria-live="polite"
+      data-outcome={outcome}
+      onMouseEnter={() => onEngagementChange(true)}
+      onMouseLeave={(e) => {
+        const focused = e.currentTarget.contains(document.activeElement) ? document.activeElement : null;
+        if (focused instanceof HTMLElement) focused.blur();
+        onEngagementChange(false);
+      }}
+      onFocus={() => onEngagementChange(true)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onEngagementChange(false);
+      }}
+      aria-label={`${title}，项目 ${context.project}，分支 ${context.branch}`}
+      style={{ right: 16, bottom: 40, zIndex: 300, background: t.dialogBg,
+        border: `0.5px solid ${t.glassBorder}`, borderRadius: R + 6, boxShadow: t.shadowWindow,
+        "--gk-operation-accent": statusColor, "--gk-operation-track": t.inputBg } as React.CSSProperties}>
+      <div className="gk-operation-summary flex items-center gap-2.5 px-3.5">
+        <StatusIcon size={15} className={`${running ? "animate-spin " : ""}flex-shrink-0`} aria-hidden="true" style={{ color: statusColor }} />
+        <span className="text-xs font-semibold truncate flex-1" style={{ color: t.text }}>{title}</span>
+        {summaryPct != null && (
+          <span className="text-[11px] font-mono tabular-nums flex-shrink-0" style={{ color: t.textMuted }}>{summaryPct}%</span>
+        )}
+        <ChevronDown size={13} className="gk-operation-chevron flex-shrink-0" aria-hidden="true" style={{ color: t.textFaint }} />
+      </div>
+      <div className="gk-operation-details px-3.5 pb-3.5">
+        <div className="grid gap-1.5 pt-1.5 text-[11px]">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-9 flex-shrink-0" style={{ color: t.textFaint }}>项目</span>
+            <span className="truncate font-medium" style={{ color: t.textSec }} title={context.project}>{context.project}</span>
+          </div>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-9 flex-shrink-0" style={{ color: t.textFaint }}>{context.target ? "目标" : "分支"}</span>
+            <span className="truncate font-mono" style={{ color: t.textSec }} title={context.target ?? context.branch}>
+              {(context.target ?? context.branch) || "未检出分支"}
+            </span>
+          </div>
+        </div>
+        <div className="gk-operation-progress mt-3 overflow-hidden" aria-hidden="true">
+          <div className={running && pct == null ? "gk-operation-indeterminate" : undefined}
+            style={{ transform: barScale != null ? `scaleX(${barScale})` : undefined }} />
+        </div>
+        <div className="flex items-center gap-2 mt-2 min-w-0">
+          <span className="text-[11px] flex-shrink-0" style={{ color: t.textSec }}>{phase}</span>
+          {progress?.raw && !cancelling && running && (
+            <span className="text-[10px] font-mono truncate flex-1" style={{ color: t.textFaint }} title={progress.raw}>
+              {progress.raw}
+            </span>
+          )}
+        </div>
+        {cancellable && (
+          <div className="flex justify-end mt-3">
+            <button onClick={onCancel} disabled={cancelling}
+              className="gk-operation-cancel px-3 py-1.5 text-[11px] font-medium"
+              style={{ color: cancelling ? t.textFaint : t.textMuted, borderRadius: R - 2,
+                border: `0.5px solid ${t.inputBorder}`, cursor: cancelling ? "not-allowed" : "pointer",
+                "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
+              {cancelling ? "取消中" : "取消"}
+            </button>
+          </div>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+function StatusBar({ project, branch, changes, ready, errored, checkProgress, onShowChanges, onSearch }: {
   project?: Project; branch?: Branch; changes: number; ready: boolean; errored: boolean;
-  busy: string | null; checkProgress: CheckProgress | null; onShowChanges: () => void; onSearch: () => void;
+  checkProgress: CheckProgress | null; onShowChanges: () => void; onSearch: () => void;
 }) {
   const t = useTheme();
   const remoteName = branch?.remote?.split("/")[0];
@@ -967,8 +1080,7 @@ function StatusBar({ project, branch, changes, ready, errored, busy, checkProgre
         )}
       </div>
       <div className="flex items-center justify-center min-w-0" role="status">
-        {busy ? <span className="gk-status-pill px-3 truncate">{busy}</span>
-          : errored ? <span className="gk-status-pill px-3">仓库加载失败</span>
+        {errored ? <span className="gk-status-pill px-3">仓库加载失败</span>
           : project && !ready ? <span className="gk-status-pill px-3">正在加载仓库…</span>
           : ready ?
           <button onClick={onShowChanges} className="gk-status-pill gk-shell-button flex items-center gap-2 px-3 flex-shrink-0 cursor-pointer tabular-nums"
@@ -1337,14 +1449,15 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
                 onMouseEnter={(e) => { if (!sel) e.currentTarget.style.background = t.rowHover; }}
                 onMouseLeave={(e) => { if (!sel) e.currentTarget.style.background = "transparent"; }}>
                 <Layers size={10} className="flex-shrink-0" style={{ color: sel ? t.accent : t.textFaint }} />
-                <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-[12px] font-mono flex-shrink-0" style={{ color: t.textMuted }}>
-                      {"stash@{" + s.index + "}"}
-                    </span>
-                    {s.date && <span className="text-[10px] truncate" style={{ color: t.textFaint }}>· {s.date}</span>}
+                <div className="flex flex-col gap-0.5 min-w-0 flex-1"
+                  title={`${s.message}\nstash@{${s.index}}${s.date ? ` · ${s.date}` : ""}`}>
+                  <span className="text-[12px] font-medium truncate" style={{ color: sel ? t.text : t.textSec }}>
+                    {s.message || "GitKit stash"}
+                  </span>
+                  <div className="flex items-center gap-1 min-w-0" style={{ color: t.textFaint }}>
+                    <GitBranch size={10} className="flex-shrink-0" aria-hidden="true" />
+                    <span className="text-[11px] font-mono truncate">{s.branch || "未知分支"}</span>
                   </div>
-                  <span className="text-[12px] truncate" style={{ color: t.textFaint }}>{s.message}</span>
                 </div>
                 <div className="flex items-center gap-0.5 flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
                   <button title="应用到工作区" onClick={(e) => { e.stopPropagation(); onStashApply?.(s.index); }}
@@ -4056,10 +4169,13 @@ function UpdateSettings() {
   type UpState =
     | { kind: "idle" | "checking" | "uptodate" }
     | { kind: "avail"; version: string; notes?: string; install: (p?: (n: number) => void) => Promise<void> }
-    | { kind: "downloading"; pct: number }
-    | { kind: "err"; msg: string };
+    | { kind: "downloading"; version: string; pct: number }
+    | { kind: "err"; stage: "check" | "install"; msg: string };
   const [up, setUp] = useState<UpState>({ kind: "idle" });
   const busy = up.kind === "checking" || up.kind === "downloading";
+  const downloadPct = up.kind === "downloading"
+    ? Math.max(0, Math.min(100, Math.round(up.pct * 100)))
+    : null;
 
   const check = async () => {
     setUp({ kind: "checking" });
@@ -4068,88 +4184,163 @@ function UpdateSettings() {
       if (!u) { setUp({ kind: "uptodate" }); return; }
       setUp({ kind: "avail", version: u.version, notes: u.notes, install: u.install });
     } catch (e) {
-      setUp({ kind: "err", msg: String(e) });
+      setUp({ kind: "err", stage: "check", msg: String(e) });
     }
   };
   const install = async () => {
     if (up.kind !== "avail") return;
     const doInstall = up.install;
-    setUp({ kind: "downloading", pct: 0 });
+    const nextVersion = up.version;
+    setUp({ kind: "downloading", version: nextVersion, pct: 0 });
     try {
-      await doInstall((p) => setUp({ kind: "downloading", pct: p }));
+      await doInstall((p) => setUp({ kind: "downloading", version: nextVersion, pct: p }));
     } catch (e) {
-      setUp({ kind: "err", msg: String(e) });
+      setUp({ kind: "err", stage: "install", msg: String(e) });
     }
   };
 
   return (
-    <div className="flex flex-col gap-5">
-      <div className="flex flex-col gap-1">
-        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>软件更新</span>
-        <span className="text-[11px]" style={{ color: t.textFaint }}>
+    <div className="flex flex-col gap-5 max-w-[680px]">
+      <div className="flex flex-col gap-1.5">
+        <span className="gk-heading text-base font-semibold" style={{ color: t.text }}>软件更新</span>
+        <span className="text-xs leading-relaxed" style={{ color: t.textMuted }}>
           从发布服务器检查新版本。更新包经签名校验后下载、安装并重启。
         </span>
       </div>
 
-      {/* Current version card */}
-      <div className="flex items-center gap-3 px-3.5 py-3"
-        style={{ borderRadius: R - 2, border: `0.5px solid ${t.border}`, background: t.inputBg }}>
-        <div className="flex items-center justify-center rounded-xl flex-shrink-0"
-          style={{ width: 40, height: 40, background: t.accentBg }}>
-          <GitBranch size={18} style={{ color: t.accent }} />
-        </div>
-        <div className="flex flex-col min-w-0 flex-1">
-          <span className="gk-heading text-xs font-semibold" style={{ color: t.text }}>GitKit</span>
-          <span className="text-[11px] font-mono" style={{ color: t.textMuted }}>
-            当前版本 {version ? `v${version}` : "—"}
-          </span>
-        </div>
-        <button {...(busy ? {} : press(check))} disabled={busy}
-          className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium flex-shrink-0"
-          style={{ background: t.accent, color: "#fff", borderRadius: R - 3,
-            cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.6 : 1 }}>
-          <RefreshCw size={12} className={up.kind === "checking" ? "animate-spin" : undefined} />
-          检查更新
-        </button>
-      </div>
-
-      {/* Status line */}
-      {up.kind === "uptodate" && (
-        <div className="flex items-center gap-1.5 text-xs -mt-2" style={{ color: t.green }}>
-          <Check size={13} /> 已是最新版本
-        </div>
-      )}
-      {up.kind === "avail" && (
-        <div className="flex flex-col gap-2 -mt-2">
-          <div className="flex items-center gap-3 flex-wrap">
-            <span className="flex items-center gap-1.5 text-xs" style={{ color: t.text }}>
-              <DownloadCloud size={13} style={{ color: t.accent }} /> 发现新版本 v{up.version}
-            </span>
-            <button {...press(install)}
-              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium cursor-pointer"
-              style={{ background: t.green, color: "#fff", borderRadius: R - 3 }}>
-              <Download size={12} /> 下载并安装
-            </button>
+      <section className="gk-update-card overflow-hidden"
+        aria-label="GitKit 软件更新"
+        style={{ borderRadius: R, border: `0.5px solid ${t.inputBorder}`, background: t.dialogBg }}>
+        <div className="flex items-center gap-3.5 px-4 py-4">
+          <div className="flex items-center justify-center flex-shrink-0"
+            style={{ width: 44, height: 44, borderRadius: R, background: t.accentBg }}>
+            <GitBranch size={20} aria-hidden="true" style={{ color: t.accent }} />
           </div>
-          {up.notes && (
-            <div className="text-[11px] whitespace-pre-wrap px-3 py-2"
-              style={{ color: t.textMuted, background: t.inputBg, borderRadius: R - 3, maxHeight: 160, overflow: "auto" }}>
-              {up.notes}
-            </div>
-          )}
+          <div className="flex flex-col min-w-0 flex-1 gap-0.5">
+            <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>GitKit</span>
+            <span className="text-xs" style={{ color: t.textMuted }}>
+              {version ? <>已安装 <span className="font-mono tabular-nums">v{version}</span></> : "正在读取当前版本…"}
+            </span>
+          </div>
+          <button {...(busy ? {} : press(check))} disabled={busy} aria-busy={up.kind === "checking" || undefined}
+            data-running={up.kind === "checking" || undefined}
+            className="gk-update-check flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium flex-shrink-0"
+            style={{ background: t.accent, color: "#fff", borderRadius: R - 3,
+              cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.76 : 1 }}>
+            <RefreshCw size={12} aria-hidden="true" className="gk-update-check-icon" />
+            {up.kind === "checking" ? "检查中…" : up.kind === "idle" ? "检查更新" : "重新检查"}
+          </button>
         </div>
-      )}
-      {up.kind === "downloading" && (
-        <div className="text-xs -mt-2" style={{ color: t.textSec }}>
-          下载中 {Math.round(up.pct * 100)}%
-        </div>
-      )}
-      {up.kind === "err" && (
-        <div className="flex items-center gap-1.5 text-xs min-w-0 -mt-2" style={{ color: t.red }}>
-          <AlertTriangle size={13} className="flex-shrink-0" />
-          <span className="truncate">{up.msg}</span>
-        </div>
-      )}
+
+        {up.kind !== "idle" && (
+          <div className="gk-update-state px-4 py-3.5" aria-live="polite"
+            style={{ borderTop: `0.5px solid ${t.border}`,
+              background: up.kind === "uptodate" ? t.greenBg
+                : up.kind === "avail" ? t.accentBg
+                  : up.kind === "err" ? t.redBg : t.inputBg }}>
+            {up.kind === "checking" && (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center gap-2.5">
+                  <RefreshCw size={14} aria-hidden="true" className="gk-update-check-icon flex-shrink-0"
+                    style={{ color: t.accent }} />
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-xs font-semibold" style={{ color: t.text }}>正在检查新版本</span>
+                    <span className="text-[11px]" style={{ color: t.textMuted }}>正在连接发布服务器…</span>
+                  </div>
+                </div>
+                <div className="gk-update-progress" data-indeterminate="true" aria-hidden="true"
+                  style={{ "--gk-update-accent": t.accent, "--gk-update-track": t.inputBorder } as React.CSSProperties}>
+                  <span />
+                </div>
+              </div>
+            )}
+
+            {up.kind === "uptodate" && (
+              <div className="flex items-center gap-2.5">
+                <span className="flex items-center justify-center w-7 h-7 rounded-full flex-shrink-0"
+                  style={{ background: t.green + "22", color: t.green }}>
+                  <Check size={14} aria-hidden="true" />
+                </span>
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-xs font-semibold" style={{ color: t.text }}>已是最新版本</span>
+                  <span className="text-[11px]" style={{ color: t.textMuted }}>当前无需更新，可以继续使用。</span>
+                </div>
+              </div>
+            )}
+
+            {up.kind === "avail" && (
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center gap-3">
+                  <span className="flex items-center justify-center w-8 h-8 flex-shrink-0"
+                    style={{ borderRadius: R - 3, background: t.accent + "1F", color: t.accent }}>
+                    <DownloadCloud size={16} aria-hidden="true" />
+                  </span>
+                  <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                    <span className="text-xs font-semibold" style={{ color: t.text }}>发现新版本 v{up.version}</span>
+                    <span className="text-[11px]" style={{ color: t.textMuted }}>
+                      {version ? `v${version} → v${up.version}` : `准备更新到 v${up.version}`}
+                    </span>
+                  </div>
+                  <button {...press(install)}
+                    className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium cursor-pointer flex-shrink-0"
+                    style={{ background: t.accent, color: "#fff", borderRadius: R - 3 }}>
+                    <Download size={12} aria-hidden="true" /> 下载并安装
+                  </button>
+                </div>
+                {up.notes && (
+                  <div className="pt-3" style={{ borderTop: `0.5px solid ${t.border}` }}>
+                    <div className="text-[10px] font-semibold mb-1.5" style={{ color: t.textSec }}>更新内容</div>
+                    <div className="text-[11px] leading-relaxed whitespace-pre-wrap overflow-auto"
+                      style={{ color: t.textMuted, maxHeight: 144 }}>
+                      {up.notes}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {up.kind === "downloading" && downloadPct != null && (
+              <div className="flex flex-col gap-3" role="progressbar" aria-label={`正在下载 GitKit v${up.version}`}
+                aria-valuemin={0} aria-valuemax={100} aria-valuenow={downloadPct}>
+                <div className="flex items-start gap-2.5">
+                  <DownloadCloud size={15} aria-hidden="true" className="flex-shrink-0 mt-0.5" style={{ color: t.accent }} />
+                  <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+                    <span className="text-xs font-semibold" style={{ color: t.text }}>
+                      {downloadPct >= 100 ? `正在验证并安装 v${up.version}` : `正在下载 v${up.version}`}
+                    </span>
+                    <span className="text-[11px]" style={{ color: t.textMuted }}>
+                      {downloadPct >= 100 ? "更新包已下载，正在完成安装。" : "安装完成后 GitKit 将自动重启。"}
+                    </span>
+                  </div>
+                  <span className="text-xs font-mono font-semibold tabular-nums flex-shrink-0" style={{ color: t.accentFg }}>
+                    {downloadPct}%
+                  </span>
+                </div>
+                <div className="gk-update-progress"
+                  style={{ "--gk-update-accent": t.accent, "--gk-update-track": t.inputBorder } as React.CSSProperties}>
+                  <span style={{ transform: `scaleX(${downloadPct / 100})` }} />
+                </div>
+              </div>
+            )}
+
+            {up.kind === "err" && (
+              <div className="flex items-start gap-2.5 min-w-0">
+                <span className="flex items-center justify-center w-7 h-7 rounded-full flex-shrink-0"
+                  style={{ background: t.red + "22", color: t.red }}>
+                  <AlertTriangle size={14} aria-hidden="true" />
+                </span>
+                <div className="flex flex-col gap-0.5 min-w-0">
+                  <span className="text-xs font-semibold" style={{ color: t.text }}>
+                    {up.stage === "install" ? "更新未完成" : "检查更新失败"}
+                  </span>
+                  <span className="text-[11px] leading-relaxed break-words" style={{ color: t.red }}>{up.msg}</span>
+                  <span className="text-[11px]" style={{ color: t.textMuted }}>请检查网络后重新尝试。</span>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
     </div>
   );
 }
@@ -4733,8 +4924,12 @@ export default function App() {
   // Mirror gitBusy for background jobs that must avoid overlapping a user Git op.
   const gitBusyRef = useRef(gitBusy);
   gitBusyRef.current = gitBusy;
-  const [busyLabel, setBusyLabel] = useState<string | null>(null); // generic blocking-op overlay
-  const [gitProg, setGitProg] = useState<GitProgress | null>(null); // live fetch/pull progress
+  const [busyLabel, setBusyLabel] = useState<string | null>(null); // generic long-running operation
+  // The operation lock and its visual lifetime are deliberately separate: once
+  // an expanded capsule settles, keep its final state until the pointer leaves.
+  const [operationDisplay, setOperationDisplay] = useState<OperationDisplay | null>(null);
+  const operationEngagedRef = useRef(false);
+  const operationRunningRef = useRef(false);
   const gitOpId = useRef<string | null>(null);                      // id of the running cancellable op
   const [cancelling, setCancelling] = useState(false);              // cancel requested, awaiting unwind
   const realCache = useRef<Map<string, RealData>>(new Map());
@@ -4758,6 +4953,24 @@ export default function App() {
   const pendingJumpLatest = useRef(false);               // fetch/pull → jump to the newest commit
   const timelineScrollRef = useRef<HTMLDivElement>(null);
 
+  const beginOperationDisplay = (display: Omit<OperationDisplay, "outcome" | "progress">) => {
+    operationRunningRef.current = true;
+    setOperationDisplay({ ...display, outcome: "running", progress: null });
+  };
+  const updateOperationProgress = (progress: GitProgress) => {
+    setOperationDisplay((current) => current ? { ...current, progress } : current);
+  };
+  const settleOperationDisplay = (outcome: Exclude<OperationOutcome, "running">, title: string, phase: string) => {
+    operationRunningRef.current = false;
+    setOperationDisplay((current) => operationEngagedRef.current && current
+      ? { ...current, outcome, title, phase }
+      : null);
+  };
+  const setOperationEngaged = (engaged: boolean) => {
+    operationEngagedRef.current = engaged;
+    if (!engaged && !operationRunningRef.current) setOperationDisplay(null);
+  };
+
   // View switches (focus a branch / 全部视图) can rebuild a large list — mark
   // them non-urgent so the click stays snappy and the old view holds until ready.
   const setFocus = (name: string | null) => startTransition(() => setFocusBranch(name));
@@ -4774,6 +4987,7 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeDetail(); };
     const onMouseDown = (e: MouseEvent) => {
       if (detailPanelRef.current?.contains(e.target as Node)) return;
+      if ((e.target as Element | null)?.closest?.(".gk-operation-capsule")) return;
       e.preventDefault();
       e.stopPropagation();
       closeDetail();
@@ -5449,12 +5663,12 @@ export default function App() {
   // Open the stash dialog (optional title). Guard here so the button feedback
   // still happens even though the actual stash runs from the dialog.
   const requestStash = () => {
-    if (!activeProject || gitBusy) return;
+    if (!activeProject || gitBusy || busyLabel) return;
     if (changesCount === 0) { toast("没有可储藏的更改"); return; }
     setStashDialogOpen(true);
   };
   const doStash = async (message = "") => {
-    if (!activeProject) return;
+    if (!activeProject || gitBusy || busyLabel) return;
     const p = activeProject.path;
     setStashBusy(true);
     const tid = toast.loading("正在储藏…");
@@ -5468,7 +5682,7 @@ export default function App() {
     finally { setStashBusy(false); }
   };
   const doStashApply = async (index: number) => {
-    if (!activeProject) return;
+    if (!activeProject || gitBusy || busyLabel) return;
     const p = activeProject.path;
     const tid = toast.loading("正在应用储藏…");
     try {
@@ -5479,7 +5693,7 @@ export default function App() {
     } catch (e) { toast.error(`应用储藏失败：${e}`, { id: tid }); }
   };
   const doStashDrop = async (index: number) => {
-    if (!activeProject) return;
+    if (!activeProject || gitBusy || busyLabel) return;
     const p = activeProject.path;
     try {
       await stashDrop(p, index);
@@ -5555,7 +5769,7 @@ export default function App() {
 
   // Fetch / pull / push. Each refreshes the repo afterwards (cache-busting reload).
   const runGitAction = async (kind: "fetch" | "pull" | "push") => {
-    if (!activeProject || gitBusy) return;
+    if (!activeProject || gitBusy || busyLabel) return;
     const p = activeProject.path;
     const verbs = { fetch: "获取", pull: "拉取", push: "推送" } as const;
     if (remotes.length === 0) {
@@ -5571,37 +5785,57 @@ export default function App() {
     const token = resolved.token;
     const opId = crypto.randomUUID();
     gitOpId.current = opId;
+    beginOperationDisplay({
+      kind,
+      title: `${verbs[kind]}中`,
+      context: { project: activeProject.name, branch: currentBranch },
+    });
     setGitBusy(kind);
-    setGitProg(null);
     setCancelling(false);
-    const tid = toast.loading(`正在${verbs[kind]}…`);
+    const tid = `git-operation-${opId}`;
+    let outcome: Exclude<OperationOutcome, "running"> = "success";
+    let outcomeTitle = `${verbs[kind]}完成`;
+    let outcomePhase = "操作已完成";
     try {
       // A fetch also fast-forwards every local branch that is behind its
       // upstream; report what it did (and what it deliberately left alone).
       let detail: string | undefined;
       if (kind === "fetch") {
-        const s = await fetchAll(p, token, opId, setGitProg);
+        const s = await fetchAll(p, token, opId, updateOperationProgress);
         const parts: string[] = [];
         if (s.synced.length) parts.push(`已同步 ${s.synced.length} 个分支：${s.synced.join("、")}`);
         if (s.dirtySkipped) parts.push("当前分支有未提交更改,已跳过");
         if (s.diverged.length) parts.push(`${s.diverged.join("、")} 与远程有分叉,需手动合并`);
         detail = parts.join(" · ") || undefined;
-      } else if (kind === "pull") await pull(p, token, opId, setGitProg);
+      } else if (kind === "pull") await pull(p, token, opId, updateOperationProgress);
       else await push(p, token);
       realCache.current.delete(p);
-      // After a sync, jump to the newest commit (fetch/pull bring in new history).
-      if (kind === "fetch" || kind === "pull") pendingJumpLatest.current = true;
-      setReloadTick((n) => n + 1);
+      // The user may browse another project while this runs. Refresh/jump only
+      // when the originating repo is still active; its invalidated cache will
+      // reload naturally the next time it is selected otherwise.
+      if (activePathRef.current === p) {
+        if (kind === "fetch" || kind === "pull") pendingJumpLatest.current = true;
+        setReloadTick((n) => n + 1);
+      }
       toast.success(`${verbs[kind]}完成`, { id: tid, description: detail });
     } catch (e) {
       // A user cancel isn't a failure — dismiss quietly.
-      if (isCancelled(e)) toast(`已取消${verbs[kind]}`, { id: tid });
-      else toast.error(`${verbs[kind]}失败：${e}`, { id: tid });
+      if (isCancelled(e)) {
+        outcome = "cancelled";
+        outcomeTitle = `已取消${verbs[kind]}`;
+        outcomePhase = "操作已取消";
+        toast(outcomeTitle, { id: tid });
+      } else {
+        outcome = "error";
+        outcomeTitle = `${verbs[kind]}失败`;
+        outcomePhase = "详细错误已通过通知显示";
+        toast.error(`${outcomeTitle}：${e}`, { id: tid });
+      }
     } finally {
       setGitBusy(null);
-      setGitProg(null);
       setCancelling(false);
       gitOpId.current = null;
+      settleOperationDisplay(outcome, outcomeTitle, outcomePhase);
     }
   };
 
@@ -5629,7 +5863,10 @@ export default function App() {
 
   const runUpdateCheck = async (manual: boolean) => {
     // A running git op owns the repos right now — retry on the next tick.
-    if (checkRunning.current || (!manual && gitBusyRef.current)) return;
+    if (checkRunning.current || gitBusyRef.current || busyLabel) {
+      if (manual && (gitBusyRef.current || busyLabel)) toast("请等待当前 Git 操作完成");
+      return;
+    }
     const list = projects;
     if (list.length === 0) { if (manual) toast("还没有打开任何项目"); return; }
     checkRunning.current = true;
@@ -5740,7 +5977,7 @@ export default function App() {
 
   // Commit staged files with the chosen identity (falls back to repo/global config).
   const doCommit = async (message: string, files: string[], identity: Identity | null) => {
-    if (!activeProject) return;
+    if (!activeProject || gitBusy || busyLabel) return;
     await gitCommit(activeProject.path, message, files, identity?.name, identity?.email);
     realCache.current.delete(activeProject.path);
     setReloadTick((n) => n + 1);
@@ -5758,7 +5995,7 @@ export default function App() {
     return null;
   };
   const doCheckoutSync = async (commit: Commit) => {
-    if (!activeProject) return;
+    if (!activeProject || gitBusy || busyLabel) return;
     const branch = syncTargetOf(commit);
     if (!branch) { toast("此提交没有可同步的本地分支"); return; }
     const tid = toast.loading(`正在检出并同步 ${branch}…`);
@@ -5778,7 +6015,7 @@ export default function App() {
   //  • remote-only branch (no local yet) → create a local tracking branch + check out;
   //  • already in sync → nothing.
   const doSyncBranch = async (branchName: string) => {
-    if (!activeProject) return;
+    if (!activeProject || gitBusy || busyLabel) return;
     const local = branches.find((x) => x.name === branchName);
     if (local && (!local.remote || local.behind <= 0)) { toast(`${branchName} 已与远端同步`); return; }
     const tid = toast.loading(`正在检出并同步 ${branchName}…`);
@@ -5849,26 +6086,47 @@ export default function App() {
 
   // The actual switch (from the dialog when dirty, or directly when clean).
   const performCheckout = async (branch: string, stash: boolean) => {
-    if (!activeProject) return;
+    if (!activeProject || gitBusy || busyLabel) return;
+    const p = activeProject.path;
+    const projectId = activeProject.id;
     setCheckoutTarget(null);
+    beginOperationDisplay({
+      kind: "other",
+      title: `正在切换到 ${branch}…`,
+      context: { project: activeProject.name, branch: currentBranch, target: branch },
+    });
     setBusyLabel(`正在切换到 ${branch}…`);
+    let outcome: Exclude<OperationOutcome, "running"> = "success";
+    let outcomeTitle = `已切换到 ${branch}`;
+    let outcomePhase = "工作区已更新";
     try {
-      if (stash) await stashPush(activeProject.path, `GitKit: 切换到 ${branch} 前的改动`);
-      await checkoutBranch(activeProject.path, branch);
-      setCurrentBranch(branch);
-      setProjects((prev) => prev.map((p) => p.id === activeProjectId ? { ...p, branch } : p));
-      realCache.current.delete(activeProject.path);
-      pendingViewReset.current = true;   // branch changed → reset to the new branch
-      setReloadTick((n) => n + 1);
+      if (stash) await stashPush(p, `GitKit: 切换到 ${branch} 前的改动`);
+      await checkoutBranch(p, branch);
+      setProjects((prev) => prev.map((project) => project.id === projectId ? { ...project, branch } : project));
+      realCache.current.delete(p);
+      if (activePathRef.current === p) {
+        setCurrentBranch(branch);
+        pendingViewReset.current = true;   // branch changed → reset to the new branch
+        setReloadTick((n) => n + 1);
+      }
       toast.success(stash ? `已储藏改动并切换到 ${branch}` : `已切换到 ${branch}`);
-    } catch (e) { toast.error(`切换失败：${e}`); }
-    finally { setBusyLabel(null); }
+      if (stash) outcomeTitle = `已储藏并切换到 ${branch}`;
+    } catch (e) {
+      outcome = "error";
+      outcomeTitle = "切换失败";
+      outcomePhase = "详细错误已通过通知显示";
+      toast.error(`切换失败：${e}`);
+    } finally {
+      setBusyLabel(null);
+      settleOperationDisplay(outcome, outcomeTitle, outcomePhase);
+    }
   };
 
   // ── branch checkout (double-click a branch) ──
   // Clean tree → switch straight away (no confirm); dirty → ask (to offer stash).
   const requestCheckout = async (branch: string) => {
     if (!isReal || !activeProject) { toast("仅真实仓库支持切换分支"); return; }
+    if (gitBusy || busyLabel) return;
     if (branch === currentBranch) return;
     // git refuses to check out a branch that another worktree already holds.
     const wt = branches.find((b) => b.name === branch)?.worktree;
@@ -5889,6 +6147,7 @@ export default function App() {
   //  • no local branch yet → create one tracking the remote and check it out.
   const requestSyncRemote = async (remoteName: string, leaf: string) => {
     if (!isReal || !activeProject) { toast("仅真实仓库支持此操作"); return; }
+    if (gitBusy || busyLabel) return;
     if (branches.some((b) => b.name === leaf)) { requestCheckout(leaf); return; }
     const tid = toast.loading(`正在将 ${remoteName}/${leaf} 同步到本地…`);
     try {
@@ -5905,7 +6164,7 @@ export default function App() {
   // Create a local branch tracking the remote WITHOUT switching to it (the
   // right-click "只建不切" option). Only offered when no local branch exists yet.
   const createLocalFromRemote = async (remoteName: string, leaf: string) => {
-    if (!activeProject) return;
+    if (!activeProject || gitBusy || busyLabel) return;
     const tid = toast.loading(`正在创建本地分支 ${leaf}…`);
     try {
       await createBranch(activeProject.path, leaf, `${remoteName}/${leaf}`, false);
@@ -6191,7 +6450,7 @@ export default function App() {
             onStash={activeProject ? requestStash : undefined}
             onCreatePR={activeProject ? requestCreatePR : undefined}
             pushCount={branches.find((b) => b.current)?.ahead ?? 0}
-            busy={gitBusy} />
+            busy={gitBusy ?? (busyLabel ? "other" : null)} />
 
           <div className="gk-workspace flex-1 min-h-0 overflow-hidden" data-projects-open={projectSidebarOpen}>
             <div className="gk-project-disclosure min-w-0 min-h-0 overflow-hidden" aria-hidden={!projectSidebarOpen}
@@ -6392,7 +6651,7 @@ export default function App() {
                         branchContext={historyBranchContext(commit, displayCommits[i - 1])}
                         graphInfo={displayGraph[i]}
                         selected={detailOpen && !viewChanges && (commit.isStash
-                          ? selectedStash?.index === 0
+                          ? selectedStash?.index === commit.stashIndex
                           : selectedCommit?.fullHash === commit.fullHash
                             || commit.equivalentCommits?.some((c) => c.fullHash === selectedCommit?.fullHash) === true)}
                         highlight={hoverBranch != null && memberOf(commit).includes(hoverBranch)}
@@ -6410,14 +6669,17 @@ export default function App() {
                         onBranchDblClick={doSyncBranch}
                         onClick={() => {
                           // A stash node opens the stash panel (apply/drop), not commit detail.
-                          // Only stash@{0} surfaces in --all, so index 0 is the match.
-                          if (commit.isStash) { openStash({ index: 0, message: commit.message, date: commit.date }); return; }
+                          if (commit.isStash) {
+                            openStash({ index: commit.stashIndex ?? 0, message: commit.message,
+                              branch: commit.stashBranch ?? "", date: commit.date });
+                            return;
+                          }
                           openTimelineCommit(commit);
                         }}
                         onContextMenu={(e) => openCtx(e, commit.isStash
                           ? [
-                              { label: "应用到工作区", Icon: RotateCcw, onClick: () => doStashApply(0) },
-                              { label: "删除储藏", Icon: Trash2, danger: true, onClick: () => doStashDrop(0) },
+                              { label: "应用到工作区", Icon: RotateCcw, onClick: () => doStashApply(commit.stashIndex ?? 0) },
+                              { label: "删除储藏", Icon: Trash2, danger: true, onClick: () => doStashDrop(commit.stashIndex ?? 0) },
                             ]
                           : [
                               { label: "复制提交哈希", Icon: Copy, onClick: () => { navigator.clipboard.writeText(commit.fullHash).catch(() => {}); } },
@@ -6527,7 +6789,6 @@ export default function App() {
           </div>
           <StatusBar project={activeProject} branch={branches.find((b) => b.current)} changes={changesCount}
             ready={dataReady} errored={errored}
-            busy={gitBusy === "fetch" ? "正在获取…" : gitBusy === "pull" ? "正在拉取…" : gitBusy === "push" ? "正在推送…" : busyLabel}
             checkProgress={checkProgress}
             onShowChanges={() => { setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
             onSearch={() => setSearchOpen(true)} />
@@ -6538,7 +6799,11 @@ export default function App() {
             ready={dataReady} errored={errored} onClose={() => setSearchOpen(false)}
             onSelect={(commit) => {
               setSearchOpen(false);
-              if (commit.isStash) { void openStash({ index: 0, message: commit.message, date: commit.date }); return; }
+              if (commit.isStash) {
+                void openStash({ index: commit.stashIndex ?? 0, message: commit.message,
+                  branch: commit.stashBranch ?? "", date: commit.date });
+                return;
+              }
               openTimelineCommit(commit);
             }} />
         )}
@@ -6683,66 +6948,20 @@ export default function App() {
             onConfirm={runConfirm} />
         )}
 
-        {/* Global loading overlay for blocking git ops (blocks interaction, shows progress) */}
-        {(gitBusy || busyLabel) && (() => {
-          // fetch/pull stream progress and can be cancelled; push + generic ops
-          // keep the simple spinner.
-          const cancellable = gitBusy === "fetch" || gitBusy === "pull";
-          const title = gitBusy === "fetch" ? "正在获取…" : gitBusy === "pull" ? "正在拉取…"
-            : gitBusy === "push" ? "正在推送…" : busyLabel;
-          const pct = gitProg?.percent;
-          return (
-            <div className="fixed inset-0 flex items-center justify-center" style={{ zIndex: 300 }}>
-              <div className="absolute inset-0"
-                style={{ background: theme.scrim, backdropFilter: "blur(1.5px)" }} />
-              {cancellable ? (
-                <div className="relative flex flex-col gap-2.5 px-5 py-4"
-                  style={{ width: 340, background: theme.dialogBg,
-                    border: `0.5px solid ${theme.glassBorder}`, borderRadius: R + 2, boxShadow: theme.shadowWindow }}>
-                  <div className="flex items-center gap-2.5">
-                    <RefreshCw size={15} className="animate-spin" style={{ color: theme.accent, flexShrink: 0 }} />
-                    <span className="text-sm font-medium flex-1" style={{ color: theme.text }}>{title}</span>
-                    <span className="text-xs font-mono tabular-nums" style={{ color: theme.textMuted }}>
-                      {pct != null ? `${pct}%` : ""}
-                    </span>
-                  </div>
-                  <div className="w-full overflow-hidden" style={{ height: 6, background: theme.inputBg, borderRadius: 999 }}>
-                    <div className={pct == null ? "animate-pulse" : undefined}
-                      style={{ height: "100%", width: pct != null ? `${pct}%` : "100%",
-                        background: theme.accent, borderRadius: 999, transition: "width 0.2s ease",
-                        opacity: pct != null ? 1 : 0.45 }} />
-                  </div>
-                  <div className="flex items-center gap-2 min-h-[16px]">
-                    <span className="text-[11px] flex-shrink-0" style={{ color: theme.textSec }}>
-                      {cancelling ? "正在取消…" : (gitProg?.phase ?? "正在连接远程…")}
-                    </span>
-                    {gitProg?.raw && !cancelling && (
-                      <span className="text-[10px] font-mono truncate flex-1" style={{ color: theme.textFaint }}>
-                        {gitProg.raw}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex justify-end pt-0.5">
-                    <button onClick={cancelGitAction} disabled={cancelling}
-                      className="px-3 py-1.5 text-xs font-medium"
-                      style={{ color: cancelling ? theme.textFaint : theme.textMuted, borderRadius: R - 2,
-                        border: `0.5px solid ${theme.inputBorder}`,
-                        cursor: cancelling ? "not-allowed" : "pointer" }}>
-                      取消
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="relative flex items-center gap-3 px-5 py-3.5"
-                  style={{ background: theme.dialogBg,
-                    border: `0.5px solid ${theme.glassBorder}`, borderRadius: R + 2, boxShadow: theme.shadowWindow }}>
-                  <RefreshCw size={16} className="animate-spin" style={{ color: theme.accent }} />
-                  <span className="text-sm font-medium" style={{ color: theme.text }}>{title}</span>
-                </div>
-              )}
-            </div>
-          );
-        })()}
+        {/* Non-blocking operation status: repo browsing stays available while
+            mutation controls remain globally locked by gitBusy / busyLabel. */}
+        {operationDisplay && (
+          <OperationCapsule
+            kind={operationDisplay.kind}
+            title={operationDisplay.title}
+            context={operationDisplay.context}
+            progress={operationDisplay.progress}
+            outcome={operationDisplay.outcome}
+            settledPhase={operationDisplay.phase}
+            cancelling={cancelling}
+            onCancel={cancelGitAction}
+            onEngagementChange={setOperationEngaged} />
+        )}
 
         {ctxMenu && (
           <ContextMenu x={ctxMenu.x} y={ctxMenu.y} items={ctxMenu.items} onClose={() => setCtxMenu(null)} />

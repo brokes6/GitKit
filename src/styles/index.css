@@ -239,6 +239,164 @@ select:focus-visible,
   font-size: 10px;
   line-height: 1;
 }
+
+/* Long-running Git work stays out of the user's way. The compact state is the
+   default; hover or keyboard focus reveals the captured repo/branch context,
+   live transfer phase, and cancellation without blocking the workspace. */
+@keyframes gk-operation-in {
+  from { opacity: 0; transform: translateY(8px); filter: blur(5px); }
+  to { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+@keyframes gk-operation-slide {
+  from { transform: translateX(-45%); }
+  to { transform: translateX(265%); }
+}
+.gk-operation-capsule {
+  width: 172px;
+  max-width: calc(100vw - 32px);
+  max-height: 42px;
+  overflow: hidden;
+  outline: none;
+  animation: gk-operation-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition:
+    width 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    max-height 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-radius 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.gk-operation-summary { height: 42px; }
+.gk-operation-chevron {
+  opacity: 0.56;
+  transform: rotate(0deg);
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), opacity 140ms ease-out;
+}
+.gk-operation-details {
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition:
+    opacity 110ms ease-in,
+    transform 160ms ease-in,
+    visibility 0s linear 160ms;
+}
+.gk-operation-capsule:hover,
+.gk-operation-capsule:focus-within {
+  width: 340px;
+  max-height: 196px;
+  border-radius: 14px !important;
+}
+.gk-operation-capsule:hover .gk-operation-chevron,
+.gk-operation-capsule:focus-within .gk-operation-chevron {
+  opacity: 1;
+  transform: rotate(180deg);
+}
+.gk-operation-capsule:hover .gk-operation-details,
+.gk-operation-capsule:focus-within .gk-operation-details {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(0);
+  pointer-events: auto;
+  transition:
+    opacity 160ms ease-out 35ms,
+    transform 190ms cubic-bezier(0.16, 1, 0.3, 1) 20ms,
+    visibility 0s linear;
+}
+.gk-operation-capsule:focus-visible {
+  outline: 2px solid var(--gk-operation-accent);
+  outline-offset: 2px;
+}
+.gk-operation-progress {
+  height: 5px;
+  border-radius: 999px;
+  background: var(--gk-operation-track);
+}
+.gk-operation-progress > div {
+  width: 100%;
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: var(--gk-operation-accent);
+  transform-origin: left center;
+  transition: transform 180ms ease-out;
+}
+.gk-operation-indeterminate {
+  width: 38% !important;
+  transition: none !important;
+  animation: gk-operation-slide 1.25s ease-in-out infinite;
+}
+.gk-operation-cancel:not(:disabled):hover { background: var(--gk-shell-hover); }
+.gk-git-action {
+  position: relative;
+  overflow: hidden;
+  transition: color 140ms ease-out, background-color 140ms ease-out, opacity 140ms ease-out;
+}
+@keyframes gk-action-flow {
+  0% { transform: translateX(-130%) scaleX(0.72); }
+  50% { transform: translateX(80%) scaleX(1); }
+  100% { transform: translateX(290%) scaleX(0.72); }
+}
+@keyframes gk-action-breathe {
+  0%, 100% { opacity: 0.62; }
+  50% { opacity: 1; }
+}
+.gk-git-action::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  bottom: 2px;
+  width: 30%;
+  height: 1.5px;
+  border-radius: 999px;
+  background: var(--gk-action-accent);
+  opacity: 0;
+  pointer-events: none;
+}
+.gk-git-action[data-running="true"] {
+  color: var(--gk-action-accent);
+  background: var(--gk-action-active-bg);
+}
+.gk-git-action[data-running="true"]::after {
+  opacity: 0.72;
+  animation: gk-action-flow 1.15s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+.gk-git-action[data-running="true"] .gk-git-action-icon {
+  animation: gk-action-breathe 1.15s ease-in-out infinite;
+}
+.gk-shell-button:disabled[data-running="true"] { opacity: 1; }
+.gk-update-card {
+  transition: border-color 140ms ease-out, background-color 140ms ease-out;
+}
+@keyframes gk-update-state-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.gk-update-state {
+  animation: gk-update-state-in 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.gk-update-check[data-running="true"] .gk-update-check-icon,
+.gk-update-state .gk-update-check-icon {
+  animation: gk-action-breathe 1.15s ease-in-out infinite;
+}
+.gk-update-progress {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--gk-update-track);
+}
+.gk-update-progress > span {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--gk-update-accent);
+  transform-origin: left center;
+  transition: transform 180ms ease-out;
+}
+.gk-update-progress[data-indeterminate="true"] > span {
+  width: 36%;
+  transition: none;
+  animation: gk-operation-slide 1.25s ease-in-out infinite;
+}
 .gk-shell-button:not(:disabled):hover { background: var(--gk-shell-hover, var(--gk-project-hover)); }
 .gk-shell-button:disabled { opacity: 0.4; cursor: default; }
 .gk-project-item:not([data-project-active]):hover { background: var(--gk-project-hover); }
@@ -256,4 +414,28 @@ select:focus-visible,
   .gk-toolbar-name { max-width: 88px; }
   .gk-toolbar-branch { max-width: 80px; }
   .gk-status-sync-copy { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gk-git-action[data-running="true"]::after {
+    left: 12px;
+    width: calc(100% - 24px);
+    transform: none;
+    opacity: 0.55;
+    animation: none;
+  }
+  .gk-git-action[data-running="true"] .gk-git-action-icon {
+    opacity: 1;
+    animation: none;
+  }
+  .gk-update-check[data-running="true"] .gk-update-check-icon,
+  .gk-update-state .gk-update-check-icon {
+    opacity: 1;
+    animation: none;
+  }
+  .gk-update-progress[data-indeterminate="true"] > span {
+    width: 100%;
+    transform: scaleX(0.45);
+    animation: none;
+  }
 }

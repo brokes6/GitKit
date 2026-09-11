@@ -36,6 +36,8 @@ interface RCommit {
   subject: string;
   body: string;
   is_stash: boolean;
+  stash_index: number | null;
+  stash_branch: string | null;
 }
 interface RBranch {
   name: string;
@@ -400,6 +402,8 @@ export async function loadHistory(path: string): Promise<Commit[]> {
     message: c.is_stash ? c.subject.replace(/^(WIP on|On) [^:]+: /, "") : c.subject,
     body: c.body ? c.body : undefined,
     isStash: c.is_stash,
+    stashIndex: c.stash_index ?? undefined,
+    stashBranch: c.stash_branch ?? undefined,
     author: {
       name: c.author_name,
       email: c.author_email,
@@ -484,7 +488,7 @@ export async function mergePreview(path: string, source: string, target: string)
   return await invoke<MergePreview>("git_merge_preview", { path, source, target });
 }
 
-export interface StashEntry { index: number; message: string; date: string }
+export interface StashEntry { index: number; message: string; branch: string; date: string }
 export async function stashList(path: string): Promise<StashEntry[]> {
   return await invoke("git_stash_list", { path });
 }

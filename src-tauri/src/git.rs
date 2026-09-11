@@ -478,34 +478,37 @@ pub struct CommitInfo {
     pub refs: Vec<String>,
     pub subject: String,
     pub body: String,
-    // True for a stash tip (refs/stash). Its internal index/untracked parent
+    // True for a stash reflog tip. Its internal index/untracked parent
     // commits are collapsed away so the graph shows one node per stash.
     pub is_stash: bool,
+    // Reflog position and source branch for stash tips. Older stash entries are
+    // not reachable from refs/stash, so the frontend cannot safely infer either.
+    pub stash_index: Option<usize>,
+    pub stash_branch: Option<String>,
 }
 
-#[tauri::command]
-pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>, String> {
-    run_blocking(move || {
-    let limit = limit.unwrap_or(400);
-    // Patch-id is an enhancement: history must remain available even if an old
-    // or unusual Git installation cannot produce it.
-    let patch_ids = match stable_patch_ids(&path, limit) {
-        Ok(ids) => ids,
-        Err(_) => HashMap::new(),
-    };
-    // Field sep \x1f, record sep \x1e.
-    let fmt = "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%cI\x1f%D\x1f%s\x1f%b\x1e";
-    let out = run_git(
-        &path,
-        &[
-            "log",
-            "--all",
-            "--date-order",
-            &format!("--max-count={limit}"),
-            &format!("--pretty=format:{fmt}"),
-        ],
-    )?;
-    let mut res = Vec::new();
+#[derive(Clone)]
+struct StashMeta {
+    index: usize,
+    branch: String,
+}
+
+/// Split Git's reflog subject into the branch and user-authored stash message.
+/// Custom messages use `On <branch>: <message>`; implicit stashes use
+/// `WIP on <branch>: <commit> <subject>`.
+fn split_stash_subject(raw: &str) -> (String, String) {
+    for prefix in ["WIP on ", "On "] {
+        if let Some(rest) = raw.strip_prefix(prefix) {
+            if let Some((branch, message)) = rest.split_once(": ") {
+                return (branch.trim().to_string(), message.trim().to_string());
+            }
+        }
+    }
+    (String::new(), raw.trim().to_string())
+}
+
+fn parse_commit_log(out: &str, patch_ids: &HashMap<String, String>) -> Vec<CommitInfo> {
+    let mut commits = Vec::new();
     for rec in out.split('\x1e') {
         let rec = rec.trim_start_matches('\n');
         if rec.trim().is_empty() {
@@ -529,7 +532,7 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
                 .filter(|s| !s.is_empty())
                 .collect()
         };
-        res.push(CommitInfo {
+        commits.push(CommitInfo {
             hash: f[0].to_string(),
             short_hash: f[1].to_string(),
             parents,
@@ -542,24 +545,83 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
             subject: f[8].to_string(),
             body: f[9].to_string(),
             is_stash: false,
+            stash_index: None,
+            stash_branch: None,
         });
+    }
+    commits
+}
+
+#[tauri::command]
+pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>, String> {
+    run_blocking(move || {
+    let limit = limit.unwrap_or(400);
+    // Patch-id is an enhancement: history must remain available even if an old
+    // or unusual Git installation cannot produce it.
+    let patch_ids = match stable_patch_ids(&path, limit) {
+        Ok(ids) => ids,
+        Err(_) => HashMap::new(),
+    };
+    // Field sep \x1f, record sep \x1e.
+    let fmt = "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%cI\x1f%D\x1f%s\x1f%b\x1e";
+    // refs/stash reaches only the newest entry. Capture every reflog tip first,
+    // then merge any older tips into the ordinary branch/tag history below.
+    let stash_out = run_git(&path, &["stash", "list", "--format=%H%x1f%gs"])
+        .unwrap_or_default();
+    let mut stash_meta: HashMap<String, StashMeta> = HashMap::new();
+    for (index, line) in stash_out.lines().filter(|line| !line.trim().is_empty()).enumerate() {
+        let mut parts = line.splitn(2, '\x1f');
+        let hash = parts.next().unwrap_or("").trim();
+        if hash.is_empty() {
+            continue;
+        }
+        let (branch, _) = split_stash_subject(parts.next().unwrap_or(""));
+        stash_meta.insert(hash.to_string(), StashMeta { index, branch });
+    }
+
+    let out = run_git(
+        &path,
+        &[
+            "log",
+            "--all",
+            "--date-order",
+            &format!("--max-count={limit}"),
+            &format!("--pretty=format:{fmt}"),
+        ],
+    )?;
+    let mut res = parse_commit_log(&out, &patch_ids);
+
+    // Older stash tips live only in the reflog. Read exactly those commits with
+    // --no-walk so their base histories are not duplicated, then date-sort the
+    // combined result back into one timeline. This also guarantees that stashes
+    // older than the normal history limit remain visible.
+    let existing: HashSet<&str> = res.iter().map(|c| c.hash.as_str()).collect();
+    let missing_stashes: Vec<&str> = stash_meta
+        .keys()
+        .map(String::as_str)
+        .filter(|hash| !existing.contains(hash))
+        .collect();
+    if !missing_stashes.is_empty() {
+        let pretty_arg = format!("--pretty=format:{fmt}");
+        let mut args = vec!["log", "--no-walk=sorted", pretty_arg.as_str()];
+        args.extend(missing_stashes);
+        let older = run_git(&path, &args)?;
+        res.extend(parse_commit_log(&older, &patch_ids));
+        res.sort_by(|a, b| b.committer_date.cmp(&a.committer_date).then_with(|| b.hash.cmp(&a.hash)));
     }
 
     // Collapse stashes to a single node. A stash tip is a merge commit whose
     // parents are [base, index, (untracked)]; the index/untracked parents are
     // reachable via --all but belong to no branch. Hide them and keep only the
     // real base parent so the graph renders one node per stash.
-    let stash_tips: std::collections::HashSet<String> = run_git(&path, &["stash", "list", "--format=%H"])
-        .unwrap_or_default()
-        .lines()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let stash_tips: HashSet<String> = stash_meta.keys().cloned().collect();
     if !stash_tips.is_empty() {
-        let mut hidden: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut hidden: HashSet<String> = HashSet::new();
         for c in res.iter_mut() {
-            if stash_tips.contains(&c.hash) {
+            if let Some(meta) = stash_meta.get(&c.hash) {
                 c.is_stash = true;
+                c.stash_index = Some(meta.index);
+                c.stash_branch = Some(meta.branch.clone());
                 for p in c.parents.iter().skip(1) {
                     hidden.insert(p.clone());
                 }
@@ -1630,6 +1692,7 @@ pub async fn git_stash_push(path: String, message: String) -> Result<(), String>
 pub struct StashEntry {
     index: usize,
     message: String,
+    branch: String,
     date: String, // relative, e.g. "2 hours ago"
 }
 
@@ -1647,9 +1710,8 @@ pub async fn git_stash_list(path: String) -> Result<Vec<StashEntry>, String> {
             let mut parts = line.split('\u{1f}');
             let raw = parts.next().unwrap_or("");
             let date = parts.next().unwrap_or("").to_string();
-            // Strip the "On <branch>: " / "WIP on <branch>: " prefix for a cleaner label.
-            let message = raw.splitn(2, ": ").nth(1).unwrap_or(raw).trim().to_string();
-            list.push(StashEntry { index: i, message, date });
+            let (branch, message) = split_stash_subject(raw);
+            list.push(StashEntry { index: i, message, branch, date });
         }
         Ok(list)
     })
@@ -2696,7 +2758,7 @@ pub fn stop_watch(state: tauri::State<'_, WatchState>, path: String) -> Result<(
 
 #[cfg(test)]
 mod watch_tests {
-    use super::{path_triggers_status, remote_web_url};
+    use super::{path_triggers_status, remote_web_url, split_stash_subject};
     use std::path::Path;
 
     #[test]
@@ -2727,5 +2789,21 @@ mod watch_tests {
             Some("https://github.com/openai/codex")
         );
         assert_eq!(remote_web_url("../local-repo"), None);
+    }
+
+    #[test]
+    fn extracts_stash_branch_and_user_message() {
+        assert_eq!(
+            split_stash_subject("On flavor/first-app: 首页共享交互"),
+            ("flavor/first-app".into(), "首页共享交互".into())
+        );
+        assert_eq!(
+            split_stash_subject("WIP on main: a1b2c3d fix loading"),
+            ("main".into(), "a1b2c3d fix loading".into())
+        );
+        assert_eq!(
+            split_stash_subject("manual stash"),
+            (String::new(), "manual stash".into())
+        );
     }
 }
