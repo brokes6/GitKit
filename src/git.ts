@@ -85,12 +85,12 @@ const PALETTE = [
   "#A56380", // pink
 ];
 
-function authorColor(email: string): string {
+export function authorColor(email: string): string {
   let h = 0;
   for (let i = 0; i < email.length; i++) h = (h * 31 + email.charCodeAt(i)) >>> 0;
   return PALETTE[h % PALETTE.length];
 }
-function initials(name: string): string {
+export function authorInitials(name: string): string {
   const s = name.trim();
   return s ? s.charAt(0).toUpperCase() : "?";
 }
@@ -407,7 +407,7 @@ export async function loadHistory(path: string): Promise<Commit[]> {
     author: {
       name: c.author_name,
       email: c.author_email,
-      initials: initials(c.author_name),
+      initials: authorInitials(c.author_name),
       color: authorColor(c.author_email),
     },
     date: c.date,

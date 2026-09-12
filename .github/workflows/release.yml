@@ -67,6 +67,30 @@ jobs:
           grep '"version"' package.json src-tauri/tauri.conf.json
           grep -m1 '^version' src-tauri/Cargo.toml
 
+      # Tag 推送时 HEAD 就是该 Tag 指向的提交，因此直接把这条 commit message
+      # 写进 Release；手动触发时则使用所选分支当前 HEAD 的 commit message。
+      - name: Prepare release notes
+        id: release_notes
+        shell: bash
+        run: |
+          delimiter="RELEASE_BODY_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "body<<$delimiter"
+            echo '## 更新内容'
+            echo
+            git show -s --format='%B' HEAD
+            echo
+            echo '---'
+            echo
+            echo '自动构建产物：macOS 通用包(.dmg / .app.tar.gz) 与 Windows(.exe / .msi)。'
+            echo
+            echo '客户端「设置 → 检查更新」可自动更新到本版本。'
+            echo
+            echo '注意：本版本未做 Apple / Windows 代码签名，首次打开需绕过系统拦截'
+            echo '（macOS 右键→打开；Windows 点“更多信息→仍要运行”）。'
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build & release (Tauri)
         uses: tauri-apps/tauri-action@v1
         env:
@@ -79,13 +103,7 @@ jobs:
           # 所以 release 会挂在正确的 vX.Y.Z 上；手动触发时则用文件里的当前版本。
           tagName: v__VERSION__
           releaseName: 'GitKit v__VERSION__'
-          releaseBody: |
-            自动构建产物：macOS 通用包(.dmg / .app.tar.gz) 与 Windows(.exe / .msi)。
-
-            客户端「设置 → 检查更新」可自动更新到本版本。
-
-            注意：本版本未做 Apple / Windows 代码签名，首次打开需绕过系统拦截
-            （macOS 右键→打开；Windows 点“更多信息→仍要运行”）。
+          releaseBody: ${{ steps.release_notes.outputs.body }}
           # 先出草稿 Release，人工确认后再点 Publish；发布后自动更新才会对客户端生效
           releaseDraft: true
           prerelease: false

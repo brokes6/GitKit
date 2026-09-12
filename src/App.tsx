@@ -21,6 +21,7 @@ import {
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
   cancelGitOp, isCancelled, checkUpdates, syncLocal, revealInFileManager, openRepositoryRemote,
+  authorColor, authorInitials,
 } from "./git";
 import type { DepInfo, Tag, RepoInfo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged } from "./git";
 import { buildSmartMergeCommits, commitBranchName, commitHistoryDate, orderedEquivalentCommits } from "./smartMerge";
@@ -503,16 +504,17 @@ function fileManagerActionLabel(): string {
 
 // ─── Avatar ───────────────────────────────────────────────────────────────────
 
-function Avatar({ author, size = 28 }: { author: Author; size?: number }) {
+function Avatar({ author, size = 28 }: { author: Pick<Author, "initials" | "color">; size?: number }) {
+  const compact = size <= 18;
   return (
-    <div className="rounded-full flex items-center justify-center flex-shrink-0 font-bold"
+    <div className="rounded-full flex items-center justify-center flex-shrink-0 font-semibold"
       style={{
         width: size, height: size,
-        background: author.color + "20",
-        border: `1.5px solid ${author.color}44`,
-        color: author.color,
-        fontSize: Math.floor(size * 0.36),
-        boxShadow: `0 0 0 2px ${author.color}14`,
+        backgroundColor: author.color,
+        backgroundImage: "linear-gradient(145deg, rgba(0, 0, 0, 0.16) 0%, rgba(0, 0, 0, 0.02) 48%, rgba(255, 255, 255, 0.28) 100%)",
+        color: "#fff",
+        fontSize: compact ? Math.max(9, Math.floor(size * 0.56)) : Math.floor(size * 0.4),
+        lineHeight: 1,
       }}>
       {author.initials}
     </div>
@@ -1626,6 +1628,19 @@ function RefPill({ b, onDblClick }: {
   const t = useTheme();
   const ref = useRef<HTMLSpanElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  useEffect(() => {
+    if (!pos) return;
+    const dismiss = () => setPos(null);
+    // Close before wheel scrolling starts, and also cover scrollbar, keyboard,
+    // and programmatic scrolling. Keeping a fixed portal alive while WKWebView's
+    // async scroller moves its row causes the pill to lag and then snap back.
+    window.addEventListener("wheel", dismiss, { capture: true, passive: true });
+    document.addEventListener("scroll", dismiss, true);
+    return () => {
+      window.removeEventListener("wheel", dismiss, true);
+      document.removeEventListener("scroll", dismiss, true);
+    };
+  }, [pos]);
   const c = b.kind === "tag" ? t.amber : branchColor(b.colorName ?? b.name);
   const hasLocal = b.kind === "local" || b.kind === "both";
   const hasRemote = b.kind === "remote" || b.kind === "both";
@@ -1899,9 +1914,11 @@ function DiffRows({ lines }: { lines: string[] }) {
 
 // Shared body for commit- and stash-detail panes: a file list on the left and
 // the selected file's diff on the right. The header above it differs per caller.
-function FileDiffView({ files, selectedFile, onFileSelect, emptyHint = "无文件更改" }: {
+function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, emptyHint = "无文件更改" }: {
   files: CommitFile[]; selectedFile: CommitFile | null;
-  onFileSelect: (f: CommitFile | null) => void; emptyHint?: string;
+  onFileSelect: (f: CommitFile | null) => void;
+  onRevealFile?: (f: CommitFile) => void;
+  emptyHint?: string;
 }) {
   const t = useTheme();
   const fss = (s: CommitFile["status"]) => ({
@@ -1926,29 +1943,49 @@ function FileDiffView({ files, selectedFile, onFileSelect, emptyHint = "无文�
             const isSel = selectedFile?.path === file.path;
             const parts = file.path.split("/"), name = parts.pop()!;
             return (
-              <button key={file.path} onClick={() => onFileSelect(isSel ? null : file)}
-                className="w-full flex items-center gap-2 px-3 py-2 text-left cursor-pointer transition-colors"
+              <div key={file.path}
+                className="group relative flex items-center transition-colors"
                 style={{ margin: "1px 6px", width: "calc(100% - 12px)",
                   background: isSel ? t.rowSelected : "transparent", borderRadius: R - 2 }}
                 onMouseEnter={(e) => { if (!isSel) e.currentTarget.style.background = t.rowHover; }}
                 onMouseLeave={(e) => { if (!isSel) e.currentTarget.style.background = "transparent"; }}>
-                <span className="text-[12px] font-mono font-bold w-3 text-center flex-shrink-0" style={{ color: st.color }}>{st.label}</span>
-                <div className="flex flex-col min-w-0 flex-1">
-                  <span className="text-xs truncate" style={{ color: isSel ? t.accentFg : t.textSec }}>{name}</span>
-                  {parts.length > 0 && <span className="text-[12px] truncate" style={{ color: t.textFaint }}>{parts.join("/")}</span>}
-                </div>
-                <div className="flex gap-1 flex-shrink-0 font-mono text-[11px]">
-                  {file.additions > 0 && <span style={{ color: t.green + "88" }}>+{file.additions}</span>}
-                  {file.deletions > 0 && <span style={{ color: t.red   + "88" }}>−{file.deletions}</span>}
-                </div>
-              </button>
+                <button onClick={() => onFileSelect(isSel ? null : file)}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-left cursor-pointer">
+                  <span className="text-[12px] font-mono font-bold w-3 text-center flex-shrink-0" style={{ color: st.color }}>{st.label}</span>
+                  <div className="flex flex-col min-w-0 flex-1">
+                    <span className="text-xs truncate" style={{ color: isSel ? t.accentFg : t.textSec }}>{name}</span>
+                    {parts.length > 0 && <span className="text-[12px] truncate" style={{ color: t.textFaint }}>{parts.join("/")}</span>}
+                  </div>
+                  <div className={`flex gap-1 flex-shrink-0 font-mono text-[11px] transition-opacity ${onRevealFile
+                    ? isSel ? "opacity-0" : "group-hover:opacity-0 group-focus-within:opacity-0"
+                    : ""}`}>
+                    {file.additions > 0 && <span style={{ color: t.green + "88" }}>+{file.additions}</span>}
+                    {file.deletions > 0 && <span style={{ color: t.red   + "88" }}>−{file.deletions}</span>}
+                  </div>
+                </button>
+                {onRevealFile && (
+                  <button onClick={() => onRevealFile(file)}
+                    className={`absolute right-2 top-1/2 -translate-y-1/2 flex items-center justify-center w-6 h-6 cursor-pointer transition-all duration-100 ${isSel
+                      ? "opacity-100"
+                      : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto"}`}
+                    style={{ background: t.inputBg, color: t.textMuted, borderRadius: 6,
+                      border: `0.5px solid ${t.inputBorder}` }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = t.accentBg; e.currentTarget.style.color = t.accent; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = t.inputBg; e.currentTarget.style.color = t.textMuted; }}
+                    aria-label={`${fileManagerActionLabel()}：${file.path}`}
+                    title={`${fileManagerActionLabel()}：${file.path}`}>
+                    <FolderOpen size={12} />
+                  </button>
+                )}
+              </div>
             );
           })}
         </div>
       </div>
 
       {/* Diff */}
-      <div className="flex-1 overflow-auto" style={{ background: t.diffBg }}>
+      <div className="flex-1 overflow-auto"
+        style={{ background: t.diffBg, overscrollBehavior: "none" }}>
         {selectedFile ? (
           <>
             <div className="sticky top-0 z-10 flex items-center gap-2 px-4 py-2.5"
@@ -1990,9 +2027,9 @@ function FileDiffView({ files, selectedFile, onFileSelect, emptyHint = "无文�
   );
 }
 
-function CommitDetail({ commit, selectedFile, onFileSelect, onReveal, onCherryPick, onCheckout, checkoutBranch }: {
+function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onCherryPick, onCheckout, checkoutBranch }: {
   commit: Commit; selectedFile: CommitFile | null; onFileSelect: (f: CommitFile | null) => void;
-  onReveal?: () => void;
+  onRevealFile?: (f: CommitFile) => void;
   onCherryPick?: () => void; onCheckout?: () => void; checkoutBranch?: string | null;
 }) {
   const t = useTheme();
@@ -2032,20 +2069,6 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onReveal, onCherryPi
             {copied ? <Check size={10} style={{ color: t.green }} /> : <Copy size={10} />}
             <span className="font-mono text-[11px]">{commit.hash}</span>
           </button>
-          {onReveal && (
-            <button onClick={onReveal}
-              className="flex items-center gap-1.5 px-2.5 py-1.5 transition-colors duration-100 cursor-pointer"
-              style={{ background: t.inputBg, color: t.textMuted, borderRadius: R - 2,
-                border: `0.5px solid ${t.inputBorder}` }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = t.accentBg; e.currentTarget.style.color = t.accent; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = t.inputBg; e.currentTarget.style.color = t.textMuted; }}
-              title={selectedFile
-                ? `${fileManagerActionLabel()}：${selectedFile.path}`
-                : `${fileManagerActionLabel()}：仓库目录`}>
-              <FolderOpen size={11} />
-              <span className="text-[11px] font-medium">{fileManagerActionLabel()}</span>
-            </button>
-          )}
           {onCherryPick && (
             <button onClick={onCherryPick}
               className="flex items-center gap-1.5 px-2.5 py-1.5 transition-colors duration-100 cursor-pointer"
@@ -2079,7 +2102,8 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onReveal, onCherryPi
       </div>
 
       <FileDiffView files={commit.files} selectedFile={selectedFile}
-        onFileSelect={onFileSelect} emptyHint="合并提交，无直接更改" />
+        onFileSelect={onFileSelect} onRevealFile={onRevealFile}
+        emptyHint="合并提交，无直接更改" />
     </div>
   );
 }
@@ -2427,7 +2451,8 @@ function WorkingFileDiff({ file }: { file: WorkingFile }) {
           <span className="text-[11px] flex-shrink-0" style={{ color: t.green }}>全部为新增</span>
         )}
       </div>
-      <div className="flex-1 overflow-auto" style={{ background: t.diffBg }}>
+      <div className="flex-1 overflow-auto"
+        style={{ background: t.diffBg, overscrollBehavior: "none" }}>
         {notice ? (
           <div className="flex flex-col items-center justify-center h-full gap-2" style={{ color: t.textFaint }}>
             <FileText size={28} opacity={0.25} />
@@ -2746,9 +2771,9 @@ const press = (fn: () => void) => ({
 
 type DlgIcon = typeof GitPullRequest;
 
-function Modal({ title, Icon, onClose, width = 480, children, footer }: {
+function Modal({ title, Icon, onClose, width = 480, children, footer, closing = false, onExited }: {
   title: string; Icon: DlgIcon; onClose: () => void; width?: number;
-  children: React.ReactNode; footer?: React.ReactNode;
+  children: React.ReactNode; footer?: React.ReactNode; closing?: boolean; onExited?: () => void;
 }) {
   const t = useTheme();
   useEffect(() => {
@@ -2757,10 +2782,15 @@ function Modal({ title, Icon, onClose, width = 480, children, footer }: {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
   return (
-    <div className="fixed inset-0 flex items-center justify-center" style={{ zIndex: 200 }}>
-      <div className="absolute inset-0 gk-overlay-in" style={{ background: "rgba(0,0,0,0.45)" }} {...press(onClose)} />
+    <div className="fixed inset-0 flex items-center justify-center" style={{ zIndex: 200, pointerEvents: closing ? "none" : undefined }}>
+      <div className={`absolute inset-0 ${closing ? "gk-overlay-out" : "gk-overlay-in"}`}
+        style={{ background: "rgba(0,0,0,0.45)" }} {...press(onClose)} />
       <div role="dialog" aria-modal="true" aria-label={title}
-        className="relative flex flex-col gk-modal-in" style={{ width, maxHeight: "85vh",
+        className={`relative flex flex-col ${closing ? "gk-modal-out" : "gk-modal-in"}`}
+        onAnimationEnd={(event) => {
+          if (closing && event.currentTarget === event.target) onExited?.();
+        }}
+        style={{ width, maxHeight: "85vh",
         background: t.dialogBg,
         border: `0.5px solid ${t.glassBorder}`, borderRadius: R + 2, boxShadow: t.shadowWindow, overflow: "hidden" }}>
         <div className="flex-shrink-0 flex items-center gap-2.5 px-5 py-3.5" style={{ borderBottom: `0.5px solid ${t.border}` }}>
@@ -2797,6 +2827,8 @@ function CommitSearchDialog({ commits, projectName, ready, errored, onClose, onS
   const deferredQuery = useDeferredValue(normalizedQuery);
   const inputRef = useRef<HTMLInputElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
+  const closeActionRef = useRef<(() => void) | null>(null);
+  const [closing, setClosing] = useState(false);
   const matches = useMemo(() => deferredQuery ? commits.filter((commit) => [
     commit.message, commit.body, commit.author.name, commit.author.email,
     commit.hash, commit.fullHash, commit.branchLabel,
@@ -2804,6 +2836,13 @@ function CommitSearchDialog({ commits, projectName, ready, errored, onClose, onS
   ].filter(Boolean).join("\n").toLocaleLowerCase().includes(deferredQuery)) : commits, [commits, deferredQuery]);
   const results = matches.slice(0, 80);
   const searching = normalizedQuery !== deferredQuery;
+  const closeWith = (action: () => void) => {
+    if (closing) return;
+    closeActionRef.current = action;
+    setClosing(true);
+  };
+  const requestClose = () => closeWith(onClose);
+  const selectCommit = (commit: Commit) => closeWith(() => onSelect(commit));
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     inputRef.current?.focus();
@@ -2820,7 +2859,12 @@ function CommitSearchDialog({ commits, projectName, ready, errored, onClose, onS
   }, []);
   useEffect(() => { resultsRef.current?.scrollTo({ top: 0 }); }, [deferredQuery]);
   return (
-    <Modal title="搜索提交" Icon={Search} width={620} onClose={onClose}>
+    <Modal title="搜索提交" Icon={Search} width={620} onClose={requestClose} closing={closing}
+      onExited={() => {
+        const action = closeActionRef.current;
+        closeActionRef.current = null;
+        action?.();
+      }}>
       <label className="gk-search-field flex items-center gap-2.5 h-12 flex-shrink-0 px-3"
         style={{ background: t.inputBg, border: `0.5px solid ${t.inputBorder}`, borderRadius: R }}>
         <Search size={16} className="flex-shrink-0" aria-hidden="true" style={{ color: t.textMuted }} />
@@ -2829,7 +2873,7 @@ function CommitSearchDialog({ commits, projectName, ready, errored, onClose, onS
           className="gk-search-input min-w-0 flex-1 h-6 bg-transparent text-sm leading-6 outline-none"
           style={{ color: t.text }} onKeyDown={(event) => {
             if (event.key === "ArrowDown") { event.preventDefault(); resultsRef.current?.querySelector<HTMLButtonElement>("button")?.focus(); }
-            if (event.key === "Enter" && results[0] && !searching && ready && !errored) { event.preventDefault(); onSelect(results[0]); }
+            if (event.key === "Enter" && results[0] && !searching && ready && !errored) { event.preventDefault(); selectCommit(results[0]); }
           }} />
         <span className="w-6 h-6 flex-shrink-0">
           {query && <button type="button" aria-label="清空搜索" onClick={() => { setQuery(""); inputRef.current?.focus(); }}
@@ -2858,7 +2902,7 @@ function CommitSearchDialog({ commits, projectName, ready, errored, onClose, onS
             <span>{errored ? "仓库加载失败，请关闭搜索后重试" : !ready ? "正在读取提交…" : deferredQuery ? "没有匹配的提交，试试其他关键词" : "这个仓库还没有提交"}</span>
           </div>
         ) : results.map((commit) => (
-          <button key={commit.fullHash} type="button" disabled={searching} onClick={() => onSelect(commit)}
+          <button key={commit.fullHash} type="button" disabled={searching} onClick={() => selectCommit(commit)}
             className="gk-shell-button flex items-start gap-2.5 w-full px-3 py-3 text-left cursor-pointer"
             style={{ borderRadius: R - 3, color: t.text, "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
             <GitCommit size={15} className="flex-shrink-0 mt-0.5" aria-hidden="true" style={{ color: t.accent }} />
@@ -3657,44 +3701,72 @@ function IdentitySettings({ identities, setIdentities, defaultId, setDefaultId }
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>提交者身份</span>
-        <span className="text-[11px]" style={{ color: t.textFaint }}>
-          维护多套 name / email,提交时按所选身份注入,不改动全局 git 配置。
-        </span>
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-col gap-1 min-w-0">
+          <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>提交者身份</span>
+          <span className="text-[11px]" style={{ color: t.textFaint }}>
+            维护多套 name / email，提交时按所选身份注入，不改动全局 Git 配置。
+          </span>
+        </div>
+        {identities.length > 0 && (
+          <span className="flex-shrink-0 px-2 py-0.5 text-[10px] font-medium"
+            style={{ color: t.textMuted, background: t.inputBg, borderRadius: R - 4 }}>
+            {identities.length} 个身份
+          </span>
+        )}
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        {identities.length === 0 && (
-          <div className="text-[11px] px-1 py-6 text-center" style={{ color: t.textFaint }}>还没有身份,点击「新增身份」添加</div>
+      <div className="overflow-hidden"
+        style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 1 }}>
+        {identities.length === 0 ? (
+          <div className="text-[11px] px-4 py-8 text-center" style={{ color: t.textFaint }}>
+            还没有身份，点击下方「新增身份」添加
+          </div>
+        ) : (
+          <div className="overflow-y-auto overscroll-contain"
+            style={{ maxHeight: showForm ? 184 : 320, scrollbarGutter: "stable" }}>
+            {identities.map((i, index) => {
+              const isDefault = i.id === defaultId;
+              return (
+                <div key={i.id} className="group flex items-center gap-3 px-3 py-2.5"
+                  style={{ minHeight: 56, background: isDefault ? t.accentBg : "transparent",
+                    borderBottom: index < identities.length - 1 ? `0.5px solid ${t.border}` : undefined }}>
+                  <Avatar author={{ initials: authorInitials(i.name), color: authorColor(i.email) }} size={34} />
+                  <div className="flex flex-col min-w-0 flex-1 gap-0.5">
+                    <span className="text-xs font-medium truncate" style={{ color: t.text }}>
+                      {i.name}{isDefault && (
+                        <span className="ml-2 text-[10px] font-normal" style={{ color: t.accent }}>默认</span>
+                      )}
+                    </span>
+                    <span className="text-[11px] font-mono truncate" style={{ color: t.textMuted }}>{i.email}</span>
+                  </div>
+                  <div className="flex items-center gap-0.5 flex-shrink-0">
+                    <button {...press(() => setDefaultId(i.id))}
+                      aria-label={isDefault ? `${i.name} 是默认身份` : `将 ${i.name} 设为默认身份`}
+                      title={isDefault ? "默认身份" : "设为默认"}
+                      className="gk-shell-button flex items-center justify-center w-7 h-7 cursor-pointer"
+                      style={{ color: isDefault ? t.accent : t.textFaint, borderRadius: R - 4,
+                        "--gk-shell-hover": t.inputBg } as React.CSSProperties}>
+                      <Star size={14} fill={isDefault ? t.accent : "none"} />
+                    </button>
+                    <button {...press(() => startEdit(i))} aria-label={`编辑 ${i.name}`} title="编辑"
+                      className="gk-shell-button flex items-center justify-center w-7 h-7 cursor-pointer opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+                      style={{ color: t.textMuted, borderRadius: R - 4,
+                        "--gk-shell-hover": t.inputBg } as React.CSSProperties}>
+                      <Pencil size={13} />
+                    </button>
+                    <button {...press(() => remove(i.id))} aria-label={`删除 ${i.name}`} title="删除"
+                      className="gk-shell-button flex items-center justify-center w-7 h-7 cursor-pointer opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
+                      style={{ color: t.textMuted, borderRadius: R - 4,
+                        "--gk-shell-hover": t.inputBg } as React.CSSProperties}>
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         )}
-        {identities.map((i) => {
-          const isDefault = i.id === defaultId;
-          return (
-            <div key={i.id} className="group flex items-center gap-2.5 px-2.5 py-2"
-              style={{ borderRadius: R - 2, border: `0.5px solid ${isDefault ? t.accent + "66" : t.border}`,
-                background: isDefault ? t.accentBg : "transparent" }}>
-              <button {...press(() => setDefaultId(i.id))} title={isDefault ? "默认身份" : "设为默认"}
-                className="flex-shrink-0 cursor-pointer p-0.5" style={{ color: isDefault ? t.accent : t.textFaint }}>
-                <Star size={14} fill={isDefault ? t.accent : "none"} />
-              </button>
-              <div className="flex flex-col min-w-0 flex-1">
-                <span className="text-xs font-medium truncate" style={{ color: t.text }}>
-                  {i.name}{isDefault && <span className="ml-1.5 text-[10px] font-normal" style={{ color: t.accent }}>默认</span>}
-                </span>
-                <span className="text-[11px] font-mono truncate" style={{ color: t.textMuted }}>{i.email}</span>
-              </div>
-              <button {...press(() => startEdit(i))}
-                className="text-[11px] px-1.5 py-1 cursor-pointer opacity-0 group-hover:opacity-100"
-                style={{ color: t.textMuted, borderRadius: R - 4 }}>编辑</button>
-              <button {...press(() => remove(i.id))} title="删除"
-                className="p-1 cursor-pointer opacity-0 group-hover:opacity-100"
-                style={{ color: t.textMuted, borderRadius: R - 4 }}>
-                <Trash2 size={13} />
-              </button>
-            </div>
-          );
-        })}
       </div>
 
       {showForm ? (
@@ -4640,19 +4712,34 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId, vi
     { group: "系统", key: "deps",       label: "环境依赖", Icon: TerminalSquare },
   ] as const;
   const [section, setSection] = useState<(typeof MENU)[number]["key"]>("identity");
+  const [closing, setClosing] = useState(false);
+  const requestClose = () => setClosing(true);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setClosing(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center" style={{ zIndex: 200 }}>
-      <div className="absolute inset-0 gk-overlay-in" style={{ background: "rgba(0,0,0,0.45)" }} {...press(onClose)} />
+    <div className="fixed inset-0 flex items-center justify-center"
+      style={{ zIndex: 200, pointerEvents: closing ? "none" : undefined }}>
+      <div className={`absolute inset-0 ${closing ? "gk-overlay-out" : "gk-overlay-in"}`}
+        style={{ background: "rgba(0,0,0,0.45)" }} {...press(requestClose)} />
       <div role="dialog" aria-modal="true" aria-labelledby="settings-title"
-        className="relative flex flex-col gk-modal-in" style={{ width: "min(900px, calc(100vw - 48px))",
+        className={`relative flex flex-col ${closing ? "gk-modal-out" : "gk-modal-in"}`}
+        onAnimationEnd={(event) => {
+          if (closing && event.currentTarget === event.target) onClose();
+        }}
+        style={{ width: "min(900px, calc(100vw - 48px))",
         height: "min(600px, calc(100vh - 48px))",
         background: t.dialogBg,
         border: `0.5px solid ${t.glassBorder}`, borderRadius: R + 2, boxShadow: t.shadowWindow, overflow: "hidden" }}>
         <div className="flex-shrink-0 flex items-center gap-2.5 px-4 py-3" style={{ borderBottom: `0.5px solid ${t.border}` }}>
           <Settings size={15} style={{ color: t.accent }} />
           <span id="settings-title" className="gk-heading text-sm font-semibold flex-1" style={{ color: t.text }}>设置</span>
-          <button {...press(onClose)}
+          <button {...press(requestClose)}
             aria-label="关闭设置" title="关闭"
             className="flex items-center justify-center w-7 h-7 cursor-pointer" style={{ color: t.textMuted, borderRadius: R - 3 }}
             onMouseEnter={(e) => (e.currentTarget.style.background = t.inputBg)}
@@ -5353,10 +5440,10 @@ export default function App() {
     openDetail();
   };
 
-  const revealCommitFile = async () => {
+  const revealCommitFile = async (file: CommitFile) => {
     if (!activeProject) return;
     try {
-      await revealInFileManager(activeProject.path, selectedFile?.path);
+      await revealInFileManager(activeProject.path, file.path);
     } catch (e) {
       toast.error(`${fileManagerActionLabel()}失败：${e}`);
     }
@@ -6752,7 +6839,8 @@ export default function App() {
                   </button>
                 </div>
               )}
-              <div ref={timelineScrollRef} className="flex-1 overflow-y-auto">
+              <div ref={timelineScrollRef} className="flex-1 overflow-y-auto"
+                style={{ overscrollBehaviorY: "none" }}>
                 {errored ? (
                   <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center" style={{ color: theme.red }}>
                     <span className="text-xs font-medium">读取失败</span>
@@ -6915,7 +7003,7 @@ export default function App() {
                   ) : selectedCommit ? (
                     <CommitDetail commit={selectedCommit} selectedFile={selectedFile}
                       onFileSelect={selectDetailFile}
-                      onReveal={isReal ? revealCommitFile : undefined}
+                      onRevealFile={isReal ? revealCommitFile : undefined}
                       onCherryPick={isReal ? () => requestCherryPick(selectedCommit) : undefined}
                       checkoutBranch={isReal ? syncTargetOf(selectedCommit) : null}
                       onCheckout={isReal ? () => doCheckoutSync(selectedCommit) : undefined} />
