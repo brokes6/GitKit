@@ -14,17 +14,15 @@ jobs:
   build:
     strategy:
       fail-fast: false
-      # 两个平台都会合并并上传同一个 latest.json，串行执行可避免 Release 资源竞态。
-      max-parallel: 1
       matrix:
         include:
           # macOS：通用二进制，一个包同时覆盖 Intel(x86_64) 与 Apple Silicon(arm64)
           - platform: macos-latest
-            args: '--target universal-apple-darwin'
+            args: '--target universal-apple-darwin --bundles dmg'
             rust-targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
-          # Windows：x64
+          # Windows：x64，仅生成面向普通用户的 NSIS 安装程序(.exe)
           - platform: windows-latest
-            args: ''
+            args: '--bundles nsis'
             rust-targets: ''
 
     runs-on: ${{ matrix.platform }}
@@ -47,6 +45,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
+          # 与 main 分支的预热任务共用缓存；tag 构建只恢复，避免保存无法跨 tag 复用的缓存。
+          shared-key: 'tauri-desktop-release'
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install frontend dependencies
         run: npm ci
@@ -82,7 +83,8 @@ jobs:
             echo
             echo '---'
             echo
-            echo '自动构建产物：macOS 通用包(.dmg / .app.tar.gz) 与 Windows(.exe / .msi)。'
+            echo '面向用户的安装包：macOS 通用版(.dmg) 与 Windows x64(.exe)。'
+            echo '客户端自动更新所需的归档和签名文件会随版本一并生成。'
             echo
             echo '客户端「设置 → 检查更新」可自动更新到本版本。'
             echo
@@ -109,5 +111,73 @@ jobs:
           prerelease: false
           # 合并各平台的 latest.json，供 updater 插件消费
           uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
           retryAttempts: 3
           args: ${{ matrix.args }}
+
+  verify-updater:
+    name: Verify updater metadata
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify release assets and updater signatures
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          verify_dir="$(mktemp -d)"
+          trap 'rm -rf "$verify_dir"' EXIT
+
+          repo_api="/repos/${GITHUB_REPOSITORY}"
+          release_json="$verify_dir/release.json"
+          updater_json="$verify_dir/latest.json"
+
+          gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$repo_api/releases/tags/${GITHUB_REF_NAME}" > "$release_json"
+
+          latest_id="$(jq -er '.assets[] | select(.name == "latest.json") | .id' "$release_json")"
+          gh api \
+            -H 'Accept: application/octet-stream' \
+            "$repo_api/releases/assets/$latest_id" > "$updater_json"
+
+          jq -e --arg version "${GITHUB_REF_NAME#v}" '.version == $version' "$updater_json" > /dev/null
+          jq -e 'any(.assets[]; .name | endswith("_universal.dmg"))' "$release_json" > /dev/null
+          jq -e 'any(.assets[]; .name | endswith("_x64-setup.exe"))' "$release_json" > /dev/null
+          jq -e '[.assets[].name | select(endswith(".msi"))] | length == 0' "$release_json" > /dev/null
+
+          verify_platform() {
+            local platform="$1"
+            local expected_signature updater_url updater_name updater_id signature_id actual_signature
+
+            expected_signature="$(jq -er --arg platform "$platform" '.platforms[$platform].signature' "$updater_json")"
+            updater_url="$(jq -er --arg platform "$platform" '.platforms[$platform].url' "$updater_json")"
+
+            if [[ "$updater_url" == */releases/assets/* ]]; then
+              updater_id="${updater_url##*/}"
+              updater_name="$(jq -er --argjson id "$updater_id" '.assets[] | select(.id == $id) | .name' "$release_json")"
+            else
+              updater_name="${updater_url##*/}"
+            fi
+
+            signature_id="$(jq -er --arg name "${updater_name}.sig" '.assets[] | select(.name == $name) | .id' "$release_json")"
+            gh api \
+              -H 'Accept: application/octet-stream' \
+              "$repo_api/releases/assets/$signature_id" > "$verify_dir/${platform}.sig"
+            actual_signature="$(tr -d '\r\n' < "$verify_dir/${platform}.sig")"
+
+            if [[ "$actual_signature" != "$expected_signature" ]]; then
+              echo "::error title=Updater signature mismatch::$platform does not match ${updater_name}.sig"
+              exit 1
+            fi
+
+            echo "Verified $platform -> $updater_name"
+          }
+
+          verify_platform 'darwin-universal'
+          verify_platform 'windows-x86_64-nsis'
