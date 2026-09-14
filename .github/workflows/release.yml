@@ -14,6 +14,10 @@ jobs:
   build:
     strategy:
       fail-fast: false
+      # tauri-action 会用“读取、合并、删除、重传”的方式更新共享的 latest.json。
+      # 并行上传时两个平台会发生竞态，后完成的平台可能覆盖另一个平台的签名。
+      # 正式发布串行执行；main 分支的 warm-build-cache 仍保持并行预热。
+      max-parallel: 1
       matrix:
         include:
           # macOS：通用二进制，一个包同时覆盖 Intel(x86_64) 与 Apple Silicon(arm64)
