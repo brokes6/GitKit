@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { attributeBranches, historyBranchContext, computeGraph, branchColor } from "../src/git.ts";
+import { attributeBranches, filterHistoryByHiddenBranches, historyBranchContext, computeGraph, branchColor } from "../src/git.ts";
 import { buildSmartMergeCommits } from "../src/smartMerge.ts";
 
 const commit = (hash, parents = [], tags = []) => ({
@@ -51,6 +51,28 @@ test("clears stale attribution, ignores symbolic HEAD, and stops at unloaded par
   assert.deepEqual(commits[0].branchLabels, []);
   attributeBranches(commits, [branch("origin/new", "tip", { isRemote: true })]);
   assert.equal(commits[0].branchLabel, "origin/new");
+});
+
+test("hidden branches remove their lanes and unassigned merge-side commits while new branches stay visible", () => {
+  const commits = [
+    commit("new-tip", ["base"], ["new-work"]),
+    commit("master-tip", ["base", "deleted-side"], ["HEAD", "master"]),
+    commit("hidden-tip", ["base"], ["feature/hidden"]),
+    { ...commit("stash-tip", ["base"]), isStash: true },
+    commit("deleted-side", ["base"]),
+    commit("base"),
+  ];
+  attributeBranches(commits, [
+    branch("master", "master-tip", { current: true }),
+    branch("feature/hidden", "hidden-tip"),
+    branch("new-work", "new-tip"),
+  ]);
+
+  const visible = filterHistoryByHiddenBranches(commits, ["feature/hidden"]);
+
+  assert.deepEqual(visible.map((item) => item.fullHash), ["new-tip", "master-tip", "stash-tip", "base"]);
+  assert.equal(visible.some((item) => item.tags?.includes("feature/hidden")), false);
+  assert.equal(visible.find((item) => item.fullHash === "base")?.branchLabels?.includes("feature/hidden"), false);
 });
 
 test("labels branch transitions in displayed order without duplicating consecutive rows or tip refs", () => {

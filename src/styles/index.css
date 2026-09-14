@@ -94,14 +94,19 @@ select:focus-visible,
 .gk-overlay-out { animation: gk-overlay-out 0.12s ease-in forwards; }
 .gk-modal-out   { animation: gk-modal-out 0.14s cubic-bezier(0.4, 0, 1, 1) forwards; }
 
-/* Timeline reveal after a project switch: the freshly-loaded history fades in
-   from a soft blur, so the async load reads as "loading → resolved" rather than
-   a hard pop. Keyed by repo path in App so it re-fires on every switch. */
+/* Timeline reveal after a project or branch-visibility change: the freshly
+   computed history resolves from its skeleton without a hard content swap. */
 @keyframes gk-reveal {
   from { opacity: 0; filter: blur(8px); }
   to   { opacity: 1; filter: blur(0); }
 }
 .gk-reveal { animation: gk-reveal 0.26s cubic-bezier(0.32, 0.72, 0, 1); }
+
+@keyframes gk-skeleton-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.gk-timeline-skeleton { animation: gk-skeleton-in 0.12s ease-out; }
 
 /* Smart-merge disclosure: the row and graph remain one continuous object while
    the exact commits are revealed. Exit is slightly quicker than entrance. */

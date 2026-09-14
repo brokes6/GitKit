@@ -361,6 +361,42 @@ export function attributeBranches(commits: Commit[], branches: Branch[]): void {
   }
 }
 
+/**
+ * Scope the all-branches timeline to the branches the user has left visible.
+ *
+ * Branch membership follows the first-parent backbones populated by
+ * `attributeBranches`. Once branch filtering is active, commits that belong to
+ * no displayed backbone are intentionally omitted as well: those are usually
+ * merge-side commits from deleted or otherwise hidden topic branches, and
+ * retaining them would recreate their graph lanes and gutter width.
+ */
+export function filterHistoryByHiddenBranches(commits: Commit[], hiddenBranchNames: string[]): Commit[] {
+  if (hiddenBranchNames.length === 0) return commits;
+  const hidden = new Set(hiddenBranchNames);
+  const visible: Commit[] = [];
+
+  for (const commit of commits) {
+    if (commit.isStash) {
+      visible.push(commit);
+      continue;
+    }
+    const memberships = commit.branchLabels?.length
+      ? commit.branchLabels
+      : commit.branchLabel
+        ? [commit.branchLabel]
+        : [];
+    const visibleMemberships = memberships.filter((name) => !hidden.has(name));
+    if (visibleMemberships.length === 0) continue;
+
+    const branchLabel = commit.branchLabel && !hidden.has(commit.branchLabel)
+      ? commit.branchLabel
+      : visibleMemberships[0];
+    const tags = commit.tags?.filter((tag) => !hidden.has(tag));
+    visible.push({ ...commit, branchLabel, branchLabels: visibleMemberships, tags });
+  }
+  return visible;
+}
+
 // Context for date-interleaved history. This describes first-parent ancestry,
 // not a ref pointing at this commit; real tip badges and smart-merge footers
 // already provide their own branch context.

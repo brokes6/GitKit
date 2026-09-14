@@ -15,7 +15,7 @@ import {
 import {
   pickRepoFolder, openRepo, loadBranches, loadRemotes, loadHistory,
   loadStatus, loadStatusPaths, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
-  attributeBranches, historyBranchContext, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
+  attributeBranches, filterHistoryByHiddenBranches, historyBranchContext, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
   createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, fetchAll, pull, push, gitlabTest, githubTest,
   createPullRequest, branchColor, setVibrancy, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitRemoteAdd,
@@ -5042,6 +5042,10 @@ export default function App() {
   const [hoverBranch, setHoverBranch]         = useState<string | null>(null);
   const [focusBranch, setFocusBranch]         = useState<string | null>(null);
   const [hiddenBranches, setHiddenBranches]   = useState<string[]>([]);
+  // Sidebar preferences update immediately; the timeline scope is applied after
+  // its skeleton has painted so large graph recalculations never flash stale rows.
+  const [timelineHiddenBranches, setTimelineHiddenBranches] = useState<string[]>([]);
+  const [branchViewLoading, setBranchViewLoading] = useState(false);
   const [pinnedBranches, setPinnedBranches]   = useState<string[]>([]);
   const [collapsedFolders, setCollapsedFolders] = useState<string[]>([]);
   const [selectedWorkingFile, setSelectedWorkingFile] = useState<WorkingFile | null>(null);
@@ -5142,6 +5146,11 @@ export default function App() {
   const pendingViewReset = useRef(false);                // branch-changing reloads force a view reset
   const pendingJumpLatest = useRef(false);               // fetch/pull → jump to the newest commit
   const timelineScrollRef = useRef<HTMLDivElement>(null);
+  const hiddenBranchesRef = useRef(hiddenBranches);
+  hiddenBranchesRef.current = hiddenBranches;
+  const focusBranchRef = useRef(focusBranch);
+  focusBranchRef.current = focusBranch;
+  const branchViewFrames = useRef<number[]>([]);
 
   useEffect(() => () => {
     if (operationDismissTimer.current != null) window.clearTimeout(operationDismissTimer.current);
@@ -5216,6 +5225,37 @@ export default function App() {
   // main thread for ~1s. `switching` is true until the new timeline is painted.
   const [switching, startSwitch] = useTransition();
 
+  const cancelBranchViewFrames = () => {
+    branchViewFrames.current.forEach((frame) => cancelAnimationFrame(frame));
+    branchViewFrames.current = [];
+  };
+  useEffect(() => () => cancelBranchViewFrames(), []);
+
+  const updateHiddenBranches: React.Dispatch<React.SetStateAction<string[]>> = (update) => {
+    const previous = hiddenBranchesRef.current;
+    const next = typeof update === "function" ? update(previous) : update;
+    if (next.length === previous.length && next.every((name, index) => name === previous[index])) return;
+
+    hiddenBranchesRef.current = next;
+    setHiddenBranches(next);
+    setBranchViewLoading(true);
+    cancelBranchViewFrames();
+    // Two animation frames guarantee the structure-matched skeleton gets one
+    // paint before React starts rebuilding the potentially large graph.
+    const first = requestAnimationFrame(() => {
+      const second = requestAnimationFrame(() => {
+        branchViewFrames.current = [];
+        startSwitch(() => {
+          setTimelineHiddenBranches(next);
+          if (focusBranchRef.current && next.includes(focusBranchRef.current)) setFocusBranch(null);
+          setBranchViewLoading(false);
+        });
+      });
+      branchViewFrames.current = [second];
+    });
+    branchViewFrames.current = [first];
+  };
+
   // Esc or a pointer press outside the drawer closes the detail overlay.
   useEffect(() => {
     if (!detailOpen) return;
@@ -5258,7 +5298,11 @@ export default function App() {
   useEffect(() => { setExpandedSmartRows(new Set()); }, [prefsKey]);
   useEffect(() => {
     const p = loadUiPrefs(prefsKey);
+    cancelBranchViewFrames();
+    hiddenBranchesRef.current = p.hidden;
     setHiddenBranches(p.hidden);
+    setTimelineHiddenBranches(p.hidden);
+    setBranchViewLoading(false);
     setPinnedBranches(p.pinned);
     setCollapsedFolders(p.collapsed);
     prefsLoadedFor.current = prefsKey;
@@ -5356,11 +5400,18 @@ export default function App() {
     return { list, base };
   })();
 
-  // Hidden branches drop out of the all-view graph — but a commit shared by a
-  // visible branch stays.
-  const base = useMemo(() => isReal && hiddenBranches.length > 0
-    ? commits.filter((c) => { const m = memberOf(c); return m.length === 0 || m.some((n) => !hiddenBranches.includes(n)); })
-    : commits, [isReal, hiddenBranches, commits]);
+  // Hide both a local branch and its configured upstream identity. New branches
+  // are visible automatically because names are opt-out rather than opt-in.
+  const hiddenTimelineNames = useMemo(() => {
+    const names = new Set(timelineHiddenBranches);
+    for (const branch of branches) {
+      if (names.has(branch.name) && branch.remote) names.add(branch.remote);
+    }
+    return [...names];
+  }, [timelineHiddenBranches, branches]);
+  const base = useMemo(() => isReal
+    ? filterHistoryByHiddenBranches(commits, hiddenTimelineNames)
+    : commits, [isReal, commits, hiddenTimelineNames]);
   const scopedCommits = focusActive ? (focusInfo?.list ?? []) : base;
   const smartMergeResult = useMemo(
     () => focusActive
@@ -5372,10 +5423,10 @@ export default function App() {
   const effectiveScopedCommits = smartMergeActive ? smartMergeResult.commits : scopedCommits;
   const displayCommits = effectiveScopedCommits;
   const displayGraph = useMemo(() => {
-    if (!smartMergeActive && (!isReal || (!focusActive && hiddenBranches.length === 0))) return graphRows;
+    if (!smartMergeActive && (!isReal || (!focusActive && timelineHiddenBranches.length === 0))) return graphRows;
     const set = new Set(displayCommits.map((c) => c.fullHash));
     return computeGraph(displayCommits.map((c) => ({ ...c, parents: c.parents.filter((p) => set.has(p)) })));
-  }, [smartMergeActive, isReal, focusActive, hiddenBranches.length, graphRows, displayCommits]);
+  }, [smartMergeActive, isReal, focusActive, timelineHiddenBranches.length, graphRows, displayCommits]);
 
   // Raw topology can place another branch's whole lane above the current HEAD.
   // When Smart Merge is switched off, anchor the viewport to the checked-out
@@ -6728,7 +6779,7 @@ export default function App() {
             style={{ background: theme.bgPanel, boxShadow: theme.shadowEl }}>
             <Sidebar branches={branches} remotes={remotes} stashes={stashes}
               currentBranch={currentBranch} focusBranch={focusBranch}
-              hidden={hiddenBranches} setHidden={setHiddenBranches}
+              hidden={hiddenBranches} setHidden={updateHiddenBranches}
               pinned={pinnedBranches} setPinned={setPinnedBranches}
               collapsed={collapsedFolders} setCollapsed={setCollapsedFolders}
               onFocus={(name) => setFocus(name)}
@@ -6840,14 +6891,15 @@ export default function App() {
                 </div>
               )}
               <div ref={timelineScrollRef} className="flex-1 overflow-y-auto"
+                aria-busy={!dataReady || switching || branchViewLoading}
                 style={{ overscrollBehaviorY: "none" }}>
                 {errored ? (
                   <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center" style={{ color: theme.red }}>
                     <span className="text-xs font-medium">读取失败</span>
                     <span className="text-[11px]" style={{ color: theme.textMuted }}>{loadError?.msg}</span>
                   </div>
-                ) : (!dataReady || switching) ? (
-                  <div className="py-1">
+                ) : (!dataReady || switching || branchViewLoading) ? (
+                  <div className="gk-timeline-skeleton py-1" role="status" aria-label="正在更新提交历史">
                     {Array.from({ length: 7 }).map((_, i) => (
                       <div key={i} className="flex items-start gap-3 px-4"
                         style={{ height: 74, borderBottom: `0.5px solid ${theme.border}` }}>
@@ -6861,7 +6913,7 @@ export default function App() {
                     ))}
                   </div>
                 ) : (
-                  <div key={activeProject?.path} className="gk-reveal">
+                  <div key={`${activeProject?.path}:${timelineHiddenBranches.join("\u0000")}`} className="gk-reveal">
                     {/* A branch sitting exactly on its base has no commits of its
                         own — say so instead of rendering an empty timeline. */}
                     {focusActive && displayCommits.length === 0 && (

@@ -13,8 +13,8 @@ export function commitHistoryDate(commit: Commit): string {
   }, commit.committerDate ?? commit.date);
 }
 
-// Date-prioritized topological traversal of the collapsed graph. A parent is
-// eligible only after every visible child, even when clocks disagree. Missing
+// Validate that collapsing equivalent commits did not create a cycle, then sort
+// the logical history strictly by its latest real committer time. Missing
 // parents outside the loaded history window impose no additional constraint.
 function orderLogicalHistory(commits: Commit[]): Commit[] | null {
   const byHash = new Map(commits.map((commit) => [commit.fullHash, commit]));
@@ -27,12 +27,10 @@ function orderLogicalHistory(commits: Commit[]): Commit[] | null {
     }
   }
   const ready = commits.filter((commit) => childCounts.get(commit.fullHash) === 0);
-  const result: Commit[] = [];
+  let visited = 0;
   while (ready.length) {
-    ready.sort((a, b) => times.get(b.fullHash)! - times.get(a.fullHash)!
-      || index.get(a.fullHash)! - index.get(b.fullHash)!);
-    const commit = ready.shift()!;
-    result.push(commit);
+    const commit = ready.pop()!;
+    visited++;
     for (const parent of new Set(commit.parents)) {
       if (!byHash.has(parent)) continue;
       const count = childCounts.get(parent)! - 1;
@@ -42,7 +40,9 @@ function orderLogicalHistory(commits: Commit[]): Commit[] | null {
   }
   // Equivalent patches can occur in opposite orders on different branches.
   // Their quotient would be cyclic; keep the real history in that case.
-  return result.length === commits.length ? result : null;
+  if (visited !== commits.length) return null;
+  return [...commits].sort((a, b) => times.get(b.fullHash)! - times.get(a.fullHash)!
+    || index.get(a.fullHash)! - index.get(b.fullHash)!);
 }
 
 export function orderedEquivalentCommits(commit: Commit): Commit[] {

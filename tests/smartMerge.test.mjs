@@ -65,13 +65,13 @@ test("dates a merged group by its latest committer time without changing its rep
   assert.equal(result.commits[0].date, original.date);
 });
 
-test("keeps a child above a collapsed parent even when the parent's latest copy is newer", () => {
+test("sorts strictly by latest commit time even when a collapsed parent becomes newer than its child", () => {
   const original = commit({ hash: "original", message: "change", patchId: "patch", branch: "master", time: "2026-08-01T00:00:00Z" });
   const picked = commit({ hash: "picked01", message: "change", patchId: "patch", branch: "test", time: "2026-09-04T00:00:00Z" });
   const child = commit({ hash: "child001", message: "descendant", branch: "master", parent: original.fullHash, time: "2026-08-20T00:00:00Z" });
   const result = buildSmartMergeCommits([picked, child, original], "test");
-  assert.deepEqual(result.commits.map((c) => c.fullHash), [child.fullHash, picked.fullHash]);
-  assert.deepEqual(result.commits[0].parents, [picked.fullHash]);
+  assert.deepEqual(result.commits.map((c) => c.fullHash), [picked.fullHash, child.fullHash]);
+  assert.deepEqual(result.commits[1].parents, [picked.fullHash]);
   assert.deepEqual(child.parents, [original.fullHash]);
 });
 
