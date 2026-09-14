@@ -3,7 +3,8 @@
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -465,7 +466,7 @@ pub async fn git_remotes(path: String) -> Result<Vec<RemoteInfo>, String> {
     .await
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct CommitInfo {
     pub hash: String,
     pub short_hash: String,
@@ -474,6 +475,8 @@ pub struct CommitInfo {
     pub author_email: String,
     pub date: String,
     pub committer_date: String,
+    #[serde(skip)]
+    commit_timestamp: i64,
     pub patch_id: Option<String>,
     pub refs: Vec<String>,
     pub subject: String,
@@ -515,7 +518,7 @@ fn parse_commit_log(out: &str, patch_ids: &HashMap<String, String>) -> Vec<Commi
             continue;
         }
         let f: Vec<&str> = rec.split('\x1f').collect();
-        if f.len() < 10 {
+        if f.len() < 11 {
             continue;
         }
         let parents = if f[2].trim().is_empty() {
@@ -523,10 +526,10 @@ fn parse_commit_log(out: &str, patch_ids: &HashMap<String, String>) -> Vec<Commi
         } else {
             f[2].split_whitespace().map(|s| s.to_string()).collect()
         };
-        let refs = if f[7].trim().is_empty() {
+        let refs = if f[8].trim().is_empty() {
             vec![]
         } else {
-            f[7]
+            f[8]
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
@@ -540,16 +543,66 @@ fn parse_commit_log(out: &str, patch_ids: &HashMap<String, String>) -> Vec<Commi
             author_email: f[4].to_string(),
             date: f[5].to_string(),
             committer_date: f[6].to_string(),
+            commit_timestamp: f[7].parse().unwrap_or_default(),
             patch_id: patch_ids.get(f[0]).cloned(),
             refs,
-            subject: f[8].to_string(),
-            body: f[9].to_string(),
+            subject: f[9].to_string(),
+            body: f[10].to_string(),
             is_stash: false,
             stash_index: None,
             stash_branch: None,
         });
     }
     commits
+}
+
+/// Date-order the combined history without ever placing a parent before one of
+/// its displayed children. This matters when older stash reflog tips are added
+/// after the initial `git log --date-order`: sorting their RFC 3339 strings
+/// directly both ignores topology and misorders equivalent `Z` / offset dates.
+fn sort_commits_date_order(commits: &mut Vec<CommitInfo>) {
+    let index_by_hash: HashMap<&str, usize> = commits
+        .iter()
+        .enumerate()
+        .map(|(index, commit)| (commit.hash.as_str(), index))
+        .collect();
+    let mut parents: Vec<Vec<usize>> = vec![Vec::new(); commits.len()];
+    let mut child_counts = vec![0usize; commits.len()];
+
+    for (child_index, commit) in commits.iter().enumerate() {
+        for parent in &commit.parents {
+            if let Some(&parent_index) = index_by_hash.get(parent.as_str()) {
+                parents[child_index].push(parent_index);
+                child_counts[parent_index] += 1;
+            }
+        }
+    }
+
+    let mut ready: BinaryHeap<(i64, Reverse<usize>, usize)> = BinaryHeap::new();
+    for (index, &child_count) in child_counts.iter().enumerate() {
+        if child_count == 0 {
+            ready.push((commits[index].commit_timestamp, Reverse(index), index));
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(commits.len());
+    while let Some((_, _, index)) = ready.pop() {
+        ordered.push(commits[index].clone());
+        for &parent_index in &parents[index] {
+            child_counts[parent_index] -= 1;
+            if child_counts[parent_index] == 0 {
+                ready.push((
+                    commits[parent_index].commit_timestamp,
+                    Reverse(parent_index),
+                    parent_index,
+                ));
+            }
+        }
+    }
+
+    if ordered.len() == commits.len() {
+        *commits = ordered;
+    }
 }
 
 #[tauri::command]
@@ -563,7 +616,7 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
         Err(_) => HashMap::new(),
     };
     // Field sep \x1f, record sep \x1e.
-    let fmt = "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%cI\x1f%D\x1f%s\x1f%b\x1e";
+    let fmt = "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%cI\x1f%ct\x1f%D\x1f%s\x1f%b\x1e";
     // refs/stash reaches only the newest entry. Capture every reflog tip first,
     // then merge any older tips into the ordinary branch/tag history below.
     let stash_out = run_git(&path, &["stash", "list", "--format=%H%x1f%gs"])
@@ -607,7 +660,7 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
         args.extend(missing_stashes);
         let older = run_git(&path, &args)?;
         res.extend(parse_commit_log(&older, &patch_ids));
-        res.sort_by(|a, b| b.committer_date.cmp(&a.committer_date).then_with(|| b.hash.cmp(&a.hash)));
+        sort_commits_date_order(&mut res);
     }
 
     // Collapse stashes to a single node. A stash tip is a merge commit whose
@@ -2758,8 +2811,32 @@ pub fn stop_watch(state: tauri::State<'_, WatchState>, path: String) -> Result<(
 
 #[cfg(test)]
 mod watch_tests {
-    use super::{path_triggers_status, remote_web_url, split_stash_subject};
+    use super::{
+        parse_commit_log, path_triggers_status, remote_web_url, sort_commits_date_order,
+        split_stash_subject, CommitInfo,
+    };
+    use std::collections::HashMap;
     use std::path::Path;
+
+    fn commit(hash: &str, parents: &[&str], timestamp: i64) -> CommitInfo {
+        CommitInfo {
+            hash: hash.into(),
+            short_hash: hash.into(),
+            parents: parents.iter().map(|parent| (*parent).into()).collect(),
+            author_name: "Test".into(),
+            author_email: "test@example.com".into(),
+            date: "2026-09-14T00:00:00Z".into(),
+            committer_date: "2026-09-14T00:00:00Z".into(),
+            commit_timestamp: timestamp,
+            patch_id: None,
+            refs: Vec::new(),
+            subject: hash.into(),
+            body: String::new(),
+            is_stash: false,
+            stash_index: None,
+            stash_branch: None,
+        }
+    }
 
     #[test]
     fn filters_git_churn_but_keeps_status_metadata() {
@@ -2804,6 +2881,38 @@ mod watch_tests {
         assert_eq!(
             split_stash_subject("manual stash"),
             (String::new(), "manual stash".into())
+        );
+    }
+
+    #[test]
+    fn parses_commit_timestamp_without_shifting_refs_or_message() {
+        let raw = "full\x1fshort\x1fparent\x1fTest\x1ftest@example.com\x1f2026-09-14T00:00:00Z\x1f2026-09-14T08:00:00+08:00\x1f1789344000\x1fHEAD -> main, tag: v1\x1fsubject\x1fbody\x1e";
+        let commits = parse_commit_log(raw, &HashMap::new());
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].commit_timestamp, 1_789_344_000);
+        assert_eq!(commits[0].refs, ["HEAD -> main", "tag: v1"]);
+        assert_eq!(commits[0].subject, "subject");
+        assert_eq!(commits[0].body, "body");
+    }
+
+    #[test]
+    fn date_order_never_places_a_parent_before_its_children() {
+        let mut commits = vec![
+            commit("child", &["parent"], 200),
+            commit("parent", &[], 300),
+            commit("unrelated", &[], 350),
+            commit("older-stash", &["parent"], 400),
+        ];
+
+        sort_commits_date_order(&mut commits);
+
+        assert_eq!(
+            commits
+                .iter()
+                .map(|commit| commit.hash.as_str())
+                .collect::<Vec<_>>(),
+            ["older-stash", "unrelated", "child", "parent"],
         );
     }
 }

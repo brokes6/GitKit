@@ -97,3 +97,13 @@ test("smart-merge and stash rows break context without getting a misleading sing
   assert.equal(historyBranchContext(a, { ...a, isStash: true }), "seo");
   assert.equal(historyBranchContext(commit("unknown"), a), undefined);
 });
+
+test("graph closes lanes at the loaded boundary and ignores reversed parent edges", () => {
+  const missingParent = computeGraph([commit("tip", ["outside-history"])]);
+  assert.equal(missingParent[0].hasBottomLine, false);
+  assert.deepEqual(missingParent[0].bottomBranches, []);
+
+  const reversed = computeGraph([commit("parent"), commit("child", ["parent"])]);
+  assert.equal(reversed[1].hasBottomLine, false);
+  assert.deepEqual(reversed[1].passthrough, []);
+});

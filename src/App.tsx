@@ -1203,14 +1203,7 @@ function SidebarSection({ label, count, open, onToggle }: { label: string; count
 function SidebarDisclosure({ open, className = "", children }: {
   open: boolean; className?: string; children: React.ReactNode;
 }) {
-  return (
-    <div className="gk-sidebar-disclosure" data-expanded={open ? "true" : "false"}
-      aria-hidden={!open}>
-      <div className="min-h-0 overflow-hidden">
-        <div className={className}>{children}</div>
-      </div>
-    </div>
-  );
+  return open ? <div className={className}>{children}</div> : null;
 }
 
 function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidden, setHidden,
@@ -2117,6 +2110,9 @@ function StashDetail({ stash, files, selectedFile, onFileSelect, onApply, onDrop
   const t = useTheme();
   const adds = files.reduce((s, f) => s + f.additions, 0);
   const dels = files.reduce((s, f) => s + f.deletions, 0);
+  const sourceBranch = stash.branch.trim();
+  const stashMessage = stash.message.trim();
+  const displayMessage = !stashMessage || stashMessage === "GitKit stash" ? "工作区改动" : stashMessage;
   return (
     <div className="flex-1 flex flex-col overflow-hidden" style={{ background: t.bgPanel }}>
       <div className="flex-shrink-0 p-5" style={{ borderBottom: `0.5px solid ${t.border}` }}>
@@ -2126,11 +2122,12 @@ function StashDetail({ stash, files, selectedFile, onFileSelect, onApply, onDrop
             <Layers size={18} style={{ color: t.accent }} />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold font-mono" style={{ color: t.text }}>{"stash@{" + stash.index + "}"}</div>
+            <div className="text-sm font-semibold font-mono truncate" style={{ color: t.text }}
+              title={sourceBranch || "储藏的更改"}>{sourceBranch || "储藏的更改"}</div>
             {stash.date && <div className="text-xs mt-0.5" style={{ color: t.textMuted }}>{stash.date}</div>}
           </div>
         </div>
-        <div className="text-sm font-semibold leading-snug mb-3" style={{ color: t.text }}>{stash.message}</div>
+        <div className="text-sm font-semibold leading-snug mb-3" style={{ color: t.text }}>{displayMessage}</div>
         <div className="flex items-center gap-3">
           <button onClick={onApply}
             className="flex items-center gap-1.5 px-2.5 py-1.5 transition-colors duration-100 cursor-pointer"

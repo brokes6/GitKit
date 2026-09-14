@@ -123,6 +123,7 @@ export function branchColor(name: string): string {
 //    element is coloured by the branch it belongs to (via commit.branchLabel). ──
 export function computeGraph(commits: Commit[]): GraphRowInfo[] {
   const byHash = new Map(commits.map((c) => [c.fullHash, c]));
+  const indexByHash = new Map(commits.map((c, index) => [c.fullHash, index]));
   const colorOf = (hash: string | null | undefined): string =>
     hash ? branchColor(byHash.get(hash)?.branchLabel ?? "") : NEUTRAL;
 
@@ -135,7 +136,15 @@ export function computeGraph(commits: Commit[]): GraphRowInfo[] {
     return lanes.length - 1;
   };
 
-  for (const c of commits) {
+  for (let commitIndex = 0; commitIndex < commits.length; commitIndex++) {
+    const c = commits[commitIndex];
+    // A downward graph can only connect to parents that are still ahead in the
+    // displayed order. Ignore truncated parents and defensively drop a reversed
+    // edge instead of leaving a lane open forever at the bottom of the list.
+    const parents = c.parents.filter((parent) => {
+      const parentIndex = indexByHash.get(parent);
+      return parentIndex !== undefined && parentIndex > commitIndex;
+    });
     const expecting: number[] = [];
     lanes.forEach((h, i) => {
       if (h === c.fullHash) expecting.push(i);
@@ -172,10 +181,10 @@ export function computeGraph(commits: Commit[]): GraphRowInfo[] {
     const bottom: string[] = [];
     let hasBottomLine = false;
 
-    if (c.parents.length === 0) {
+    if (parents.length === 0) {
       lanes[dotLane] = null;
     } else {
-      const fp = c.parents[0];
+      const fp = parents[0];
       const existing = lanes.findIndex((h, i) => h === fp && i !== dotLane);
       if (existing !== -1) {
         bottomBranches.push({ fromLane: dotLane, toLane: existing });
@@ -185,8 +194,8 @@ export function computeGraph(commits: Commit[]): GraphRowInfo[] {
         lanes[dotLane] = fp;
         hasBottomLine = true;
       }
-      for (let k = 1; k < c.parents.length; k++) {
-        const p = c.parents[k];
+      for (let k = 1; k < parents.length; k++) {
+        const p = parents[k];
         let ex = lanes.findIndex((h) => h === p);
         if (ex === -1) {
           ex = freeLane();
@@ -205,7 +214,7 @@ export function computeGraph(commits: Commit[]): GraphRowInfo[] {
       hasBottomLine,
       topMerges,
       bottomBranches,
-      isMerge: c.parents.length > 1,
+      isMerge: parents.length > 1,
       colors: { dot: dotColor, line: dotColor, pass, top, bottom },
     });
   }
