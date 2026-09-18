@@ -11,6 +11,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::Emitter;
 
+mod operation;
+pub use operation::CancelState;
+use operation::GitOperation;
+#[cfg(all(test, unix))]
+mod operation_tests;
+
 /// macOS GUI apps (launched from Finder/Dock) inherit a minimal PATH — usually
 /// just `/usr/bin:/bin:/usr/sbin:/sbin` — that omits Homebrew and other common
 /// install dirs. So tools the user has in their terminal (notably `git-lfs`,
@@ -77,7 +83,7 @@ fn is_lfs_missing(err: &str) -> bool {
 /// prompt as `oauth2:<token>` via a one-shot credential helper. `GIT_TERMINAL_PROMPT=0`
 /// is always set so git fails fast instead of hanging on an interactive prompt
 /// (the token is passed through the environment, never on the argv).
-fn run_git_auth(repo: &str, args: &[&str], token: Option<&str>) -> Result<String, String> {
+fn git_auth_command(repo: &str, args: &[&str], token: Option<&str>) -> Command {
     let mut cmd = command("git");
     cmd.arg("-C").arg(repo);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
@@ -89,8 +95,13 @@ fn run_git_auth(repo: &str, args: &[&str], token: Option<&str>) -> Result<String
         cmd.arg("-c")
             .arg("credential.helper=!f() { echo username=oauth2; echo \"password=$GITKIT_GL_TOKEN\"; }; f");
     }
+    cmd.args(args);
+    cmd
+}
+
+fn run_git_auth(repo: &str, args: &[&str], token: Option<&str>) -> Result<String, String> {
+    let mut cmd = git_auth_command(repo, args, token);
     let out = cmd
-        .args(args)
         .output()
         .map_err(|e| format!("无法执行 git：{e}"))?;
     if !out.status.success() {
@@ -337,11 +348,15 @@ pub struct BranchInfo {
 /// no `branch` line and drop out; a failure here degrades to an empty map rather
 /// than breaking branch listing.
 fn linked_worktree_branches(path: &str) -> HashMap<String, String> {
+    linked_worktree_branches_with(|args| run_git(path, args))
+}
+
+fn linked_worktree_branches_with(run: impl Fn(&[&str]) -> Result<String, String>) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    let Ok(out) = run_git(path, &["worktree", "list", "--porcelain"]) else {
+    let Ok(out) = run(&["worktree", "list", "--porcelain"]) else {
         return map;
     };
-    let own = run_git(path, &["rev-parse", "--show-toplevel"])
+    let own = run(&["rev-parse", "--show-toplevel"])
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     let mut cur: Option<String> = None;
@@ -1250,17 +1265,16 @@ pub async fn git_fetch(
     op_id: String,
     on_progress: tauri::ipc::Channel<GitProgress>,
 ) -> Result<FetchSummary, String> {
-    let cancels = cancels.inner().clone();
+    let operation = cancels.begin(op_id)?;
     run_blocking(move || {
         // Phase 1 — download from every remote, streaming git's own progress.
         run_git_streaming(
             &path,
             &["fetch", "--all", "--prune", "--progress"],
             token.as_deref(),
-            &op_id,
             "获取中",
             &on_progress,
-            &cancels,
+            &operation,
         )?;
         // Phase 2 — fast-forward local branches. git prints nothing here, so
         // announce it ourselves; otherwise the bar would stall on "接收对象 100%".
@@ -1269,7 +1283,7 @@ pub async fn git_fetch(
             percent: None,
             raw: "正在更新本地分支…".into(),
         });
-        let summary = sync_tracking_branches(&path);
+        let summary = sync_tracking_branches_cancellable(&path, &operation)?;
         let _ = on_progress.send(GitProgress {
             phase: "完成".into(),
             percent: Some(100),
@@ -1283,14 +1297,29 @@ pub async fn git_fetch(
 /// Fast-forward local branches onto their upstream after a fetch. Best-effort:
 /// every step is allowed to fail without failing the fetch itself.
 fn sync_tracking_branches(path: &str) -> FetchSummary {
+    sync_tracking_branches_with(|args| run_git(path, args))
+}
+
+fn sync_tracking_branches_cancellable(path: &str, operation: &GitOperation) -> Result<FetchSummary, String> {
+    operation.check_cancelled()?;
+    let summary = sync_tracking_branches_with(|args| {
+        let (status, output, error) = operation.run(git_auth_command(path, args, None), |_| {})?;
+        if status.success() { Ok(output) } else { Err(error) }
+    });
+    // Best-effort branch sync may ignore individual Git failures, never cancellation.
+    operation.check_cancelled()?;
+    Ok(summary)
+}
+
+fn sync_tracking_branches_with(run: impl Fn(&[&str]) -> Result<String, String>) -> FetchSummary {
     let mut sum = FetchSummary::default();
     let fmt = "%(refname:short)\x1f%(upstream)\x1f%(HEAD)";
-    let Ok(out) = run_git(path, &["for-each-ref", &format!("--format={fmt}"), "refs/heads"]) else {
+    let Ok(out) = run(&["for-each-ref", &format!("--format={fmt}"), "refs/heads"]) else {
         return sum;
     };
     // Only read the working tree once — it can't change mid-sync.
-    let dirty = run_git(path, &["status", "--porcelain"]).map(|s| !s.trim().is_empty()).unwrap_or(true);
-    let worktrees = linked_worktree_branches(path);
+    let dirty = run(&["status", "--porcelain"]).map(|s| !s.trim().is_empty()).unwrap_or(true);
+    let worktrees = linked_worktree_branches_with(&run);
 
     for line in out.lines() {
         let f: Vec<&str> = line.split('\x1f').collect();
@@ -1302,7 +1331,7 @@ fn sync_tracking_branches(path: &str) -> FetchSummary {
         if !current && worktrees.contains_key(&format!("refs/heads/{name}")) {
             continue;
         }
-        let Ok(counts) = run_git(path, &["rev-list", "--left-right", "--count", &format!("{name}...{upstream}")]) else {
+        let Ok(counts) = run(&["rev-list", "--left-right", "--count", &format!("{name}...{upstream}")]) else {
             continue;
         };
         let nums: Vec<u32> = counts.split_whitespace().filter_map(|n| n.parse().ok()).collect();
@@ -1323,13 +1352,13 @@ fn sync_tracking_branches(path: &str) -> FetchSummary {
                 continue;
             }
             // Hooks off so a missing git-lfs can't fail an otherwise fine FF.
-            if run_git_nohooks(path, &["merge", "--ff-only", upstream]).is_ok() {
+            if run(&["-c", "core.hooksPath=/dev/null", "merge", "--ff-only", upstream]).is_ok() {
                 sum.synced.push(name.to_string());
             }
         } else {
             // `fetch .` fast-forwards the ref without a checkout and refuses on
             // non-FF or a branch checked out elsewhere — git enforces safety.
-            if run_git_nohooks(path, &["fetch", ".", &format!("{upstream}:refs/heads/{name}")]).is_ok() {
+            if run(&["-c", "core.hooksPath=/dev/null", "fetch", ".", &format!("{upstream}:refs/heads/{name}")]).is_ok() {
                 sum.synced.push(name.to_string());
             }
         }
@@ -1480,7 +1509,7 @@ pub async fn git_pull(
     op_id: String,
     on_progress: tauri::ipc::Channel<GitProgress>,
 ) -> Result<(), String> {
-    let cancels = cancels.inner().clone();
+    let operation = cancels.begin(op_id)?;
     run_blocking(move || {
         // Disable hooks (LFS post-merge/checkout) so a missing git-lfs can't fail a
         // pull that otherwise succeeds; auth token still passes through. Streamed so
@@ -1489,10 +1518,9 @@ pub async fn git_pull(
             &path,
             &["-c", "core.hooksPath=/dev/null", "pull", "--progress"],
             token.as_deref(),
-            &op_id,
             "拉取中",
             &on_progress,
-            &cancels,
+            &operation,
         )
     })
     .await
@@ -2035,21 +2063,13 @@ pub async fn gitlab_test(url: String, token: String) -> Result<String, String> {
 
 /// "owner/repo" (GitHub) or "group/…/project" (GitLab) parsed from a remote URL.
 fn repo_path_from_remote(url: &str) -> String {
-    let u = url.trim();
-    let after_host: &str = if let Some(rest) = u.strip_prefix("http://").or_else(|| u.strip_prefix("https://")) {
-        rest.find('/').map(|i| &rest[i + 1..]).unwrap_or("")
-    } else if let Some(idx) = u.find('@') {
-        let rest = &u[idx + 1..];
-        rest.find(':').map(|i| &rest[i + 1..]).unwrap_or("")
-    } else {
-        ""
-    };
-    after_host
-        .trim_start_matches('/')
-        .trim_end_matches('/')
-        .strip_suffix(".git")
-        .unwrap_or(after_host.trim_start_matches('/').trim_end_matches('/'))
-        .to_string()
+    // Share the SSH/scp/HTTP normalization used by "open remote". In particular,
+    // ssh://host:2222/group/repo has a port, not a "2222/group/repo" project.
+    let Some(web_url) = remote_web_url(url) else { return String::new(); };
+    web_url.split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .map(|(_, path)| path.to_string())
+        .unwrap_or_default()
 }
 
 /// Percent-encode a GitLab project path (slashes → %2F) for use as the :id.
@@ -2413,130 +2433,51 @@ pub struct GitProgress {
     pub raw: String,          // the raw git line, for a detail readout
 }
 
-/// A handle to one running, cancellable git subprocess plus the flag `git_cancel`
-/// sets to mark it user-cancelled (so the runner reports 取消 instead of failure).
-type CancelHandle = (Arc<Mutex<std::process::Child>>, Arc<AtomicBool>);
-
-/// Running, cancellable git subprocesses (fetch/pull) keyed by a frontend-supplied
-/// op id. Kept in Tauri managed state; `git_cancel(op_id)` looks the child up and
-/// kills it, which EOFs its stderr and unwinds the streaming loop. Wrapped in an
-/// `Arc` so a command can clone the map out of `State` and move it into the
-/// blocking worker thread.
-#[derive(Default, Clone)]
-pub struct CancelState(pub Arc<Mutex<HashMap<String, CancelHandle>>>);
-
-/// Sentinel error a cancelled op returns; the frontend maps it to a quiet "已取消"
-/// toast instead of a red failure.
-const CANCELLED: &str = "__cancelled__";
-
-/// Run a git command that reports `--progress` on stderr, streaming each line to
-/// the UI as a `GitProgress` and honoring cancellation via `CancelState`. Mirrors
-/// the streaming loop in `git_clone`. `fallback_phase` labels lines with no
-/// recognizable transfer phase. Registers the child under `op_id` so
-/// `git_cancel(op_id)` can kill it; returns `Err(CANCELLED)` when that happens.
+/// Run one command within the operation, splitting Git's CR/LF progress stream.
 fn run_git_streaming(
     repo: &str,
     args: &[&str],
     token: Option<&str>,
-    op_id: &str,
     fallback_phase: &str,
     on_progress: &tauri::ipc::Channel<GitProgress>,
-    cancels: &CancelState,
+    operation: &GitOperation,
 ) -> Result<(), String> {
-    let mut cmd = command("git");
-    cmd.arg("-C").arg(repo);
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-    cmd.env("PATH", augmented_path());
-    if let Some(tok) = token.filter(|s| !s.trim().is_empty()) {
-        cmd.env("GITKIT_GL_TOKEN", tok.trim());
-        cmd.arg("-c").arg("credential.helper=");
-        cmd.arg("-c")
-            .arg("credential.helper=!f() { echo username=oauth2; echo \"password=$GITKIT_GL_TOKEN\"; }; f");
-    }
-    cmd.args(args);
-    cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::piped());
-
-    let mut child = cmd.spawn().map_err(|e| format!("无法执行 git：{e}"))?;
-    let stderr = child.stderr.take().ok_or("无法读取 git 输出")?;
-    let mut reader = std::io::BufReader::new(stderr);
-
-    // Register for cancellation. The `cancelled` flag distinguishes a user kill
-    // from a real failure regardless of the child's exit status.
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let child = Arc::new(Mutex::new(child));
-    if let Ok(mut m) = cancels.0.lock() {
-        m.insert(op_id.to_string(), (child.clone(), cancelled.clone()));
-    }
-
-    // Same read-a-byte, split-on-\r-or-\n loop as clone: git refreshes progress
-    // in place with '\r'. The BufReader buffers the real syscalls.
-    let mut buf: Vec<u8> = Vec::new();
-    let mut byte = [0u8; 1];
-    let mut tail: Vec<String> = Vec::new(); // recent lines, for an error message
-    loop {
-        match std::io::Read::read(&mut reader, &mut byte) {
-            Ok(0) => break,
-            Ok(_) => {
-                let c = byte[0];
-                if c == b'\r' || c == b'\n' {
-                    if !buf.is_empty() {
-                        let line = String::from_utf8_lossy(&buf).trim().to_string();
-                        buf.clear();
-                        if !line.is_empty() {
-                            let _ = on_progress.send(GitProgress {
-                                phase: transfer_phase_label(&line, fallback_phase),
-                                percent: parse_clone_percent(&line),
-                                raw: line.clone(),
-                            });
-                            tail.push(line);
-                            if tail.len() > 10 {
-                                tail.remove(0);
-                            }
-                        }
-                    }
-                } else {
-                    buf.push(c);
-                }
-            }
-            Err(_) => break,
+    let mut buf = Vec::new();
+    let emit = |line: &[u8]| {
+        let line = String::from_utf8_lossy(line).trim().to_string();
+        if !line.is_empty() {
+            let _ = on_progress.send(GitProgress {
+                phase: transfer_phase_label(&line, fallback_phase),
+                percent: parse_clone_percent(&line),
+                raw: line,
+            });
         }
-    }
-
-    // Deregister, then reap. stderr EOF means the process is already exiting (on
-    // its own or via a cancel kill), so this wait() returns promptly.
-    if let Ok(mut m) = cancels.0.lock() {
-        m.remove(op_id);
-    }
-    let status = child.lock().unwrap().wait().map_err(|e| format!("git 执行失败：{e}"))?;
-    if cancelled.load(Ordering::SeqCst) {
-        return Err(CANCELLED.into());
-    }
+    };
+    let (status, _, errors) = operation.run(git_auth_command(repo, args, token), |bytes| {
+        for &byte in bytes {
+            if byte == b'\r' || byte == b'\n' {
+                emit(&buf);
+                buf.clear();
+            } else {
+                buf.push(byte);
+            }
+        }
+    })?;
+    emit(&buf);
     if !status.success() {
-        let msg = tail
-            .iter()
-            .rev()
-            .find(|l| l.contains("fatal") || l.contains("error"))
-            .cloned()
-            .or_else(|| tail.last().cloned())
-            .unwrap_or_else(|| "操作失败".into());
-        return Err(msg);
+        let lines: Vec<_> = errors.split(['\r', '\n']).map(str::trim).filter(|l| !l.is_empty()).collect();
+        let message = lines.iter().rev().find(|l| l.contains("fatal") || l.contains("error"))
+            .or_else(|| lines.last()).copied().unwrap_or("操作失败");
+        return Err(message.to_string());
     }
     Ok(())
 }
 
-/// Cancel a running fetch/pull by op id: kill its subprocess and flag it so the
-/// runner reports a cancel rather than a failure. No-op if the op already ended.
+/// Cancel the whole operation, including helpers and gaps between sync steps.
 #[tauri::command]
-pub fn git_cancel(cancels: tauri::State<'_, CancelState>, op_id: String) -> Result<(), String> {
-    // Clone the handle out under the map lock, then release it before killing so
-    // we never hold the map lock across the child lock.
-    let entry = cancels.0.lock().map_err(|e| e.to_string())?.get(&op_id).cloned();
-    if let Some((child, flag)) = entry {
-        flag.store(true, Ordering::SeqCst);
-        let _ = child.lock().map(|mut c| c.kill());
-    }
-    Ok(())
+pub async fn git_cancel(cancels: tauri::State<'_, CancelState>, op_id: String) -> Result<(), String> {
+    let cancels = cancels.inner().clone();
+    run_blocking(move || cancels.cancel(&op_id)).await
 }
 
 /// Clone `url` into a NEW subdirectory of `dest` (the parent folder the user
@@ -2812,7 +2753,7 @@ pub fn stop_watch(state: tauri::State<'_, WatchState>, path: String) -> Result<(
 #[cfg(test)]
 mod watch_tests {
     use super::{
-        parse_commit_log, path_triggers_status, remote_web_url, sort_commits_date_order,
+        parse_commit_log, path_triggers_status, remote_web_url, repo_path_from_remote, sort_commits_date_order,
         split_stash_subject, CommitInfo,
     };
     use std::collections::HashMap;
@@ -2866,6 +2807,24 @@ mod watch_tests {
             Some("https://github.com/openai/codex")
         );
         assert_eq!(remote_web_url("../local-repo"), None);
+    }
+
+    #[test]
+    fn parses_api_project_paths_without_ssh_ports() {
+        for remote in [
+            "ssh://git@gitlab.example.com:2222/frontend/chain-website.git",
+            "ssh://git@gitlab.example.com/frontend/chain-website.git",
+            "git@gitlab.example.com:frontend/chain-website.git",
+            "https://gitlab.example.com/frontend/chain-website.git",
+            "https://user:password@gitlab.example.com:8443/frontend/chain-website.git/",
+        ] {
+            let path = repo_path_from_remote(remote);
+            assert_eq!(path, "frontend/chain-website", "{remote}");
+            assert_eq!(super::urlencode_path(&path), "frontend%2Fchain-website");
+        }
+        assert_eq!(repo_path_from_remote("ssh://git@host:2222/group/subgroup/app.git"), "group/subgroup/app");
+        assert_eq!(repo_path_from_remote("git@github.com:owner/repo.git"), "owner/repo");
+        assert!(repo_path_from_remote("../local-repo").is_empty());
     }
 
     #[test]

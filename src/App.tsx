@@ -6092,13 +6092,11 @@ export default function App() {
         detail = parts.join(" · ") || undefined;
       } else if (kind === "pull") await pull(p, token, opId, updateOperationProgress);
       else await push(p, token);
-      realCache.current.delete(p);
       // The user may browse another project while this runs. Refresh/jump only
       // when the originating repo is still active; its invalidated cache will
       // reload naturally the next time it is selected otherwise.
       if (activePathRef.current === p) {
         if (kind === "fetch" || kind === "pull") pendingJumpLatest.current = true;
-        setReloadTick((n) => n + 1);
       }
       toast.success(`${verbs[kind]}完成`, { id: tid, description: detail });
     } catch (e) {
@@ -6114,6 +6112,9 @@ export default function App() {
         outcomePhase = String(e);
       }
     } finally {
+      // Cancellation can arrive after some refs have already changed.
+      realCache.current.delete(p);
+      if (activePathRef.current === p) setReloadTick((n) => n + 1);
       setGitBusy(null);
       setCancelling(false);
       gitOpId.current = null;
@@ -6121,13 +6122,19 @@ export default function App() {
     }
   };
 
-  // Cancel the in-flight fetch/pull. The backend kills the git subprocess, which
+  // Cancel the in-flight fetch/pull. The backend kills its process tree, which
   // unwinds runGitAction's await into the isCancelled branch above.
   const cancelGitAction = async () => {
     const id = gitOpId.current;
     if (!id || cancelling) return;
     setCancelling(true);
-    try { await cancelGitOp(id); } catch { /* already finished — the op will settle on its own */ }
+    try {
+      await cancelGitOp(id);
+    } catch (e) {
+      if (gitOpId.current !== id) return;
+      setCancelling(false);
+      toast.error(`取消失败：${e}`);
+    }
   };
 
   // ── scheduled daily update check ──────────────────────────────────────────

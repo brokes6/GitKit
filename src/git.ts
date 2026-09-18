@@ -695,7 +695,7 @@ export async function syncLocal(path: string): Promise<FetchSummary> {
   return await invoke<FetchSummary>("git_sync_local", { path });
 }
 
-/** Cancel a running fetch/pull by op id. Safe to call after it has finished. */
+/** Cancel the entire fetch/pull by op id; rejects if it is no longer registered. */
 export async function cancelGitOp(opId: string): Promise<void> {
   await invoke("git_cancel", { opId });
 }
