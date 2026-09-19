@@ -19,6 +19,10 @@ html, body {
 }
 #root { height: 100vh; }
 
+.gk-conn-button { transition: filter 120ms ease; }
+.gk-conn-button:not(:disabled):hover { filter: brightness(1.15); }
+.gk-conn-button:disabled { cursor: not-allowed; }
+
 button, input, textarea, select, [role="tab"], [role="button"] {
   font-family: inherit;
   -webkit-tap-highlight-color: transparent;

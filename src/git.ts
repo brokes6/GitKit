@@ -753,9 +753,17 @@ export async function gitlabTest(url: string, token: string): Promise<string> {
   return invoke<string>("gitlab_test", { url, token });
 }
 
+export async function gitlabTokenInfo(url: string, token: string): Promise<import("./gitlabToken").GitlabTokenInfo> {
+  return invoke("gitlab_token_info", { url, token });
+}
+
 /** Test a GitHub / GitHub Enterprise connection; resolves to "name (@login)" or throws. */
 export async function githubTest(url: string, token: string): Promise<string> {
   return invoke<string>("github_test", { url, token });
+}
+
+export async function githubTokenInfo(url: string, token: string): Promise<import("./githubToken").GithubTokenInfo> {
+  return invoke("github_token_info", { url, token });
 }
 
 // Drop the "diff --git / index / --- / +++" preamble; keep from the first hunk.

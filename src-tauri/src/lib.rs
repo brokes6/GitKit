@@ -1,5 +1,6 @@
 mod git;
 mod daily_check;
+mod github_token;
 
 #[cfg(target_os = "macos")]
 use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
@@ -122,7 +123,9 @@ pub fn run() {
             git::git_push,
             git::git_cancel,
             git::gitlab_test,
+            git::gitlab_token_info,
             git::github_test,
+            github_token::github_token_info,
             git::create_pull_request,
             git::github_create_repo,
             git::git_remote_add,

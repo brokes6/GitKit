@@ -2072,6 +2072,101 @@ pub async fn gitlab_test(url: String, token: String) -> Result<String, String> {
     }
 }
 
+/// Only return metadata; never forward arbitrary response fields (such as a token).
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GitlabTokenInfo {
+    name: Option<String>,
+    scopes: Option<Vec<String>>,
+    expires_at: Option<String>,
+    active: Option<bool>,
+    revoked: Option<bool>,
+    #[serde(default)]
+    expiry_known: bool,
+    #[serde(default)]
+    granular: bool,
+}
+
+fn parse_gitlab_token_info(value: serde_json::Value) -> Result<GitlabTokenInfo, String> {
+    if !value.is_object() || value.get("id").and_then(|id| id.as_u64()).is_none() {
+        return Err("GitLab 未返回有效的 Token 信息".into());
+    }
+    let expiry_known = value.get("expires_at").is_some();
+    let granular = value.get("granular_scopes").and_then(|v| v.as_array())
+        .is_some_and(|scopes| !scopes.is_empty());
+    let mut info: GitlabTokenInfo = serde_json::from_value(value)
+        .map_err(|_| "GitLab 返回的 Token 信息格式不受支持".to_string())?;
+    info.expiry_known = expiry_known;
+    info.granular = granular;
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn gitlab_token_info(url: String, token: String) -> Result<GitlabTokenInfo, String> {
+    let base = url.trim().trim_end_matches('/');
+    let parsed = reqwest::Url::parse(base).map_err(|_| "请填写完整的 GitLab 实例地址")?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none()
+        || !parsed.username().is_empty() || parsed.password().is_some()
+        || parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("请填写 http:// 或 https:// 开头的 GitLab 实例根地址".into());
+    }
+    if token.trim().is_empty() { return Err("请填写访问令牌".into()); }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build().map_err(|_| "无法创建 GitLab 连接")?;
+    let resp = client.get(format!("{base}/api/v4/personal_access_tokens/self"))
+        .header("PRIVATE-TOKEN", token.trim()).send().await
+        .map_err(|_| "无法读取 Token 信息，请检查网络或实例地址后重试")?;
+    match resp.status().as_u16() {
+        200 => parse_gitlab_token_info(resp.json().await
+            .map_err(|_| "GitLab 返回的 Token 信息无法解析")?),
+        401 => Err("无法认证 Token：可能已过期、被撤销或不支持此接口，请检测连接或更换令牌".into()),
+        403 => Err("当前 Token 无权读取自身信息，无法确认有效期与权限".into()),
+        404 => Err("此 GitLab 实例或令牌类型不支持 Token 信息查询，无法确认有效期与权限".into()),
+        status => Err(format!("读取 Token 信息失败（HTTP {status}），请检查实例地址后重试")),
+    }
+}
+
+#[cfg(test)]
+mod gitlab_token_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn metadata_distinguishes_unknown_expiry_and_omits_secrets() {
+        let missing = parse_gitlab_token_info(json!({"id": 1})).unwrap();
+        assert!(!missing.expiry_known);
+        assert!(missing.scopes.is_none());
+        let unlimited = parse_gitlab_token_info(json!({
+            "id": 1, "expires_at": null, "scopes": ["api"], "active": true,
+            "token": "must-not-be-forwarded"
+        })).unwrap();
+        assert!(unlimited.expiry_known);
+        assert!(unlimited.expires_at.is_none());
+        assert!(!serde_json::to_string(&unlimited).unwrap().contains("must-not-be-forwarded"));
+    }
+
+    #[test]
+    fn metadata_rejects_invalid_responses_and_identifies_granular_permissions() {
+        for value in [json!({"message": "error"}), json!([]), json!({"id": 1, "scopes": "api"})] {
+            assert!(parse_gitlab_token_info(value).is_err());
+        }
+        let info = parse_gitlab_token_info(json!({
+            "id": 2, "granular_scopes": [{"permissions": ["read_job"]}]
+        })).unwrap();
+        assert!(info.granular);
+    }
+
+    #[test]
+    fn token_info_rejects_invalid_addresses_before_sending_credentials() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        for url in ["", "gitlab.example.com", "file:///tmp/test", "https://user:secret@example.com", "https://example.com?token=secret"] {
+            assert!(runtime.block_on(gitlab_token_info(url.into(), "fixture".into())).is_err());
+        }
+    }
+}
+
 /// "owner/repo" (GitHub) or "group/…/project" (GitLab) parsed from a remote URL.
 fn repo_path_from_remote(url: &str) -> String {
     // Share the SSH/scp/HTTP normalization used by "open remote". In particular,

@@ -4,6 +4,10 @@ import { Toaster, toast } from "sonner";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { GITLAB_CAPABILITIES, tokenCapability, tokenExpiry } from "./gitlabToken";
+import type { GitlabTokenInfo } from "./gitlabToken";
+import { GITHUB_CAPABILITIES, GITHUB_TOKEN_KINDS, githubCapability, githubTokenExpiry, validGithubUrl } from "./githubToken";
+import type { GithubTokenInfo } from "./githubToken";
 import { DAILY_CHECK_DEFAULT, nextCheckLabel, shouldPresentCheck, validCheckTime } from "./dailyCheck";
 import type { DailyCheck, CheckProgress, CheckSnapshot, CheckResult } from "./dailyCheck";
 import {
@@ -19,7 +23,7 @@ import {
   pickRepoFolder, openRepo, loadBranches, loadRemotes, loadHistory,
   loadStatus, loadStatusPaths, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
   attributeBranches, filterHistoryByHiddenBranches, historyBranchContext, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
-  createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, fetchAll, pull, push, gitlabTest, githubTest,
+  createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, fetchAll, pull, push, gitlabTest, gitlabTokenInfo, githubTokenInfo,
   createPullRequest, branchColor, setVibrancy, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
@@ -3798,8 +3802,7 @@ function IdentitySettings({ identities, setIdentities, defaultId, setDefaultId }
   );
 }
 
-// Second-level pane: a remote host connection (GitLab / GitHub). Parametrized so
-// both providers share one implementation.
+// GitLab integration settings and live personal access token metadata.
 function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlaceholder, hint, test }: {
   storageKey: string; title: string; desc: string;
   urlPlaceholder: string; tokenPlaceholder: string; hint: string;
@@ -3808,151 +3811,209 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
   const t = useTheme();
   const [saved, setSaved] = useState<RemoteConn>(() => loadConn(storageKey));
   const configured = saved.token.trim().length > 0;
-  // Show the integrated card once a connection is saved; when nothing is saved a
-  // "新增集成" button is shown instead. The form only appears while editing.
   const [editing, setEditing] = useState(false);
   const [url, setUrl] = useState(saved.url);
   const [token, setToken] = useState(saved.token);
   const [showToken, setShowToken] = useState(false);
   const [status, setStatus] = useState<{ kind: "idle" | "testing" | "ok" | "err"; msg?: string }>({ kind: "idle" });
+  const [info, setInfo] = useState<GitlabTokenInfo | null>(null);
+  const [infoError, setInfoError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  const [now, setNow] = useState(Date.now);
+  const testRequest = useRef(0);
 
-  const canSave = token.trim().length > 0;
-  const canTest = token.trim().length > 0 && status.kind !== "testing";
+  useEffect(() => {
+    let cancelled = false;
+    setInfo(null); setInfoError(""); setLoading(false);
+    if (!configured || editing) return;
+    setLoading(true);
+    gitlabTokenInfo(saved.url, saved.token).then(
+      data => { if (!cancelled) { setInfo(data); setNow(Date.now()); } },
+      error => { if (!cancelled) setInfoError(String(error)); },
+    ).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [saved, configured, editing, refresh]);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => { window.clearInterval(timer); testRequest.current++; };
+  }, []);
+
+  const validUrl = (() => {
+    try {
+      const parsed = new URL(url.trim());
+      return ["http:", "https:"].includes(parsed.protocol) && !parsed.username && !parsed.password && !parsed.search && !parsed.hash;
+    } catch { return false; }
+  })();
+  const canSave = validUrl && token.trim().length > 0;
+  const canTest = canSave && status.kind !== "testing";
+  const resetResult = () => {
+    testRequest.current++;
+    setStatus({ kind: "idle" }); setInfo(null); setInfoError(""); setLoading(false);
+  };
   const runTest = async () => {
     if (!canTest) return;
-    setStatus({ kind: "testing" });
-    try {
-      setStatus({ kind: "ok", msg: await test(url.trim(), token.trim()) });
-    } catch (e) {
-      setStatus({ kind: "err", msg: String(e) });
-    }
+    const request = ++testRequest.current;
+    setStatus({ kind: "testing" }); setInfo(null); setInfoError(""); setLoading(true);
+    const [connection, metadata] = await Promise.allSettled([
+      test(url.trim(), token.trim()), gitlabTokenInfo(url.trim(), token.trim()),
+    ]);
+    if (request !== testRequest.current) return;
+    setStatus(connection.status === "fulfilled"
+      ? { kind: "ok", msg: `已连接：${connection.value}` }
+      : { kind: "err", msg: String(connection.reason) });
+    if (metadata.status === "fulfilled") { setInfo(metadata.value); setNow(Date.now()); }
+    else setInfoError(String(metadata.reason));
+    setLoading(false);
   };
-  const beginEdit = () => { setUrl(saved.url); setToken(saved.token); setStatus({ kind: "idle" }); setShowToken(false); setEditing(true); };
-  const cancelEdit = () => { setUrl(saved.url); setToken(saved.token); setStatus({ kind: "idle" }); setShowToken(false); setEditing(false); };
+  const beginEdit = () => { resetResult(); setUrl(saved.url); setToken(saved.token); setShowToken(false); setEditing(true); };
+  const cancelEdit = () => { resetResult(); setUrl(saved.url); setToken(saved.token); setShowToken(false); setEditing(false); };
   const saveNow = () => {
     if (!canSave) return;
-    const next = { url: url.trim(), token: token.trim() };
-    saveConn(storageKey, next);
-    setSaved(next);
-    setStatus({ kind: "idle" });
-    setEditing(false);
+    const next = { url: url.trim().replace(/\/+$/, ""), token: token.trim() };
+    saveConn(storageKey, next); setSaved(next); resetResult(); setShowToken(false); setEditing(false);
+    toast.success("GitLab 集成已保存");
   };
   const removeNow = () => {
-    saveConn(storageKey, { url: "", token: "" });
-    setSaved({ url: "", token: "" });
-    setUrl(""); setToken(""); setStatus({ kind: "idle" }); setShowToken(false);
-    setEditing(false);
+    saveConn(storageKey, { url: "", token: "" }); setSaved({ url: "", token: "" });
+    setUrl(""); setToken(""); resetResult(); setShowToken(false); setEditing(false);
     toast.success("已删除集成");
   };
 
+  const expiry = tokenExpiry(info, now);
+  const inactive = info?.revoked || info?.active === false || expiry.expired;
+  const stateLabel = loading ? "查询中" : info?.revoked ? "已撤销" : expiry.expired ? "已过期" : info?.active === false ? "不可用" : info?.active ? "有效" : "待确认";
+  const stateColor = inactive ? t.red : info?.active ? t.green : t.textSec;
   const inputStyle = { background: t.inputBg, color: t.text, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
+  const buttonStyle = { color: t.textSec, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
+  const metadata = (
+    <div className="flex flex-col gap-4" aria-busy={loading}>
+      <dl className="gk-token-summary grid grid-cols-3 gap-4 py-4" style={{ borderBottom: `0.5px solid ${t.border}` }}>
+        {[
+          { title: "Token 名称", value: info?.name || (loading ? "读取中…" : "无法确认"), color: t.text },
+          { title: "到期时间", value: loading ? "读取中…" : expiry.date, color: t.text },
+          { title: "剩余有效期", value: loading ? "读取中…" : inactive ? stateLabel : expiry.label, color: inactive ? t.red : expiry.tone === "green" ? t.green : expiry.tone === "amber" ? t.amber : t.textSec },
+        ].map(item => <div key={item.title} className="min-w-0 flex flex-col gap-1.5">
+          <dt className="text-[11px]" style={{ color: t.textSec }}>{item.title}</dt>
+          <dd className="text-xs font-medium break-words tabular-nums" style={{ color: item.color }}>{item.value}</dd>
+        </div>)}
+      </dl>
+      {infoError && <div role="status" className="flex items-start gap-2 text-[11px] leading-relaxed" style={{ color: t.amber }}>
+        <AlertTriangle size={14} className="shrink-0 mt-0.5" /><span>{infoError}</span>
+      </div>}
+      <div className="flex flex-col gap-3">
+        <div className="flex items-baseline justify-between gap-2">
+          <h3 className="text-xs font-semibold" style={{ color: t.text }}>Token 权限</h3>
+          <span className="text-[10px]" style={{ color: t.textSec }}>按令牌授权范围判断</span>
+        </div>
+        <div className="gk-token-grid grid grid-cols-3 gap-2">
+          {GITLAB_CAPABILITIES.map(capability => {
+            const permission = tokenCapability(info, capability, now);
+            const granted = permission === "granted";
+            const color = granted ? t.green : permission === "inactive" ? t.red : t.textSec;
+            const Icon = granted ? Check : permission === "unknown" ? Minus : X;
+            return <div key={capability.title} className="min-w-0 p-3 flex flex-col gap-2"
+              style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 3, background: t.bgPanel }}>
+              <span className="text-[11px] font-medium" style={{ color: t.text }}>{capability.title}</span>
+              <span className="flex items-center gap-1 text-[10px] font-medium" style={{ color }}>
+                <Icon size={12} />{loading ? "查询中" : granted ? "已拥有" : permission === "denied" ? "未授权" : permission === "inactive" ? "令牌不可用" : "无法确认"}
+              </span>
+              <span className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>{capability.detail}</span>
+            </div>;
+          })}
+        </div>
+        <div className="flex items-center gap-1.5 flex-wrap text-[10px]" style={{ color: t.textSec }}>
+          <span>原始 scopes</span>
+          {info?.scopes?.length ? info.scopes.map(scope => <code key={scope} className="px-1.5 py-0.5 rounded break-all"
+            style={{ color: t.text, background: t.inputBg }}>{scope}</code>) : <span>· {info?.granular ? "细粒度授权" : info?.scopes ? "无" : "无法确认"}</span>}
+        </div>
+        <p className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>
+          {info?.granular ? "此 Token 使用细粒度授权，请在 GitLab 中查看具体资源与权限。" : "以上为 Token 授权能力，实际操作仍受项目角色、保护分支及实例配置限制。"}
+        </p>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
+    <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-1.5">
         <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{title}</span>
-        <span className="text-[11px]" style={{ color: t.textFaint }}>{desc}</span>
+        <span className="text-[11px] leading-relaxed" style={{ color: t.textSec }}>{desc}</span>
       </div>
-
       {configured && !editing ? (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-3 px-3.5 py-3"
-            style={{ borderRadius: R - 2, border: `0.5px solid ${t.accent}44`, background: t.accentBg }}>
-            <div className="flex items-center justify-center rounded-full flex-shrink-0"
-              style={{ width: 30, height: 30, background: t.isDark ? "rgba(255,255,255,0.08)" : "#fff" }}>
-              <Cloud size={15} style={{ color: t.accent }} />
-            </div>
-            <div className="flex flex-col min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-medium truncate" style={{ color: t.text }}>
-                  {hostOf(saved.url) || saved.url || "已集成"}
-                </span>
-                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full flex-shrink-0"
-                  style={{ background: t.greenBg, color: t.green }}>已集成</span>
-              </div>
-              <span className="text-[11px] font-mono truncate" style={{ color: t.textMuted }}>
-                ••••••••{saved.token.slice(-4)}
-              </span>
-            </div>
-            <button {...press(beginEdit)}
-              className="flex items-center gap-1 text-[11px] px-2 py-1 cursor-pointer flex-shrink-0"
-              style={{ color: t.textMuted, borderRadius: R - 4 }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = t.rowHover)}
-              onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-              <Pencil size={12} /> 修改
-            </button>
-            <button {...press(removeNow)} title="删除"
-              className="p-1 cursor-pointer flex-shrink-0"
-              style={{ color: t.textMuted, borderRadius: R - 4 }}
-              onMouseEnter={(e) => { e.currentTarget.style.background = t.redBg; e.currentTarget.style.color = t.red; }}
-              onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textMuted; }}>
-              <Trash2 size={13} />
-            </button>
-          </div>
-          <span className="text-[10px]" style={{ color: t.textFaint }}>暂不支持多个集成,如需切换请修改或删除后重新填写。</span>
-        </div>
-      ) : editing ? (
         <>
-          <div className="flex flex-col gap-1.5">
-            <span className="text-[11px] font-medium" style={{ color: t.textMuted }}>实例地址</span>
-            <input value={url} onChange={(e) => { setUrl(e.target.value); setStatus({ kind: "idle" }); }}
-              placeholder={urlPlaceholder}
-              className="text-xs px-2.5 py-2 outline-none font-mono" style={inputStyle} />
+          <div className="flex flex-wrap items-center gap-3 p-4" style={{ borderRadius: R - 2, border: `0.5px solid ${t.border}`, background: t.bgPanel }}>
+            <Cloud size={22} className="shrink-0" style={{ color: t.accent }} />
+            <div className="flex flex-col gap-1 min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-semibold break-all" style={{ color: t.text }}>{hostOf(saved.url) || saved.url}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ color: stateColor, background: inactive ? t.redBg : info?.active ? t.greenBg : t.inputBg }}>{stateLabel}</span>
+              </div>
+              <span className="text-[11px] font-mono" style={{ color: t.textSec }}>••••••••{saved.token.length > 4 ? saved.token.slice(-4) : ""}</span>
+            </div>
+            <button {...press(beginEdit)} className="gk-conn-button flex items-center gap-1.5 px-3 py-2 text-[11px] cursor-pointer"
+              style={{ ...buttonStyle, background: t.accentBg, color: t.accentFg, borderColor: `${t.accent}44` }}><Pencil size={12} />修改集成</button>
+            <button {...press(removeNow)} title="删除集成" aria-label="删除 GitLab 集成"
+              className="gk-conn-button p-2 cursor-pointer" style={{ color: t.textSec, borderRadius: R - 3 }}><Trash2 size={14} /></button>
           </div>
-
-          <div className="flex flex-col gap-1.5">
-            <span className="text-[11px] font-medium" style={{ color: t.textMuted }}>访问令牌</span>
-            <div className="flex items-center" style={{ ...inputStyle, paddingRight: 4 }}>
-              <input value={token} onChange={(e) => { setToken(e.target.value); setStatus({ kind: "idle" }); }}
-                type={showToken ? "text" : "password"} placeholder={tokenPlaceholder}
-                className="flex-1 text-xs px-2.5 py-2 outline-none font-mono bg-transparent" style={{ color: t.text }} />
-              <button {...press(() => setShowToken((v) => !v))} className="p-1.5 cursor-pointer flex-shrink-0"
-                style={{ color: t.textMuted }} title={showToken ? "隐藏" : "显示"}>
-                {showToken ? <EyeOff size={13} /> : <Eye size={13} />}
+          <div className="flex flex-col">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-xs font-semibold" style={{ color: t.text }}>令牌信息</h3>
+              <button {...press(() => setRefresh(value => value + 1))} disabled={loading}
+                className="gk-conn-button flex items-center gap-1.5 px-2 py-1 text-[11px] cursor-pointer disabled:opacity-50"
+                style={{ color: t.textSec, borderRadius: R - 3 }}><RefreshCw size={12} className={loading ? "animate-spin" : undefined} />刷新信息</button>
+            </div>
+            {metadata}
+          </div>
+          <p className="text-[10px]" style={{ color: t.textSec }}>暂不支持多个集成，如需切换请修改或删除后重新填写。</p>
+        </>
+      ) : editing ? (
+        <form onSubmit={event => { event.preventDefault(); saveNow(); }} className="flex flex-col gap-5 p-5"
+          style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 2, background: t.bgPanel }}>
+          <div className="flex items-center gap-2" style={{ color: t.text }}><Pencil size={14} style={{ color: t.accent }} />
+            <h3 className="text-xs font-semibold">{configured ? "修改集成" : "新增集成"}</h3>
+          </div>
+          <div className="flex flex-col gap-2">
+            <label htmlFor="gitlab-instance" className="text-[11px] font-medium" style={{ color: t.text }}>实例地址</label>
+            <input id="gitlab-instance" value={url} onChange={e => { setUrl(e.target.value); resetResult(); }} autoFocus
+              placeholder={urlPlaceholder} autoComplete="url" spellCheck={false} aria-describedby="gitlab-url-hint"
+              className="w-full text-xs px-3 py-2.5 outline-none font-mono" style={inputStyle} />
+            <span id="gitlab-url-hint" className="text-[10px]" style={{ color: url.trim() && !validUrl ? t.amber : t.textSec }}>
+              {url.trim() && !validUrl ? "请输入 http:// 或 https:// 开头的完整实例地址" : "填写 GitLab 实例根地址，可包含自建实例的子路径。"}
+            </span>
+          </div>
+          <div className="flex flex-col gap-2">
+            <label htmlFor="gitlab-token" className="text-[11px] font-medium" style={{ color: t.text }}>个人访问令牌</label>
+            <div className="flex items-center pr-1" style={inputStyle}>
+              <input id="gitlab-token" value={token} onChange={e => { setToken(e.target.value); resetResult(); }}
+                type={showToken ? "text" : "password"} placeholder={tokenPlaceholder} autoComplete="off" spellCheck={false} aria-describedby="gitlab-token-hint"
+                className="flex-1 min-w-0 text-xs px-3 py-2.5 outline-none font-mono bg-transparent" style={{ color: t.text }} />
+              <button type="button" {...press(() => setShowToken(value => !value))} className="gk-conn-button p-2 cursor-pointer"
+                style={{ color: t.textSec }} aria-label={showToken ? "隐藏令牌" : "显示令牌"} aria-pressed={showToken}>
+                {showToken ? <EyeOff size={14} /> : <Eye size={14} />}
               </button>
             </div>
-            <span className="text-[10px]" style={{ color: t.textFaint }}>{hint}</span>
+            <span id="gitlab-token-hint" className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>{hint}</span>
           </div>
-
-          <div className="flex items-center gap-3 flex-wrap">
-            <button {...(canTest ? press(runTest) : {})} disabled={!canTest}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium cursor-pointer"
-              style={{ background: t.inputBg, color: canTest ? t.text : t.textFaint,
-                border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3, cursor: canTest ? "pointer" : "not-allowed" }}>
-              <RefreshCw size={12} className={status.kind === "testing" ? "animate-spin" : undefined} />
-              检测连接
-            </button>
-            {status.kind === "ok" && (
-              <span className="flex items-center gap-1.5 text-xs min-w-0" style={{ color: t.green }}>
-                <Check size={13} className="flex-shrink-0" />
-                <span className="truncate">已连接：{status.msg}</span>
-              </span>
-            )}
-            {status.kind === "err" && (
-              <span className="flex items-center gap-1.5 text-xs min-w-0" style={{ color: t.red }}>
-                <AlertTriangle size={13} className="flex-shrink-0" />
-                <span className="truncate">{status.msg}</span>
-              </span>
-            )}
+          <div className="flex flex-col gap-2" aria-live="polite">
+            {status.kind === "ok" || status.kind === "err" ? <span className="flex items-start gap-1.5 text-[11px] leading-relaxed"
+              style={{ color: status.kind === "ok" ? t.green : t.red }}>
+              {status.kind === "ok" ? <Check size={14} className="shrink-0 mt-0.5" /> : <AlertTriangle size={14} className="shrink-0 mt-0.5" />}{status.msg}
+            </span> : <span className="text-[10px]" style={{ color: t.textSec }}>{loading ? "正在检测连接并读取令牌信息…" : "检测连接可预览当前令牌的有效期和权限。"}</span>}
+          </div>
+          <div className="flex items-center gap-2 pt-4" style={{ borderTop: `0.5px solid ${t.border}` }}>
+            <button type="button" {...press(runTest)} disabled={!canTest} className="gk-conn-button flex items-center gap-1.5 px-3 py-2 text-[11px] cursor-pointer disabled:opacity-40" style={buttonStyle}>
+              <RefreshCw size={12} className={status.kind === "testing" ? "animate-spin" : undefined} />检测连接</button>
             <div className="flex-1" />
-            <button {...press(cancelEdit)} className="px-3 py-1.5 text-xs cursor-pointer"
-              style={{ color: t.textMuted, borderRadius: R - 3 }}>取消</button>
-            <button {...(canSave ? press(saveNow) : {})} disabled={!canSave}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium cursor-pointer"
-              style={{ background: canSave ? t.accent : t.inputBg, color: canSave ? "#fff" : t.textFaint,
-                borderRadius: R - 3, opacity: canSave ? 1 : 0.7, cursor: canSave ? "pointer" : "not-allowed" }}>
-              保存
-            </button>
+            <button type="button" {...press(cancelEdit)} className="gk-conn-button px-3 py-2 text-[11px] cursor-pointer" style={{ color: t.textSec, borderRadius: R - 3 }}>取消</button>
+            <button type="submit" {...press(saveNow)} disabled={!canSave} className="gk-conn-button px-4 py-2 text-[11px] font-medium cursor-pointer disabled:opacity-40"
+              style={{ background: t.accent, color: "#fff", borderRadius: R - 3 }}>保存集成</button>
           </div>
-        </>
+          {(info || infoError) && metadata}
+        </form>
       ) : (
-        <button {...press(beginEdit)}
-          className="flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium cursor-pointer transition-colors"
-          style={{ color: t.textSec, borderRadius: R - 2, border: `0.5px dashed ${t.inputBorder}` }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = t.rowHover; e.currentTarget.style.color = t.text; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textSec; }}>
-          <Cloud size={13} /> 新增集成
-        </button>
+        <button {...press(beginEdit)} className="gk-conn-button flex items-center justify-center gap-1.5 py-3 text-xs font-medium cursor-pointer"
+          style={{ color: t.textSec, borderRadius: R - 2, border: `0.5px dashed ${t.inputBorder}` }}><Plus size={14} />新增集成</button>
       )}
     </div>
   );
@@ -3962,152 +4023,233 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
 // person can push different projects under different identities. Push / PR flows
 // pick the account matching the remote host; when several match, the app prompts.
 // Persisted to localStorage, migrated from the legacy single connection.
+function GithubTokenDetails({ info, loading, error, now }: {
+  info: GithubTokenInfo | null; loading: boolean; error: string; now: number;
+}) {
+  const t = useTheme();
+  const expiry = githubTokenExpiry(info, now);
+  return <div className="flex flex-col gap-3" aria-busy={loading}>
+    <dl className="grid grid-cols-3 gap-3 py-3" style={{ borderBottom: `0.5px solid ${t.border}` }}>
+      {[
+        { title: "认证账号", value: info ? `@${info.login}` : "无法确认", color: t.text },
+        { title: "到期时间", value: expiry.date, color: t.text },
+        { title: "剩余有效期", value: expiry.label, color: expiry.tone === "red" ? t.red : expiry.tone === "amber" ? t.amber : expiry.tone === "green" ? t.green : t.textSec },
+      ].map(item => <div key={item.title} className="min-w-0 flex flex-col gap-1.5">
+        <dt className="text-[10px]" style={{ color: t.textSec }}>{item.title}</dt>
+        <dd className="text-[11px] font-medium break-words tabular-nums" style={{ color: item.color }}>{loading ? "读取中…" : item.value}</dd>
+      </div>)}
+    </dl>
+    {error && <div role="status" className="flex items-start gap-2 text-[11px] leading-relaxed" style={{ color: t.amber }}>
+      <AlertTriangle size={14} className="shrink-0 mt-0.5" /><span>{error}</span>
+    </div>}
+    {info && (info.scopes === null || !info.expires_at) && <p className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>
+      {info.scopes === null ? "GitHub 未返回此 Token 的完整权限，请在 GitHub 的令牌设置中核对。" : ""}
+      {!info.expires_at ? "未返回到期时间，可能未设置有效期或实例不支持，无法据此确认永久有效。" : ""}
+    </p>}
+    <div className="flex items-baseline justify-between gap-2">
+      <h4 className="text-xs font-semibold" style={{ color: t.text }}>Token 权限</h4>
+      <span className="text-[10px]" style={{ color: t.textSec }}>按令牌授权范围判断</span>
+    </div>
+    <div className="gk-github-token-grid grid grid-cols-3 gap-2">
+      {GITHUB_CAPABILITIES.map(capability => {
+        const permission = githubCapability(info, capability.id, now);
+        const color = permission === "granted" ? t.green : permission === "public" ? t.amber : permission === "inactive" ? t.red : t.textSec;
+        const Icon = permission === "granted" || permission === "public" ? Check : permission === "unknown" ? Minus : X;
+        return <div key={capability.id} title={capability.detail} className="min-w-0 px-3 py-2.5 flex flex-col gap-1.5"
+          style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 3, background: t.bgPanel }}>
+          <span className="text-[11px] font-medium" style={{ color: t.text }}>{capability.title}</span>
+          <span className="flex items-center gap-1 text-[10px] font-medium" style={{ color }}><Icon size={12} />
+            {loading ? "查询中" : permission === "granted" ? "已拥有" : permission === "public" ? "仅公开仓库" : permission === "denied" ? "未授权" : permission === "inactive" ? "令牌已过期" : "无法确认"}
+          </span>
+        </div>;
+      })}
+    </div>
+    <div className="flex items-center gap-1.5 flex-wrap text-[10px]" style={{ color: t.textSec }}>
+      <span>原始 scopes</span>
+      {info?.scopes?.length ? info.scopes.map(scope => <code key={scope} className="px-1.5 py-0.5 rounded break-all"
+        style={{ color: t.text, background: t.inputBg }}>{scope}</code>) : <span>· {info?.scopes ? "无（仅公开信息）" : "未提供"}</span>}
+    </div>
+    <p className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>实际操作仍受仓库角色、保护分支、组织 SSO 及令牌可访问的仓库范围限制。</p>
+  </div>;
+}
+
 function GithubAccountsSettings() {
   const t = useTheme();
   const [accounts, setAccounts] = useState<GithubAccount[]>(loadGithubAccounts);
+  const [selectedId, setSelectedId] = useState(() => accounts[0]?.id ?? "");
   const [label, setLabel] = useState("");
   const [url, setUrl] = useState("");
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [status, setStatus] = useState<{ kind: "idle" | "testing" | "ok" | "err"; msg?: string }>({ kind: "idle" });
-  // The form is only mounted while adding a new account or editing an existing one.
+  const [testing, setTesting] = useState(false);
+  const [draftInfo, setDraftInfo] = useState<GithubTokenInfo | null>(null);
+  const [draftError, setDraftError] = useState("");
+  const requestId = useRef(0);
+  const [now, setNow] = useState(Date.now);
+  const [refresh, setRefresh] = useState(0);
+  type Inspection = { account: GithubAccount; loading: boolean; info: GithubTokenInfo | null; error: string };
+  const [inspections, setInspections] = useState<Record<string, Inspection>>({});
   const showForm = adding || editingId !== null;
+  const selected = accounts.find(account => account.id === selectedId) ?? accounts[0];
+  const inspectionFor = (account: GithubAccount) => {
+    const result = inspections[account.id];
+    return result?.account.url === account.url && result.account.token === account.token ? result : undefined;
+  };
+  const current = selected ? inspectionFor(selected) : undefined;
+  const busy = accounts.some(account => !inspectionFor(account) || inspectionFor(account)?.loading);
+  const hostLabel = (account: GithubAccount) => account.url ? hostOf(account.url) : "github.com";
+  const accountLabel = (account: GithubAccount) => account.label || hostLabel(account);
 
   useEffect(() => { saveGithubAccounts(accounts); }, [accounts]);
+  useEffect(() => {
+    let cancelled = false;
+    setInspections(Object.fromEntries(accounts.map(account => [account.id, { account, loading: true, info: null, error: "" }])));
+    let index = 0;
+    // Bound concurrent requests; a slow or invalid account never blocks other results.
+    const worker = async () => {
+      while (!cancelled && index < accounts.length) {
+        const account = accounts[index++];
+        let result: Inspection;
+        try { result = { account, loading: false, info: await githubTokenInfo(account.url, account.token), error: "" }; }
+        catch (error) { result = { account, loading: false, info: null, error: String(error) }; }
+        if (!cancelled) { setInspections(previous => ({ ...previous, [account.id]: result })); setNow(Date.now()); }
+      }
+    };
+    void Promise.all(Array.from({ length: Math.min(3, accounts.length) }, worker));
+    return () => { cancelled = true; };
+  }, [accounts, refresh]);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => { window.clearInterval(timer); requestId.current++; };
+  }, []);
 
-  const valid = token.trim().length > 0;
-  const reset = () => { setLabel(""); setUrl(""); setToken(""); setEditingId(null); setAdding(false); setStatus({ kind: "idle" }); setShowToken(false); };
+  const clearTest = () => { requestId.current++; setTesting(false); setDraftInfo(null); setDraftError(""); };
+  const reset = () => { clearTest(); setLabel(""); setUrl(""); setToken(""); setEditingId(null); setAdding(false); setShowToken(false); };
+  const valid = token.trim().length > 0 && validGithubUrl(url);
   const submit = () => {
     if (!valid) return;
-    const l = label.trim(), u = url.trim(), tk = token.trim();
-    if (editingId) {
-      setAccounts((prev) => prev.map((a) => a.id === editingId ? { ...a, label: l, url: u, token: tk } : a));
-    } else {
-      setAccounts((prev) => [...prev, { id: "gh-" + Date.now(), label: l, url: u, token: tk }]);
-    }
-    reset();
+    const id = editingId ?? `gh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const next = { id, label: label.trim(), url: url.trim().replace(/\/+$/, ""), token: token.trim() };
+    setAccounts(previous => editingId ? previous.map(account => account.id === editingId ? next : account) : [...previous, next]);
+    setSelectedId(id); reset(); toast.success(editingId ? "GitHub 账号已保存" : "GitHub 账号已添加");
   };
-  const startAdd = () => { setEditingId(null); setLabel(""); setUrl(""); setToken(""); setStatus({ kind: "idle" }); setShowToken(false); setAdding(true); };
-  const startEdit = (a: GithubAccount) => { setAdding(false); setEditingId(a.id); setLabel(a.label); setUrl(a.url); setToken(a.token); setStatus({ kind: "idle" }); };
+  const startAdd = () => { reset(); setAdding(true); };
+  const startEdit = (account: GithubAccount) => {
+    reset(); setSelectedId(account.id); setEditingId(account.id); setLabel(account.label); setUrl(account.url); setToken(account.token);
+  };
   const remove = (id: string) => {
-    setAccounts((prev) => prev.filter((a) => a.id !== id));
-    // Drop per-project choices pointing at the deleted account, so they can't
-    // linger in 项目配置 as dangling entries.
-    for (const [path, accId] of Object.entries(loadPrefMap(ACCOUNT_PREFS))) {
-      if (accId === id) deletePrefMapEntry(ACCOUNT_PREFS, path);
+    setAccounts(previous => previous.filter(account => account.id !== id));
+    for (const [path, accountId] of Object.entries(loadPrefMap(ACCOUNT_PREFS))) {
+      if (accountId === id) deletePrefMapEntry(ACCOUNT_PREFS, path);
     }
-    if (editingId === id) reset();
+    toast.success("已删除 GitHub 账号");
   };
-
-  const canTest = token.trim().length > 0 && status.kind !== "testing";
   const runTest = async () => {
-    if (!canTest) return;
-    setStatus({ kind: "testing" });
-    try { setStatus({ kind: "ok", msg: await githubTest(url.trim(), token.trim()) }); }
-    catch (e) { setStatus({ kind: "err", msg: String(e) }); }
+    if (!valid || testing) return;
+    const request = ++requestId.current;
+    setTesting(true); setDraftInfo(null); setDraftError("");
+    try {
+      const info = await githubTokenInfo(url.trim(), token.trim());
+      if (request === requestId.current) { setDraftInfo(info); setNow(Date.now()); }
+    } catch (error) { if (request === requestId.current) setDraftError(String(error)); }
+    finally { if (request === requestId.current) setTesting(false); }
   };
-
   const inputStyle = { background: t.inputBg, color: t.text, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
-  const hostLabel = (a: GithubAccount) => (a.url ? hostOf(a.url) : "github.com");
+  const buttonStyle = { color: t.textSec, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
 
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>GitHub 集成</span>
-        <span className="text-[11px]" style={{ color: t.textFaint }}>
-          维护多套 GitHub 账号(公有版留空地址,企业版填实例根地址)。推送 / 建 PR 时按远程地址自动匹配;匹配到多个账号会弹窗让你选择,只有一个则直接使用。
-        </span>
-      </div>
-
-      <div className="flex flex-col gap-1.5">
-        {accounts.length === 0 && (
-          <div className="text-[11px] px-1 py-6 text-center" style={{ color: t.textFaint }}>还没有账号,点击「新增账号」添加</div>
-        )}
-        {accounts.map((a) => (
-          <div key={a.id} className="group flex items-center gap-2.5 px-2.5 py-2"
-            style={{ borderRadius: R - 2, border: `0.5px solid ${t.border}` }}>
-            <div className="flex items-center justify-center rounded-full flex-shrink-0"
-              style={{ width: 26, height: 26, background: t.accentBg }}>
-              <Github size={13} style={{ color: t.accent }} />
-            </div>
-            <div className="flex flex-col min-w-0 flex-1">
-              <span className="text-xs font-medium truncate" style={{ color: t.text }}>{a.label || hostLabel(a)}</span>
-              <span className="text-[11px] font-mono truncate" style={{ color: t.textMuted }}>
-                {hostLabel(a)} · ••••{a.token.slice(-4)}
-              </span>
-            </div>
-            <button {...press(() => startEdit(a))}
-              className="text-[11px] px-1.5 py-1 cursor-pointer opacity-0 group-hover:opacity-100"
-              style={{ color: t.textMuted, borderRadius: R - 4 }}>编辑</button>
-            <button {...press(() => remove(a.id))} title="删除"
-              className="p-1 cursor-pointer opacity-0 group-hover:opacity-100"
-              style={{ color: t.textMuted, borderRadius: R - 4 }}>
-              <Trash2 size={13} />
-            </button>
-          </div>
-        ))}
-      </div>
-
-      {showForm ? (
-        <div className="flex flex-col gap-2 p-3" style={{ background: t.inputBg + "80", borderRadius: R - 1, border: `0.5px solid ${t.border}` }}>
-          <span className="text-[11px] font-semibold" style={{ color: t.textMuted }}>{editingId ? "编辑账号" : "新增账号"}</span>
-          <input value={label} autoFocus onChange={(e) => setLabel(e.target.value)} placeholder="名称 / 备注(如 work、personal)"
-            className="text-xs px-2.5 py-2 outline-none" style={inputStyle} />
-          <input value={url} onChange={(e) => { setUrl(e.target.value); setStatus({ kind: "idle" }); }}
-            placeholder="实例地址(公有版留空,企业版填 https://ghe.example.com)"
-            className="text-xs px-2.5 py-2 outline-none font-mono" style={inputStyle} />
-          <div className="flex items-center" style={{ ...inputStyle, paddingRight: 4 }}>
-            <input value={token} onChange={(e) => { setToken(e.target.value); setStatus({ kind: "idle" }); }}
-              type={showToken ? "text" : "password"} placeholder="访问令牌 ghp_… / github_pat_…"
-              className="flex-1 text-xs px-2.5 py-2 outline-none font-mono bg-transparent" style={{ color: t.text }} />
-            <button {...press(() => setShowToken((v) => !v))} className="p-1.5 cursor-pointer flex-shrink-0"
-              style={{ color: t.textMuted }} title={showToken ? "隐藏" : "显示"}>
-              {showToken ? <EyeOff size={13} /> : <Eye size={13} />}
-            </button>
-          </div>
-          <span className="text-[10px]" style={{ color: t.textFaint }}>推送需 repo 权限。令牌存储在本地(后续可迁移到系统钥匙串)。</span>
-          <div className="flex items-center gap-3 flex-wrap">
-            <button {...(canTest ? press(runTest) : {})} disabled={!canTest}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium cursor-pointer"
-              style={{ background: t.inputBg, color: canTest ? t.text : t.textFaint,
-                border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3, cursor: canTest ? "pointer" : "not-allowed" }}>
-              <RefreshCw size={12} className={status.kind === "testing" ? "animate-spin" : undefined} />
-              检测连接
-            </button>
-            {status.kind === "ok" && (
-              <span className="flex items-center gap-1.5 text-xs min-w-0" style={{ color: t.green }}>
-                <Check size={13} className="flex-shrink-0" /><span className="truncate">已连接：{status.msg}</span>
-              </span>
-            )}
-            {status.kind === "err" && (
-              <span className="flex items-center gap-1.5 text-xs min-w-0" style={{ color: t.red }}>
-                <AlertTriangle size={13} className="flex-shrink-0" /><span className="truncate">{status.msg}</span>
-              </span>
-            )}
-            <div className="flex-1" />
-            <button {...press(reset)} className="px-3 py-1.5 text-xs cursor-pointer"
-              style={{ color: t.textMuted, borderRadius: R - 3 }}>取消</button>
-            <button {...(valid ? press(submit) : {})} disabled={!valid}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium cursor-pointer"
-              style={{ background: valid ? t.accent : t.inputBg, color: valid ? "#fff" : t.textFaint,
-                borderRadius: R - 3, opacity: valid ? 1 : 0.7, cursor: valid ? "pointer" : "not-allowed" }}>
-              {editingId ? "保存" : "添加"}
-            </button>
-          </div>
-        </div>
-      ) : (
-        <button {...press(startAdd)}
-          className="flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium cursor-pointer transition-colors"
-          style={{ color: t.textSec, borderRadius: R - 2, border: `0.5px dashed ${t.inputBorder}` }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = t.rowHover; e.currentTarget.style.color = t.text; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textSec; }}>
-          <UserPlus size={13} /> 新增账号
-        </button>
-      )}
+  return <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-1.5">
+      <h2 className="gk-heading text-sm font-semibold" style={{ color: t.text }}>GitHub 集成</h2>
+      <p className="text-[11px] leading-relaxed" style={{ color: t.textSec }}>按远程地址匹配账号；匹配到多个账号时选择使用，也可在「项目配置」中指定账号。</p>
     </div>
-  );
+    <div className="flex flex-col gap-2.5">
+      <div className="flex items-center gap-2">
+        <h3 className="text-xs font-semibold flex-1" style={{ color: t.text }}>已集成账号 <span className="font-normal ml-1" style={{ color: t.textSec }}>{accounts.length}</span></h3>
+        {accounts.length > 0 && <button {...press(() => setRefresh(value => value + 1))} disabled={busy || showForm}
+          className="gk-conn-button flex items-center gap-1.5 px-2 py-1.5 text-[11px] cursor-pointer disabled:opacity-40"
+          style={{ color: t.textSec, borderRadius: R - 3 }}><RefreshCw size={12} className={busy ? "animate-spin" : undefined} />刷新全部</button>}
+        <button {...press(startAdd)} disabled={showForm} className="gk-conn-button flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] cursor-pointer disabled:opacity-40"
+          style={{ ...buttonStyle, color: t.accentFg, background: t.accentBg, borderColor: `${t.accent}44` }}><UserPlus size={12} />新增账号</button>
+      </div>
+      {accounts.length === 0 ? <div className="py-8 text-center text-[11px]" style={{ color: t.textSec, border: `0.5px dashed ${t.inputBorder}`, borderRadius: R - 2 }}>还没有账号，添加 GitHub.com 或 Enterprise 账号开始使用。</div> :
+        <div className="gk-github-accounts flex flex-col gap-1.5 max-h-[190px] overflow-y-auto overscroll-contain p-0.5 -m-0.5" aria-label="已集成 GitHub 账号">
+          {accounts.map(account => {
+            const result = inspectionFor(account);
+            const expiry = githubTokenExpiry(result?.info ?? null, now);
+            const active = selected?.id === account.id;
+            const loading = !result || result.loading;
+            const stateText = loading ? "查询中…" : result.error ? "连接异常" : expiry.expired ? "已过期" : `已验证 · ${expiry.label}`;
+            const color = result?.error || expiry.expired ? t.red : expiry.tone === "amber" ? t.amber : result?.info ? t.green : t.textSec;
+            return <div key={account.id} className="flex items-center gap-1 px-2 py-1.5"
+              style={{ border: `0.5px solid ${active ? `${t.accent}66` : t.border}`, borderRadius: R - 2, background: active ? t.accentBg : t.bgPanel }}>
+              <button {...press(() => setSelectedId(account.id))} disabled={showForm} aria-pressed={active} aria-controls="github-account-detail"
+                aria-label={`查看账号 ${accountLabel(account)}`} className="flex items-center gap-2.5 min-w-0 flex-1 text-left px-1 py-1 cursor-pointer disabled:cursor-default"
+                style={{ borderRadius: R - 3 }}>
+                <Github size={17} className="shrink-0" style={{ color: active ? t.accent : t.textSec }} />
+                <span className="min-w-0 flex-1 flex flex-col gap-1">
+                  <span className="text-[11px] font-semibold truncate" style={{ color: t.text }}>{accountLabel(account)}{result?.info && <span className="font-normal ml-2" style={{ color: t.textSec }}>@{result.info.login}</span>}</span>
+                  <span className="text-[10px] truncate" style={{ color: t.textSec }}>{hostLabel(account)} · <span className="font-mono">••••{account.token.length > 4 ? account.token.slice(-4) : ""}</span></span>
+                </span>
+                <span className="text-[10px] shrink-0 tabular-nums" style={{ color }}>{stateText}</span>
+                <ChevronRight size={12} className="shrink-0" style={{ color: active ? t.accent : t.textSec }} />
+              </button>
+              <button {...press(() => startEdit(account))} disabled={showForm} aria-label={`修改账号 ${accountLabel(account)}`} title="修改账号"
+                className="gk-conn-button p-2 cursor-pointer disabled:opacity-40" style={{ color: t.textSec, borderRadius: R - 3 }}><Pencil size={12} /></button>
+              <button {...press(() => remove(account.id))} disabled={showForm} aria-label={`删除账号 ${accountLabel(account)}`} title="删除账号"
+                className="gk-conn-button p-2 cursor-pointer disabled:opacity-40" style={{ color: t.textSec, borderRadius: R - 3 }}><Trash2 size={12} /></button>
+            </div>;
+          })}
+        </div>}
+    </div>
+    {showForm ? <form onSubmit={event => { event.preventDefault(); submit(); }} className="flex flex-col gap-4 p-4"
+      style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 2, background: t.bgPanel }}>
+      <h3 className="flex items-center gap-2 text-xs font-semibold" style={{ color: t.text }}><Pencil size={14} style={{ color: t.accent }} />{editingId ? "修改账号" : "新增账号"}</h3>
+      <div className="flex flex-col gap-2">
+        <label htmlFor="github-label" className="text-[11px] font-medium" style={{ color: t.text }}>账号备注 <span style={{ color: t.textSec }}>（选填）</span></label>
+        <input id="github-label" value={label} autoFocus onChange={event => setLabel(event.target.value)} placeholder="例如：工作账号、个人账号"
+          className="w-full text-xs px-3 py-2.5 outline-none" style={inputStyle} />
+      </div>
+      <div className="flex flex-col gap-2">
+        <label htmlFor="github-instance" className="text-[11px] font-medium" style={{ color: t.text }}>实例地址 <span style={{ color: t.textSec }}>（GitHub.com 留空）</span></label>
+        <input id="github-instance" value={url} onChange={event => { setUrl(event.target.value); clearTest(); }}
+          placeholder="Enterprise：https://ghe.example.com" autoComplete="url" spellCheck={false} aria-describedby="github-url-hint"
+          className="w-full text-xs px-3 py-2.5 outline-none font-mono" style={inputStyle} />
+        <span id="github-url-hint" className="text-[10px]" style={{ color: validGithubUrl(url) ? t.textSec : t.amber }}>{validGithubUrl(url) ? "企业版填写实例根地址，账号只会匹配对应主机的仓库。" : "请输入完整实例根地址；GitHub.com 可直接留空。"}</span>
+      </div>
+      <div className="flex flex-col gap-2">
+        <label htmlFor="github-token" className="text-[11px] font-medium" style={{ color: t.text }}>个人访问令牌</label>
+        <div className="flex items-center pr-1" style={inputStyle}>
+          <input id="github-token" value={token} onChange={event => { setToken(event.target.value); clearTest(); }}
+            type={showToken ? "text" : "password"} placeholder="ghp_… / github_pat_…" autoComplete="off" spellCheck={false} aria-describedby="github-token-hint"
+            className="flex-1 min-w-0 text-xs px-3 py-2.5 outline-none font-mono bg-transparent" style={{ color: t.text }} />
+          <button type="button" {...press(() => setShowToken(value => !value))} aria-label={showToken ? "隐藏令牌" : "显示令牌"} aria-pressed={showToken}
+            className="gk-conn-button p-2 cursor-pointer" style={{ color: t.textSec }}>{showToken ? <EyeOff size={14} /> : <Eye size={14} />}</button>
+        </div>
+        <span id="github-token-hint" className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>Classic Token 的私有仓库操作需要 repo；细粒度 Token 需选择仓库并授予 Contents / Pull requests 等对应权限。令牌保存在本机。</span>
+      </div>
+      <div className="text-[11px] leading-relaxed" aria-live="polite" style={{ color: draftInfo ? t.green : t.textSec }}>
+        {testing ? "正在检测账号并读取 Token 信息…" : draftInfo ? `已连接：${draftInfo.name ? `${draftInfo.name} ` : ""}(@${draftInfo.login})` : "检测连接可预览当前账号、有效期和权限。"}
+      </div>
+      {draftError && <p role="alert" className="text-[11px] leading-relaxed" style={{ color: t.red }}>{draftError}</p>}
+      <div className="flex items-center gap-2 pt-3" style={{ borderTop: `0.5px solid ${t.border}` }}>
+        <button type="button" {...press(runTest)} disabled={!valid || testing} className="gk-conn-button flex items-center gap-1.5 px-3 py-2 text-[11px] cursor-pointer disabled:opacity-40" style={buttonStyle}>
+          <RefreshCw size={12} className={testing ? "animate-spin" : undefined} />检测连接</button>
+        <div className="flex-1" />
+        <button type="button" {...press(reset)} className="gk-conn-button px-3 py-2 text-[11px] cursor-pointer" style={{ color: t.textSec, borderRadius: R - 3 }}>取消</button>
+        <button type="submit" {...press(submit)} disabled={!valid} className="gk-conn-button px-4 py-2 text-[11px] font-medium cursor-pointer disabled:opacity-40"
+          style={{ background: t.accent, color: "#fff", borderRadius: R - 3 }}>{editingId ? "保存账号" : "添加账号"}</button>
+      </div>
+      {draftInfo && <GithubTokenDetails info={draftInfo} loading={false} error="" now={now} />}
+    </form> : selected ? <section id="github-account-detail" aria-labelledby="github-detail-title" className="flex flex-col gap-1 pt-3" style={{ borderTop: `0.5px solid ${t.border}` }}>
+      <div className="flex items-center justify-between gap-2">
+        <h3 id="github-detail-title" className="text-xs font-semibold min-w-0 truncate" style={{ color: t.text }}>账号详情 · {accountLabel(selected)}</h3>
+        {current?.info && <span className="text-[10px] shrink-0 px-1.5 py-0.5 rounded" style={{ background: t.inputBg, color: t.textSec }}>{GITHUB_TOKEN_KINDS[current.info.token_kind]}</span>}
+      </div>
+      <GithubTokenDetails info={current?.info ?? null} loading={!current || current.loading} error={current?.error ?? ""} now={now} />
+    </section> : null}
+  </div>;
 }
 
 // Second-level pane: appearance (frosted-glass window) + in-app update check.
@@ -4736,7 +4878,7 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId, vi
           if (closing && event.currentTarget === event.target) onClose();
         }}
         style={{ width: "min(900px, calc(100vw - 48px))",
-        height: "min(600px, calc(100vh - 48px))",
+        height: `min(${(section === "gitlab" || section === "github") ? 720 : 600}px, calc(100vh - 48px))`,
         background: t.dialogBg,
         border: `0.5px solid ${t.glassBorder}`, borderRadius: R + 2, boxShadow: t.shadowWindow, overflow: "hidden" }}>
         <div className="flex-shrink-0 flex items-center gap-2.5 px-4 py-3" style={{ borderBottom: `0.5px solid ${t.border}` }}>
@@ -4786,7 +4928,7 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId, vi
               <RemoteConnSettings storageKey="gitkit.gitlab" title="自建 GitLab 集成"
                 desc="填入自建 GitLab 实例地址与个人访问令牌 (Personal Access Token),用于列项目、创建合并请求、推送认证。"
                 urlPlaceholder="https://gitlab.example.com" tokenPlaceholder="glpat-…"
-                hint="推送需 write_repository 权限;列项目/建 MR 需 api 权限。令牌存储在本地(后续可迁移到系统钥匙串)。"
+                hint="api 可用于创建 MR 与推送；仅拉取可用 read_repository，仅推送可用 write_repository。令牌保存在本机。"
                 test={gitlabTest} />
             )}
             {section === "github" && <GithubAccountsSettings />}
