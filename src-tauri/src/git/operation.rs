@@ -27,6 +27,16 @@ pub(super) struct GitOperation {
 }
 
 impl CancelState {
+    pub(crate) fn cancel_background(&self, id: &str) {
+        // Sleep can arrive just before the worker registers its operation.
+        // The scheduler keeps retrying until that worker has settled.
+        let _ = self.cancel(id);
+    }
+
+    pub(crate) fn has_foreground_operation(&self) -> bool {
+        self.0.lock().map(|entries| entries.keys().any(|id| !id.starts_with("daily-check-"))).unwrap_or(true)
+    }
+
     pub(super) fn begin(&self, id: String) -> Result<GitOperation, String> {
         let mut entries = self.0.lock().map_err(|e| e.to_string())?;
         if entries.contains_key(&id) {

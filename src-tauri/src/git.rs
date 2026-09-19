@@ -2,7 +2,7 @@
 // existing SSH keys, credentials and hooks are reused as-is.
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::process::{Command, Stdio};
@@ -1367,7 +1367,7 @@ fn sync_tracking_branches_with(run: impl Fn(&[&str]) -> Result<String, String>) 
 }
 
 /// One local branch that has fallen behind its upstream.
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BehindBranch {
     pub name: String,
@@ -1397,7 +1397,16 @@ pub struct UpdateCheck {
 /// aborts, and ssh neither prompts nor waits long on an unreachable host.
 #[tauri::command]
 pub async fn git_check_updates(path: String, token: Option<String>) -> Result<UpdateCheck, String> {
+    check_updates(path, token, None).await
+}
+
+pub(crate) async fn check_updates(
+    path: String,
+    token: Option<String>,
+    operation: Option<(CancelState, String)>,
+) -> Result<UpdateCheck, String> {
     run_blocking(move || {
+        let operation = operation.map(|(state, id)| state.begin(id)).transpose()?;
         let mut cmd = command("git");
         cmd.arg("-C").arg(&path);
         cmd.env("GIT_TERMINAL_PROMPT", "0");
@@ -1409,8 +1418,7 @@ pub async fn git_check_updates(path: String, token: Option<String>) -> Result<Up
             cmd.arg("-c")
                 .arg("credential.helper=!f() { echo username=oauth2; echo \"password=$GITKIT_GL_TOKEN\"; }; f");
         }
-        let out = cmd
-            .args([
+        cmd.args([
                 "-c",
                 "http.lowSpeedLimit=1000",
                 "-c",
@@ -1419,43 +1427,45 @@ pub async fn git_check_updates(path: String, token: Option<String>) -> Result<Up
                 "--all",
                 "--prune",
                 "--quiet",
-            ])
-            .output()
-            .map_err(|e| format!("无法执行 git：{e}"))?;
-        if !out.status.success() {
-            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            ]);
+        let (status, stderr) = if let Some(operation) = operation.as_ref() {
+            let (status, _, stderr) = operation.run(cmd, |_| {})?;
+            (status, stderr)
+        } else {
+            let out = cmd.output().map_err(|e| format!("无法执行 git：{e}"))?;
+            (out.status, String::from_utf8_lossy(&out.stderr).into_owned())
+        };
+        if !status.success() {
+            let err = stderr.trim().to_string();
             return Err(if err.is_empty() { "获取失败".into() } else { err });
         }
-        Ok(collect_behind(&path))
+        collect_behind(&path, operation.as_ref())
     })
     .await
 }
 
 /// Compare every local branch with its upstream (read-only; assumes a fetch just ran).
-fn collect_behind(path: &str) -> UpdateCheck {
+fn collect_behind(path: &str, operation: Option<&GitOperation>) -> Result<UpdateCheck, String> {
+    let run = |args: &[&str]| {
+        if let Some(operation) = operation {
+            let (status, output, error) = operation.run(git_auth_command(path, args, None), |_| {})?;
+            if status.success() { Ok(output) } else { Err(error) }
+        } else { run_git(path, args) }
+    };
     let mut res = UpdateCheck {
-        current_branch: run_git(path, &["branch", "--show-current"])
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default(),
-        dirty: run_git(path, &["status", "--porcelain"])
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false),
+        current_branch: run(&["branch", "--show-current"])?.trim().to_string(),
+        dirty: !run(&["status", "--porcelain"])?.trim().is_empty(),
         behind: Vec::new(),
     };
     let fmt = "%(refname:short)\x1f%(upstream)\x1f%(HEAD)";
-    let Ok(out) = run_git(path, &["for-each-ref", &format!("--format={fmt}"), "refs/heads"]) else {
-        return res;
-    };
+    let out = run(&["for-each-ref", &format!("--format={fmt}"), "refs/heads"])?;
     for line in out.lines() {
         let f: Vec<&str> = line.split('\x1f').collect();
         if f.len() < 3 || f[1].is_empty() {
             continue; // no upstream → nothing to compare against
         }
         let (name, upstream, current) = (f[0], f[1], f[2] == "*");
-        let Ok(counts) = run_git(
-            path,
-            &["rev-list", "--left-right", "--count", &format!("{name}...{upstream}")],
-        ) else {
+        let Ok(counts) = run(&["rev-list", "--left-right", "--count", &format!("{name}...{upstream}")]) else {
             continue;
         };
         let nums: Vec<u32> = counts.split_whitespace().filter_map(|n| n.parse().ok()).collect();
@@ -1470,7 +1480,8 @@ fn collect_behind(path: &str) -> UpdateCheck {
             current,
         });
     }
-    res
+    if let Some(operation) = operation { operation.check_cancelled()?; }
+    Ok(res)
 }
 
 /// Fast-forward local branches onto their already-fetched upstreams — the "pull"

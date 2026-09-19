@@ -1,8 +1,11 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useDeferredValue, startTransition, useTransition, createContext, useContext, memo } from "react";
 import { createPortal } from "react-dom";
 import { Toaster, toast } from "sonner";
-import { getCurrentWindow, UserAttentionType } from "@tauri-apps/api/window";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { DAILY_CHECK_DEFAULT, nextCheckLabel, shouldPresentCheck, validCheckTime } from "./dailyCheck";
+import type { DailyCheck, CheckProgress, CheckSnapshot, CheckResult } from "./dailyCheck";
 import {
   GitBranch, GitMerge, GitPullRequest, Upload, Download, RefreshCw,
   Layers, ChevronRight, ChevronDown, Copy, Check, GitCommit, FileText,
@@ -20,7 +23,7 @@ import {
   createPullRequest, branchColor, setVibrancy, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
-  cancelGitOp, isCancelled, checkUpdates, syncLocal, revealInFileManager, openRepositoryRemote,
+  cancelGitOp, isCancelled, syncLocal, revealInFileManager, openRepositoryRemote,
   authorColor, authorInitials,
 } from "./git";
 import type { DepInfo, Tag, RepoInfo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged } from "./git";
@@ -1100,9 +1103,9 @@ function OperationCapsule({ kind, title, context, progress, outcome, settledPhas
   );
 }
 
-function StatusBar({ project, branch, changes, ready, errored, checkProgress, onShowChanges, onSearch }: {
+function StatusBar({ project, branch, changes, ready, errored, checkProgress, checkResult, onShowCheckResult, onShowChanges, onSearch }: {
   project?: Project; branch?: Branch; changes: number; ready: boolean; errored: boolean;
-  checkProgress: CheckProgress | null; onShowChanges: () => void; onSearch: () => void;
+  checkProgress: CheckProgress | null; checkResult: CheckResult | null; onShowCheckResult: () => void; onShowChanges: () => void; onSearch: () => void;
 }) {
   const t = useTheme();
   const remoteName = branch?.remote?.split("/")[0];
@@ -1137,9 +1140,15 @@ function StatusBar({ project, branch, changes, ready, errored, checkProgress, on
       <div className="gk-status-context flex items-center gap-1.5 min-w-0" role={checkProgress ? "status" : undefined}>
         {checkProgress ? (
           <>
-            <span className="truncate tabular-nums">定时检查 {checkProgress.current} / {checkProgress.total}</span>
+            <span className="truncate tabular-nums" title={checkProgress.project}>{checkProgress.paused ? "等待休眠恢复后补查" : `已检查 ${checkProgress.current} / ${checkProgress.total} · 正在检查 ${checkProgress.project}`}</span>
             <RefreshCw size={12} className="animate-spin flex-shrink-0" aria-hidden="true" />
           </>
+        ) : checkResult?.rows.length ? (
+          <button onClick={onShowCheckResult} className="gk-status-pill gk-shell-button flex items-center gap-1.5 px-2 min-w-0 cursor-pointer"
+            title={`检查完成于 ${formatFullDate(new Date(checkResult.completedAt).toISOString())}，点击查看结果`}>
+            <DownloadCloud size={12} className="flex-shrink-0" aria-hidden="true" />
+            <span className="truncate">{checkResult.viewed ? "查看检查结果" : "检查完成 · 待查看"}</span>
+          </button>
         ) : (
           <>
             <GitBranch size={12} className="flex-shrink-0" aria-hidden="true" />
@@ -2576,35 +2585,20 @@ function loadPaletteId(): PaletteId {
   return (PALETTE_ORDER as readonly string[]).includes(s ?? "") ? (s as PaletteId) : "graphite";
 }
 
-// ── Scheduled daily update check ────────────────────────────────────────────
-// Once a day at `time`, every open project is fetched and the ones with new
-// upstream commits are reported in a dialog that can pull them in one go.
-// `lastRun` is the epoch ms of the last completed run, and a run is due when
-// today's scheduled instant has passed while the last run predates it. That one
-// rule covers everything: a day missed with the app closed fires shortly after
-// the next launch, and moving the time later in the day still fires today.
-interface DailyCheck { enabled: boolean; time: string; lastRun: number }
-interface CheckProgress { current: number; total: number; project: string }
-const DAILY_CHECK_DEFAULT: DailyCheck = { enabled: false, time: "09:30", lastRun: 0 };
+// Settings are mirrored locally for startup; native state owns completion/results.
 function loadDailyCheck(): DailyCheck {
   try {
     const c = JSON.parse(localStorage.getItem("gitkit.dailyCheck") ?? "{}");
     return {
       enabled: !!c.enabled,
-      time: typeof c.time === "string" && /^\d{1,2}:\d{2}$/.test(c.time) ? c.time : DAILY_CHECK_DEFAULT.time,
-      lastRun: typeof c.lastRun === "number" ? c.lastRun : 0,
+      time: validCheckTime(c.time) ? c.time : DAILY_CHECK_DEFAULT.time,
+      skipWeekends: c.skipWeekends === true,
+      lastRun: typeof c.lastRun === "number" && Number.isFinite(c.lastRun) ? c.lastRun : 0,
     };
   } catch { return DAILY_CHECK_DEFAULT; }
 }
 function saveDailyCheck(c: DailyCheck): void {
   try { localStorage.setItem("gitkit.dailyCheck", JSON.stringify(c)); } catch { /* ignore */ }
-}
-/** Today's "HH:MM" as an epoch ms in local time. */
-function scheduledAt(time: string, now: Date = new Date()): number {
-  const [h, m] = time.split(":").map((n) => parseInt(n, 10));
-  const d = new Date(now);
-  d.setHours(Number.isFinite(h) ? h : 9, Number.isFinite(m) ? m : 30, 0, 0);
-  return d.getTime();
 }
 
 // Committer identities (name/email profiles), persisted across launches. Applied
@@ -2638,11 +2632,13 @@ function setPrefMapEntry(storeKey: string, key: string, value: string): void {
   const m = loadPrefMap(storeKey);
   m[key] = value;
   try { localStorage.setItem(storeKey, JSON.stringify(m)); } catch { /* ignore */ }
+  if (storeKey === "gitkit.projectGithubAccounts") window.dispatchEvent(new Event("gitkit-credentials-changed"));
 }
 function deletePrefMapEntry(storeKey: string, key: string): void {
   const m = loadPrefMap(storeKey);
   delete m[key];
   try { localStorage.setItem(storeKey, JSON.stringify(m)); } catch { /* ignore */ }
+  if (storeKey === "gitkit.projectGithubAccounts") window.dispatchEvent(new Event("gitkit-credentials-changed"));
 }
 
 const IDENTITY_PREFS = "gitkit.projectIdentities";
@@ -2692,6 +2688,7 @@ function loadConn(key: string): RemoteConn {
 }
 function saveConn(key: string, c: RemoteConn): void {
   try { localStorage.setItem(key, JSON.stringify(c)); } catch { /* ignore */ }
+  window.dispatchEvent(new Event("gitkit-credentials-changed"));
 }
 const loadGitlab = () => loadConn("gitkit.gitlab");
 
@@ -2730,6 +2727,7 @@ function loadGithubAccounts(): GithubAccount[] {
 }
 function saveGithubAccounts(list: GithubAccount[]): void {
   try { localStorage.setItem("gitkit.github.accounts", JSON.stringify(list)); } catch { /* ignore */ }
+  window.dispatchEvent(new Event("gitkit-credentials-changed"));
 }
 // GitHub accounts whose configured host matches the remote: a blank-url account
 // serves public github.com; a GHE account serves only its own host.
@@ -4210,29 +4208,24 @@ function AppearanceSettings({ vibrancy, setVibrancy, paletteId, setPaletteId, th
 }
 
 // Second-level pane: the scheduled daily check for new upstream commits across
-// every open project. The check itself lives in App (it needs the project list
-// and the token lookup); this pane only edits the schedule and can trigger a run.
+// every open project. Native code owns the scheduler; this pane edits settings
+// or requests an immediate run.
 function DailyCheckSettings({ cfg, setCfg, onRunNow, busy, progress, projectCount }: {
   cfg: DailyCheck; setCfg: (c: DailyCheck) => void;
   onRunNow: () => void; busy: boolean; progress: CheckProgress | null; projectCount: number;
 }) {
   const t = useTheme();
   const inputStyle = { background: t.inputBg, color: t.text, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
-  const nextRun = (() => {
-    if (busy && progress) return `正在检查 ${progress.current}/${progress.total} · ${progress.project}`;
-    if (!cfg.enabled) return null;
-    const today = scheduledAt(cfg.time);
-    const due = Date.now() >= today && cfg.lastRun < today;
-    if (due) return "启动后稍候即会执行(今天的检查还没做)";
-    return today > Date.now() ? `今天 ${cfg.time}` : `明天 ${cfg.time}`;
-  })();
+  const nextRun = busy && progress
+    ? (progress.paused ? "休眠已中断检查，恢复后自动补查" : `已检查 ${progress.current}/${progress.total} · 正在检查 ${progress.project}`)
+    : nextCheckLabel(cfg);
 
   return (
     <div className="flex flex-col gap-4 max-w-[620px]">
       <div className="flex flex-col gap-1.5">
         <span className="gk-heading text-base font-semibold" style={{ color: t.text }}>定时检查更新</span>
         <span className="text-xs leading-relaxed max-w-[62ch]" style={{ color: t.textMuted }}>
-          每天自动获取已打开项目的远程分支。发现新提交后显示汇总窗口，并在应用位于后台时提醒你。
+          按设定时间在后台检查已打开项目。发现更新或检查失败时，前台显示汇总，后台通过 Dock 图标或任务栏提醒。
         </span>
       </div>
 
@@ -4274,6 +4267,19 @@ function DailyCheckSettings({ cfg, setCfg, onRunNow, busy, progress, projectCoun
             style={{ ...inputStyle, cursor: cfg.enabled && !busy ? "text" : "not-allowed" }} />
         </div>
       </div>
+
+      <label className="flex items-center gap-3 px-1 cursor-pointer" style={{ opacity: cfg.enabled ? 1 : 0.52 }}>
+        <input type="checkbox" checked={cfg.skipWeekends} disabled={!cfg.enabled || busy}
+          onChange={(e) => setCfg({ ...cfg, skipWeekends: e.target.checked })}
+          className="w-4 h-4 flex-shrink-0" style={{ accentColor: t.accent }} />
+        <span className="flex flex-col gap-0.5">
+          <span className="text-[13px] font-medium" style={{ color: t.text }}>跳过周末</span>
+          <span className="text-xs" style={{ color: t.textMuted }}>周六、周日不自动检查，仍可手动检查</span>
+        </span>
+      </label>
+      <p className="text-xs leading-relaxed" style={{ color: t.textMuted }}>
+        电脑休眠期间暂停检查，不会唤醒电脑；当天恢复或重新启动软件后补查未完成的任务。当天已完成则不重复检查。
+      </p>
 
       <div className="flex items-center gap-3 min-h-9">
         <span className="text-xs min-w-0 flex-1" style={{ color: t.textMuted }}>
@@ -4832,7 +4838,7 @@ function UpdatesDialog({ rows, busy, onPull, onClose }: {
   const total = rows.reduce((n, r) => n + r.behind.reduce((m, b) => m + b.behind, 0), 0);
 
   return (
-    <Modal title="远程有新的提交" Icon={DownloadCloud} onClose={busy ? () => {} : onClose} width={560}
+    <Modal title={rows.some((r) => !r.error) ? "远程有新的提交" : "部分项目检查失败"} Icon={DownloadCloud} onClose={busy ? () => {} : onClose} width={560}
       footer={
         <>
           <button {...(busy ? {} : press(onClose))} disabled={busy}
@@ -4852,7 +4858,7 @@ function UpdatesDialog({ rows, busy, onPull, onClose }: {
         </>
       }>
       <div className="text-xs" style={{ color: t.textSec }}>
-        {rows.length} 个项目的远程有新提交,共 {total} 个提交。拉取只做快进,不会产生合并提交。
+        {rows.filter((r) => !r.error).length} 个项目有更新，共 {total} 个提交{rows.some((r) => r.error) ? `；${rows.filter((r) => r.error).length} 个项目检查失败` : ""}。拉取只做快进，不会产生合并提交。
       </div>
 
       <div className="flex flex-col gap-1.5">
@@ -5283,7 +5289,7 @@ export default function App() {
   const commits    = view?.commits ?? [];
   const graphRows  = view?.graph ?? [];
   const stashes = view?.stashes ?? [];
-  const activeWorking = workingSnapshot?.path === activeProject?.path
+  const activeWorking = workingSnapshot && workingSnapshot.path === activeProject?.path
     ? workingSnapshot.files
     : view?.working ?? [];
   const changesCount = activeWorking.length;
@@ -6137,83 +6143,111 @@ export default function App() {
     }
   };
 
-  // ── scheduled daily update check ──────────────────────────────────────────
-  // Once a day, fetch every open project and report which ones gained upstream
-  // commits — a morning's worth of remote work in one dialog instead of N manual
-  // fetches. The check is read-only (it only moves remote-tracking refs); the
-  // pull is the explicit button in that dialog.
+  // Native scheduling keeps progressing while the WebView is suspended. Events
+  // are hints; always reconcile with a snapshot on focus/reload to recover gaps.
   const [dailyCheck, setDailyCheckState] = useState<DailyCheck>(loadDailyCheck);
   const setDailyCheck = (c: DailyCheck) => { setDailyCheckState(c); saveDailyCheck(c); };
-  const [checkBusy, setCheckBusy] = useState(false);
-  const [checkProgress, setCheckProgress] = useState<CheckProgress | null>(null);
+  const [checkSnapshot, setCheckSnapshot] = useState<CheckSnapshot | null>(null);
+  const checkProgress = checkSnapshot?.progress ?? null;
+  const checkBusy = checkProgress !== null;
   const [pullBusy, setPullBusy] = useState(false);
   const [updateRows, setUpdateRows] = useState<UpdateRow[] | null>(null);
-  const checkRunning = useRef(false); // guards against overlapping runs
+  const [checkFocused, setCheckFocused] = useState(false);
+  const [credentialRevision, setCredentialRevision] = useState(0);
+  const checkRevisionRef = useRef(-1);
+  const completedCheckRef = useRef(0);
+  const presentedCheckRef = useRef(0);
+  const checkErrorRef = useRef("");
+  const applyCheckSnapshot = useRef((_: CheckSnapshot) => {});
+  applyCheckSnapshot.current = (snapshot) => {
+    if (snapshot.revision < checkRevisionRef.current) return;
+    checkRevisionRef.current = snapshot.revision;
+    setCheckSnapshot(snapshot);
+    setDailyCheckState((prev) => {
+      if (prev.lastRun >= snapshot.config.lastRun) return prev;
+      const next = { ...prev, lastRun: snapshot.config.lastRun };
+      saveDailyCheck(next);
+      return next;
+    });
+    if (snapshot.result && snapshot.result.id > completedCheckRef.current) {
+      completedCheckRef.current = snapshot.result.id;
+      realCache.current.clear();
+      setReloadTick((n) => n + 1);
+    }
+    if (snapshot.persistenceError && snapshot.persistenceError !== checkErrorRef.current) {
+      checkErrorRef.current = snapshot.persistenceError;
+      toast.error(snapshot.persistenceError);
+    }
+  };
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    let focusRevision = 0;
+    const refresh = () => invoke<CheckSnapshot>("daily_check_snapshot").then((snapshot) => {
+      if (!disposed) applyCheckSnapshot.current(snapshot);
+    }).catch((error) => { if (!disposed) toast.error(`读取检查状态失败：${error}`); });
+    const keep = (unlisten: () => void) => { if (disposed) unlisten(); else unlisteners.push(unlisten); };
+    void listen<CheckSnapshot>("daily-check-state", ({ payload }) => {
+      if (!disposed) applyCheckSnapshot.current(payload);
+    }).then((unlisten) => { keep(unlisten); if (!disposed) void refresh(); })
+      .catch((error) => { if (!disposed) toast.error(`监听检查状态失败：${error}`); });
+    void getCurrentWindow().onFocusChanged(({ payload }) => {
+      if (disposed) return;
+      const revision = ++focusRevision;
+      setCheckFocused(false);
+      if (payload) void refresh().then(() => { if (!disposed && revision === focusRevision) setCheckFocused(true); });
+    }).then(keep).catch((error) => { if (!disposed) toast.error(`监听窗口状态失败：${error}`); });
+    void getCurrentWindow().isFocused().then(async (focused) => {
+      if (!focused || disposed || focusRevision !== 0) return;
+      await refresh();
+      if (!disposed && focusRevision === 0) setCheckFocused(true);
+    }).catch((error) => { if (!disposed) toast.error(`读取窗口状态失败：${error}`); });
+    const credentialsChanged = () => setCredentialRevision((n) => n + 1);
+    window.addEventListener("gitkit-credentials-changed", credentialsChanged);
+    return () => { disposed = true; unlisteners.forEach((unlisten) => unlisten()); window.removeEventListener("gitkit-credentials-changed", credentialsChanged); };
+  }, []);
+  const checkProjectsKey = JSON.stringify(projects.map(({ id, name, path }) => ({ id, name, path })));
+  useEffect(() => {
+    if (!isTauri()) return;
+    const gl = loadGitlab();
+    void invoke<CheckSnapshot>("daily_check_configure", {
+      config: dailyCheck,
+      projects: JSON.parse(checkProjectsKey),
+      credentials: {
+        github: loadGithubAccounts().map((a) => ({ id: a.id, host: a.url ? hostOf(a.url).split(":")[0] : "", token: a.token })),
+        gitlabHost: hostOf(gl.url).split(":")[0], gitlabToken: gl.token,
+        preferences: loadPrefMap(ACCOUNT_PREFS),
+      },
+    }).then((snapshot) => applyCheckSnapshot.current(snapshot)).catch((error) => toast.error(`保存定时检查设置失败：${error}`));
+  }, [dailyCheck.enabled, dailyCheck.time, dailyCheck.skipWeekends, checkProjectsKey, credentialRevision]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    void invoke("daily_check_set_busy", { busy: !!gitBusy || !!busyLabel || pullBusy })
+      .catch((error) => toast.error(`更新后台检查状态失败：${error}`));
+  }, [gitBusy, busyLabel, pullBusy]);
 
-  const runUpdateCheck = async (manual: boolean) => {
-    // A running git op owns the repos right now — retry on the next tick.
-    if (checkRunning.current || gitBusyRef.current || busyLabel) {
-      if (manual && (gitBusyRef.current || busyLabel)) toast("请等待当前 Git 操作完成");
-      return;
-    }
-    const list = projects;
-    if (list.length === 0) { if (manual) toast("还没有打开任何项目"); return; }
-    checkRunning.current = true;
-    setCheckBusy(true);
-    const rows: UpdateRow[] = [];
-    // Sequential on purpose: parallel fetches across repos fight over the network
-    // and can trigger several credential prompts at once.
-    for (let index = 0; index < list.length; index++) {
-      const p = list[index];
-      setCheckProgress({ current: index + 1, total: list.length, project: p.name });
-      try {
-        const rems = await loadRemotes(p.path);
-        if (rems.length === 0) continue; // local-only repo — nothing to check
-        const url = rems.find((r) => r.name === "origin")?.url ?? rems[0].url;
-        // Non-interactive token pick: a remembered account wins, else the
-        // host-matched fallback. A background check must never open the picker.
-        const saved = githubCandidates(url).find((a) => a.id === loadProjectAccountId(p.path));
-        const res = await checkUpdates(p.path, saved?.token ?? pickRemoteToken(url));
-        if (res.behind.length) {
-          rows.push({ id: p.id, name: p.name, path: p.path, behind: res.behind,
-            dirty: res.dirty, currentBranch: res.currentBranch, state: "idle" });
-        }
-      } catch (e) {
-        rows.push({ id: p.id, name: p.name, path: p.path, behind: [], dirty: false,
-          currentBranch: "", error: String(e), state: "idle" });
-      }
-    }
-    // Remote-tracking refs moved — drop the caches so the timeline shows them.
-    for (const p of list) realCache.current.delete(p.path);
-    setReloadTick((n) => n + 1);
-    checkRunning.current = false;
-    setCheckBusy(false);
-    setCheckProgress(null);
-    // Stamp the run even when nothing was found, so it doesn't repeat all day.
-    setDailyCheckState((prev) => { const next = { ...prev, lastRun: Date.now() }; saveDailyCheck(next); return next; });
-
-    const updated = rows.filter((r) => !r.error);
-    const failed = rows.length - updated.length;
-    if (updated.length === 0) {
-      if (manual) {
-        if (failed) toast.error(`检查完成,${failed} 个项目检查失败`);
-        else toast.success("所有项目都已是最新");
-      } else if (failed) {
-        toast.error(`定时检查：${failed} 个项目检查失败`);
-      }
-      return;
-    }
-    setUpdateRows(rows);
-    if (!manual) {
-      try {
-        const appWindow = getCurrentWindow();
-        if (!(await appWindow.isFocused())) {
-          await appWindow.requestUserAttention(UserAttentionType.Informational);
-        }
-      } catch {
-        // Browser previews do not expose native window attention APIs.
-      }
-    }
+  const showCheckResult = (result: CheckResult) => {
+    presentedCheckRef.current = result.id;
+    if (result.rows.length) {
+      setSettingsOpen(false);
+      setUpdateRows(result.rows.map((r) => ({ ...r, error: r.error ?? undefined, state: "idle" })));
+    } else if (result.manual) toast.success("所有项目都已是最新");
+    void invoke("daily_check_mark_viewed", { id: result.id })
+      .catch((error) => toast.error(`保存已读状态失败：${error}`));
+  };
+  useEffect(() => {
+    const result = checkSnapshot?.result ?? null;
+    if (!result || presentedCheckRef.current === result.id || updateRows || pullBusy || gitBusy || busyLabel) return;
+    // Re-evaluate after any dialog closes, without stacking automatic dialogs.
+    const dialogs = document.querySelectorAll('[role="dialog"]');
+    if (dialogs.length && !(dialogs.length === 1 && settingsOpen && result.manual)) return;
+    if (shouldPresentCheck(result, checkFocused)) showCheckResult(result);
+  });
+  const runUpdateCheck = async () => {
+    if (gitBusyRef.current || busyLabel || pullBusy) { toast("请等待当前 Git 操作完成"); return; }
+    try { await invoke("daily_check_now"); }
+    catch (error) { toast.error(String(error)); }
   };
 
   // Apply the check's findings: a local fast-forward per project (the commits are
@@ -6245,24 +6279,6 @@ export default function App() {
     if (touchedActive) pendingJumpLatest.current = true;
     setReloadTick((n) => n + 1);
   };
-
-  // Fire the check when today's scheduled instant has passed and the last run
-  // predates it. Polled every minute (plus one look shortly after launch), so a
-  // day missed with the app closed catches up on the next start, and moving the
-  // time later in the day still fires today.
-  const runCheckRef = useRef(runUpdateCheck);
-  runCheckRef.current = runUpdateCheck;
-  useEffect(() => {
-    if (!dailyCheck.enabled) return;
-    const tick = () => {
-      const due = scheduledAt(dailyCheck.time);
-      if (Date.now() < due || dailyCheck.lastRun >= due) return;
-      void runCheckRef.current(false);
-    };
-    const first = window.setTimeout(tick, 15000);
-    const timer = window.setInterval(tick, 60000);
-    return () => { window.clearTimeout(first); window.clearInterval(timer); };
-  }, [dailyCheck.enabled, dailyCheck.time, dailyCheck.lastRun]);
 
   // Commit staged files with the chosen identity (falls back to repo/global config).
   const doCommit = async (message: string, files: string[], identity: Identity | null) => {
@@ -7079,7 +7095,8 @@ export default function App() {
           </div>
           <StatusBar project={activeProject} branch={branches.find((b) => b.current)} changes={changesCount}
             ready={dataReady} errored={errored}
-            checkProgress={checkProgress}
+            checkProgress={checkProgress} checkResult={checkSnapshot?.result ?? null}
+            onShowCheckResult={() => { if (!pullBusy && checkSnapshot?.result) showCheckResult(checkSnapshot.result); }}
             onShowChanges={() => { setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
             onSearch={() => setSearchOpen(true)} />
         </div>
@@ -7105,7 +7122,7 @@ export default function App() {
             paletteId={paletteId} setPaletteId={setPaletteId}
             themeMode={themeMode} setThemeMode={setThemeMode}
             dailyCheck={dailyCheck} setDailyCheck={setDailyCheck}
-            onRunCheckNow={() => void runUpdateCheck(true)}
+            onRunCheckNow={() => void runUpdateCheck()}
             checkBusy={checkBusy} checkProgress={checkProgress} projectCount={projects.length}
             onClose={() => setSettingsOpen(false)} />
         )}

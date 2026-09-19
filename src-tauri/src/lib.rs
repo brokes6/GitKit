@@ -1,4 +1,5 @@
 mod git;
+mod daily_check;
 
 #[cfg(target_os = "macos")]
 use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
@@ -37,6 +38,7 @@ pub fn run() {
         .manage(git::CancelState::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            daily_check::setup(app.handle())?;
             // Desktop-only plugins: window-state remembers window geometry
             // across launches; updater + process power in-app auto-update.
             #[cfg(desktop)]
@@ -73,6 +75,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            daily_check::daily_check_snapshot,
+            daily_check::daily_check_configure,
+            daily_check::daily_check_set_busy,
+            daily_check::daily_check_mark_viewed,
+            daily_check::daily_check_now,
             git::open_repo,
             git::reveal_in_file_manager,
             git::open_repository_remote,
