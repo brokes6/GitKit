@@ -14,7 +14,7 @@ export const DAILY_CHECK_DEFAULT: DailyCheck = { enabled: false, time: "09:30", 
 export function validCheckTime(time: unknown): time is string {
   return typeof time === "string" && /^(?:[01]?\d|2[0-3]):[0-5]\d$/.test(time);
 }
-export function nextCheckLabel(cfg: DailyCheck, now = new Date()): string | null {
+export function nextCheckLabel(cfg: DailyCheck, now = new Date(), language: "zh-CN" | "en" = "zh-CN"): string | null {
   if (!cfg.enabled) return null;
   const [hours, minutes] = cfg.time.split(":").map(Number);
   const next = new Date(now);
@@ -22,14 +22,20 @@ export function nextCheckLabel(cfg: DailyCheck, now = new Date()): string | null
   const completedToday = cfg.lastRun > 0 && new Date(cfg.lastRun).toDateString() === now.toDateString();
   const skipped = (date: Date) => cfg.skipWeekends && (date.getDay() === 0 || date.getDay() === 6);
   if (!completedToday && !skipped(now)) {
-    if (now.getTime() >= next.getTime()) return "今天尚未检查，将在后台补查";
-    return `今天 ${cfg.time}`;
+    if (now.getTime() >= next.getTime()) return language === "en"
+      ? "No check yet today. It will resume in the background."
+      : "今天尚未检查，将在后台补查";
+    return language === "en" ? `Today ${cfg.time}` : `今天 ${cfg.time}`;
   }
   next.setDate(next.getDate() + 1);
   while (skipped(next)) next.setDate(next.getDate() + 1);
   const tomorrow = new Date(now);
   tomorrow.setDate(tomorrow.getDate() + 1);
-  const label = next.toDateString() === tomorrow.toDateString() ? "明天" : `${next.getMonth() + 1}月${next.getDate()}日`;
+  const label = next.toDateString() === tomorrow.toDateString()
+    ? (language === "en" ? "Tomorrow" : "明天")
+    : language === "en"
+      ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(next)
+      : `${next.getMonth() + 1}月${next.getDate()}日`;
   return `${label} ${cfg.time}`;
 }
 export function shouldPresentCheck(result: CheckResult | null, focused: boolean, now = new Date()): boolean {

@@ -35,17 +35,17 @@ GitKit/
 ├── src/
 │   ├── main.tsx              # React 入口
 │   ├── App.tsx               # 全部 UI + 状态(~3000 行,单文件)
-│   ├── git.ts                # 前端 Git API:invoke 封装 + 图形算法 + 类型映射 + 更新/vibrancy
+│   ├── git.ts                # 前端 Git API:invoke 封装 + 图形算法 + 类型映射 + 更新
 │   └── styles/               # Tailwind v4 + 主题 CSS 变量
 └── src-tauri/
-    ├── Cargo.toml            # tauri(macos-private-api)+ dialog/updater/process/window-state + window-vibrancy + reqwest
-    ├── tauri.conf.json       # 透明窗口 + macOSPrivateApi + updater(pubkey/endpoints)+ macOS 签名位
+    ├── Cargo.toml            # tauri + dialog/updater/process/window-state + reqwest
+    ├── tauri.conf.json       # 窗口 + updater(pubkey/endpoints)+ macOS 签名位
     ├── capabilities/default.json  # 前端可调用的权限白名单(含 updater/process)
     ├── .tauri/gitkit-updater.key(.pub)  # 更新签名密钥;私钥 gitignore,勿提交
     ├── icons/                # App 图标(git-branch 字形)
     └── src/
         ├── main.rs           # 入口
-        ├── lib.rs            # 注册插件 + setup(vibrancy/window-state/updater)+ invoke_handler
+        ├── lib.rs            # 注册插件 + setup(window-state/updater)+ invoke_handler
         └── git.rs            # 所有 Git 命令实现
 ```
 
@@ -109,11 +109,11 @@ GitKit/
 - [x] **写操作(路线图 A)**:`git_fetch/pull/push`、`git_stage`→提交(`git_commit`,`-c user.name/email` 注入身份)、`git_create_branch`、`git_checkout_sync`。Push 走系统 git 认证
 - [x] **创建 PR / MR(路线图 B)**:`reqwest` 调 GitLab/GitHub REST(`create_pull_request`),设置页填实例地址 + Token 并可**检测连接**(`gitlab_test`/`github_test`)
 - [x] **多套提交者身份(路线图 C)**:设置页维护 `{name,email}` profile,默认身份 + 项目级覆盖,提交时注入,存 localStorage
-- [x] **持久化 UI 状态(路线图 D 部分)**:置顶/隐藏/折叠/聚焦、身份、项目列表、主题、vibrancy 开关 → localStorage(键前缀 `gitkit.*`)
+- [x] **持久化 UI 状态(路线图 D 部分)**:置顶/隐藏/折叠/聚焦、身份、项目列表、主题、语言 → localStorage(键前缀 `gitkit.*`)
 - [x] **打磨与发布(路线图 E)**:见下方"E 已落地"
 
 **E. 打磨与发布 —— 已落地 ✅**(`cargo check` 通过、`npm run build` 通过)
-- [x] **vibrancy 毛玻璃**:`app.macOSPrivateApi` + 窗口 `transparent` + `window-vibrancy`(setup 里 `apply_vibrancy(Sidebar)`);运行时可开关 —— Rust `set_vibrancy` 命令 + 前端 `glassify()` 半透明主题,设置页「外观与更新」有开关,状态持久化
+- [x] **窗口背景**:使用不透明主题底色；已移除原生 vibrancy 开关与私有 API 依赖
 - [x] **窗口状态记忆**:`tauri-plugin-window-state`(desktop setup 里注册,自动存/复原窗口位置与尺寸)
 - [x] **自动更新**:`tauri-plugin-updater` + `tauri-plugin-process`。已生成 minisign 密钥对(公钥在 `tauri.conf.json`,私钥 `src-tauri/.tauri/gitkit-updater.key` 已 gitignore);前端「检查更新」→ 下载(带进度)→ 安装 → 重启。`bundle.createUpdaterArtifacts: true`
 - [x] **代码签名 + 公证**:`tauri.conf.json > bundle.macOS` 配置位就绪 + 完整操作手册 **`RELEASE.md`**(证书、公证环境变量、latest.json、发布清单)。实际签名需你的 Apple 证书,只能在 Mac 上执行
@@ -131,7 +131,7 @@ GitKit/
 > Token 存储目前是 localStorage 明文(设置页 hint 已注明"后续可迁移到系统钥匙串")。要更安全可换 `keyring` crate 或 `tauri-plugin-stronghold`。
 
 ### 发布相关
-E 已落地(vibrancy / 窗口记忆 / 自动更新 / 签名配置)。实际出包、签名、公证、发布更新的操作步骤见 **`RELEASE.md`**。
+E 已落地(窗口记忆 / 自动更新 / 签名配置)。实际出包、签名、公证、发布更新的操作步骤见 **`RELEASE.md`**。
 
 ## 10. 加一个 Git 命令的标准套路(照抄即可)
 
@@ -182,7 +182,7 @@ catch (e) { toast.error(`推送失败：${e}`); }
 - **提交行高度是公式算的**:依赖内容单行(ref/合并标签/信息/分支名都 `truncate`)。**若新增会换行的内容,要么保持单行,要么改回测量高度**,否则会重叠。
 - **沙箱可 `cargo check` 但不出包**:前端 `npm run build`、后端 `cd src-tauri && cargo check` 都能验证编译;实际 `.app`/`.dmg`/签名/公证只能在 Mac 上 `npm run tauri build`。
 - 失败的 `npm install` 可能残留坏 `node_modules`,重装前先 `rm -rf node_modules package-lock.json`。
-- **vibrancy = 私有 API**:开了 `macOSPrivateApi` + 透明窗口,**无法上架 App Store**,只能 Developer ID 外分发。要上架就得关掉 vibrancy(设置里可运行时关,但 `macOSPrivateApi` 编译期就在)。用户可在「设置 → 外观与更新」关闭毛玻璃(走 `set_vibrancy` + `glassify()` 半透明主题回退到不透明)。
+- **窗口背景**:原生 vibrancy 已移除，窗口使用不透明背景；如重新引入透明窗口或私有 API，需重新评估发布渠道。
 - **自动更新私钥不可丢**:`src-tauri/.tauri/gitkit-updater.key` 丢了就无法再签更新,所有客户端断更。务必离线备份(见 `RELEASE.md` §0.1)。
 - **`createUpdaterArtifacts: true`**:release 构建必须导出 `TAURI_SIGNING_PRIVATE_KEY_PATH`,否则 `tauri build` 报错。本地纯冒烟可临时设 `false`。
 

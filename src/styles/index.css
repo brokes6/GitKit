@@ -43,13 +43,32 @@ select:focus-visible,
   outline-offset: 2px;
 }
 
-.gk-search-field {
-  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+.gk-search-surface {
+  transition: border-color 140ms ease;
 }
 
-.gk-search-field:focus-within {
+.gk-search-surface:focus-within {
   border-color: color-mix(in srgb, var(--gk-accent, #4567f2) 68%, transparent) !important;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--gk-accent, #4567f2) 10%, transparent);
+}
+
+.gk-search-input-row {
+  background: var(--gk-search-input-bg);
+  transition: background-color 120ms ease-out;
+}
+.gk-search-input-row:hover { background: var(--gk-search-input-hover); }
+.gk-search-clear {
+  color: var(--gk-search-muted);
+  animation: gk-search-clear-in 150ms ease-out both;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+.gk-search-clear:hover {
+  color: var(--gk-search-text);
+  background: var(--gk-search-clear-hover);
+}
+.gk-search-result:disabled { opacity: 0.55; cursor: default; }
+@keyframes gk-search-clear-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .gk-search-input:focus-visible {
@@ -127,6 +146,9 @@ select:focus-visible,
 .gk-commit-row:not([data-selected="true"]):not([data-highlight="true"]):hover .gk-commit-row-state {
   background: var(--gk-row-hover);
 }
+.gk-commit-glide[data-gliding="true"] .gk-commit-row:not([data-selected="true"]):not([data-highlight="true"]):hover .gk-commit-row-state {
+  background: transparent;
+}
 
 .gk-commit-row-state {
   background: transparent;
@@ -201,6 +223,9 @@ select:focus-visible,
 }
 .gk-status-context { color: var(--gk-status-muted); }
 .gk-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   height: 22px;
   border: 0.5px solid var(--gk-status-border);
   border-radius: 11px;
@@ -466,7 +491,22 @@ select:focus-visible,
 }
 .gk-shell-button:not(:disabled):hover { background: var(--gk-shell-hover, var(--gk-project-hover)); }
 .gk-shell-button:disabled { opacity: 0.4; cursor: default; }
-.gk-project-item:not([data-project-active]):hover { background: var(--gk-project-hover); }
+.gk-glide-highlight {
+  position: absolute;
+  inset: 0 0 auto;
+  z-index: 0;
+  height: 0;
+  border-radius: 8px;
+  background: var(--gk-glide-hover);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    height 220ms cubic-bezier(0.16, 1, 0.3, 1), opacity 120ms ease-out;
+}
+.gk-glide-list > [data-glide-row] { z-index: 1; }
+.gk-commit-glide > .gk-glide-highlight { left: 5px; right: 5px; border-radius: 7px; }
+.gk-project-item[data-project-active] { background: var(--gk-project-selected); }
+.gk-project-list[data-gliding="true"] .gk-project-item[data-project-active] { background: transparent; }
 .gk-project-close { opacity: 0; }
 .gk-project-item:hover .gk-project-close,
 .gk-project-item:focus-within .gk-project-close { opacity: 1; }

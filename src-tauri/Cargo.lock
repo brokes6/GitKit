@@ -1214,7 +1214,6 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
  "tokio",
- "window-vibrancy",
 ]
 
 [[package]]

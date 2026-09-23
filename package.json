@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "i18n:catalog": "node scripts/update-i18n-catalog.mjs",
+    "prebuild": "npm run i18n:catalog",
     "build": "vite build",
     "test:smart-merge": "node --experimental-strip-types --test tests/smartMerge.test.mjs",
     "preview": "vite preview",

@@ -2,36 +2,6 @@ mod git;
 mod daily_check;
 mod github_token;
 
-#[cfg(target_os = "macos")]
-use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
-
-/// Toggle the macOS vibrancy (frosted-glass) material on the main window at
-/// runtime. No-op on non-macOS. The window must be transparent
-/// (`app.macOSPrivateApi` + `transparent: true` in tauri.conf.json) for the
-/// blur to show.
-#[tauri::command]
-fn set_vibrancy(window: tauri::WebviewWindow, enabled: bool) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        if enabled {
-            apply_vibrancy(
-                &window,
-                NSVisualEffectMaterial::Sidebar,
-                Some(NSVisualEffectState::Active),
-                None,
-            )
-            .map_err(|e| e.to_string())?;
-        } else {
-            clear_vibrancy(&window).map_err(|e| e.to_string())?;
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (window, enabled);
-    }
-    Ok(())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -49,19 +19,6 @@ pub fn run() {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
                 app.handle().plugin(tauri_plugin_process::init())?;
-            }
-            // Frosted-glass vibrancy on the main window (macOS only).
-            #[cfg(target_os = "macos")]
-            {
-                use tauri::Manager;
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = apply_vibrancy(
-                        &window,
-                        NSVisualEffectMaterial::Sidebar,
-                        Some(NSVisualEffectState::Active),
-                        None,
-                    );
-                }
             }
             // Windows has no equivalent of macOS's Overlay title bar, so drop the
             // native decorations and let the app draw its own immersive top bar +
@@ -91,6 +48,7 @@ pub fn run() {
             git::git_status_paths,
             git::commit_files,
             git::commit_file_diff,
+            git::git_file_content,
             git::working_file_diff,
             git::file_preview,
             git::git_has_changes,
@@ -132,7 +90,6 @@ pub fn run() {
             git::git_clone,
             git::start_watch,
             git::stop_watch,
-            set_vibrancy,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GitKit");

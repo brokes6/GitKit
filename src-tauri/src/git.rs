@@ -871,6 +871,153 @@ pub async fn commit_file_diff(path: String, hash: String, file: String) -> Resul
     run_blocking(move || run_git(&path, &["show", "--format=", "-M", &hash, "--", &file])).await
 }
 
+#[derive(Serialize)]
+pub struct FileContent {
+    kind: String, // "text" | "binary" | "too_large" | "empty" | "missing"
+    content: String,
+    lines: usize,
+    size: u64,
+}
+
+/// Read the selected file from a commit, stash, or the working tree. Code view
+/// is loaded on demand, and the size guard runs before a Git blob is buffered.
+#[tauri::command]
+pub async fn git_file_content(
+    path: String,
+    file: String,
+    hash: Option<String>,
+    stash_index: Option<usize>,
+    before: bool,
+) -> Result<FileContent, String> {
+    run_blocking(move || {
+        use std::path::{Component, Path};
+
+        const MAX_SIZE: u64 = 1_000_000;
+        let empty = |kind: &str, size: u64| FileContent {
+            kind: kind.into(), content: String::new(), lines: 0, size,
+        };
+        let relative = Path::new(&file);
+        if file.is_empty()
+            || file.contains('\0')
+            || relative.is_absolute()
+            || relative.components().any(|part| {
+                matches!(part, Component::Prefix(_) | Component::RootDir | Component::ParentDir)
+            })
+        {
+            return Err("无效的文件路径".into());
+        }
+        if hash.is_some() && stash_index.is_some() {
+            return Err("文件版本不明确".into());
+        }
+
+        let spec = if let Some(hash) = hash {
+            if !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err("无效的提交哈希".into());
+            }
+            Some(format!("{}:{file}", if before { format!("{hash}^1") } else { hash }))
+        } else if let Some(index) = stash_index {
+            Some(format!("stash@{{{index}}}{}:{file}", if before { "^1" } else { "" }))
+        } else if before {
+            Some(format!("HEAD:{file}"))
+        } else {
+            None
+        };
+
+        let bytes = if let Some(spec) = spec {
+            let size = match run_git(&path, &["cat-file", "-s", &spec]) {
+                Ok(value) => value.trim().parse::<u64>().map_err(|e| e.to_string())?,
+                Err(_) => return Ok(empty("missing", 0)),
+            };
+            if size > MAX_SIZE { return Ok(empty("too_large", size)); }
+            let output = git_auth_command(&path, &["cat-file", "blob", &spec], None)
+                .output().map_err(|e| format!("无法读取文件：{e}"))?;
+            if !output.status.success() { return Ok(empty("missing", 0)); }
+            if output.stdout.len() as u64 > MAX_SIZE { return Ok(empty("too_large", output.stdout.len() as u64)); }
+            output.stdout
+        } else {
+            let full = Path::new(&path).join(relative);
+            let meta = match std::fs::symlink_metadata(&full) {
+                Ok(value) => value,
+                Err(_) => return Ok(empty("missing", 0)),
+            };
+            if !meta.file_type().is_file() { return Ok(empty("binary", meta.len())); }
+            if meta.len() > MAX_SIZE { return Ok(empty("too_large", meta.len())); }
+            let repo = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+            let resolved = std::fs::canonicalize(&full).map_err(|e| e.to_string())?;
+            if !resolved.starts_with(repo) { return Err("文件不在仓库内".into()); }
+            std::fs::read(&full).map_err(|e| e.to_string())?
+        };
+
+        let size = bytes.len() as u64;
+        if size > MAX_SIZE { return Ok(empty("too_large", size)); }
+        if size == 0 { return Ok(empty("empty", 0)); }
+        if bytes.contains(&0) { return Ok(empty("binary", size)); }
+        let content = match String::from_utf8(bytes) {
+            Ok(value) => value,
+            Err(_) => return Ok(empty("binary", size)),
+        };
+        Ok(FileContent { kind: "text".into(), lines: content.lines().count(), content, size })
+    }).await
+}
+
+#[cfg(test)]
+mod file_content_tests {
+    use super::git_file_content;
+    use std::process::Command;
+
+    fn git(repo: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git").arg("-C").arg(repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn reads_the_requested_version_and_rejects_unsafe_previews() {
+        let repo = std::env::temp_dir().join(format!(
+            "gitkit-code-preview-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet"]);
+        std::fs::write(repo.join("file.ts"), "const value = 1;\n").unwrap();
+        git(&repo, &["add", "file.ts"]);
+        git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "add"]);
+        let first = git(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("file.ts"), "const value = 2;\n").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let path = repo.to_string_lossy().into_owned();
+
+        let committed = runtime.block_on(git_file_content(path.clone(), "file.ts".into(), Some(first), None, false)).unwrap();
+        assert_eq!(committed.content, "const value = 1;\n");
+        let working = runtime.block_on(git_file_content(path.clone(), "file.ts".into(), None, None, false)).unwrap();
+        assert_eq!(working.content, "const value = 2;\n");
+
+        git(&repo, &["stash", "push", "--quiet", "-m", "fixture"]);
+        let stashed = runtime.block_on(git_file_content(path.clone(), "file.ts".into(), None, Some(0), false)).unwrap();
+        assert_eq!(stashed.content, "const value = 2;\n");
+        let stash_base = runtime.block_on(git_file_content(path.clone(), "file.ts".into(), None, Some(0), true)).unwrap();
+        assert_eq!(stash_base.content, "const value = 1;\n");
+
+        git(&repo, &["rm", "-f", "--quiet", "file.ts"]);
+        git(&repo, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "delete"]);
+        let deleted = git(&repo, &["rev-parse", "HEAD"]);
+        let before = runtime.block_on(git_file_content(path.clone(), "file.ts".into(), Some(deleted.clone()), None, true)).unwrap();
+        assert_eq!(before.content, "const value = 1;\n");
+        let after = runtime.block_on(git_file_content(path.clone(), "file.ts".into(), Some(deleted), None, false)).unwrap();
+        assert_eq!(after.kind, "missing");
+
+        std::fs::write(repo.join("binary.dat"), [0, 1, 2]).unwrap();
+        let binary = runtime.block_on(git_file_content(path.clone(), "binary.dat".into(), None, None, false)).unwrap();
+        assert_eq!(binary.kind, "binary");
+        std::fs::write(repo.join("large.txt"), vec![b'x'; 1_000_001]).unwrap();
+        let large = runtime.block_on(git_file_content(path.clone(), "large.txt".into(), None, None, false)).unwrap();
+        assert_eq!(large.kind, "too_large");
+        assert!(runtime.block_on(git_file_content(path, "../outside".into(), None, None, false)).is_err());
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+}
+
 /// True if the working tree has any staged or unstaged changes.
 #[tauri::command]
 pub async fn git_has_changes(path: String) -> Result<bool, String> {

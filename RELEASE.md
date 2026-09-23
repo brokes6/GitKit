@@ -107,4 +107,4 @@ Tauri 会自动:签名 → 开启 Hardened Runtime → 提交公证 → staple(�
 - **`"App is damaged"` / 无法打开**:没签名或没公证。分发必须两步都做。
 - **自动更新报签名校验失败**:`latest.json` 的 `signature` 和实际 `.app.tar.gz` 不是同一次构建产物;或客户端内置 `pubkey` 与签名私钥不配对。
 - **`createUpdaterArtifacts: true` 但没导出私钥**:`tauri build` 直接报错。要么导出 `TAURI_SIGNING_PRIVATE_KEY_PATH`,要么临时设为 `false`。
-- **vibrancy 上架 App Store**:`macOSPrivateApi` 用了私有 API,**无法上 App Store**,只能 Developer ID 外分发。若要上架,需去掉透明窗口 + vibrancy。
+- **窗口背景**:当前配置已移除 vibrancy 与 `macOSPrivateApi`。若未来重新启用私有 API，需重新评估 App Store 发布资格。

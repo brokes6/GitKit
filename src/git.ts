@@ -224,11 +224,11 @@ export function computeGraph(commits: Commit[]): GraphRowInfo[] {
 // ── public API ───────────────────────────────────────────────────────────────
 
 /** Native folder picker. Returns the chosen path, or null if cancelled. */
-export async function pickRepoFolder(): Promise<string | null> {
+export async function pickRepoFolder(title = "选择一个 Git 仓库文件夹"): Promise<string | null> {
   const sel = await openDialog({
     directory: true,
     multiple: false,
-    title: "选择一个 Git 仓库文件夹",
+    title,
   });
   return typeof sel === "string" ? sel : null;
 }
@@ -262,11 +262,11 @@ export async function stopWatch(path: string): Promise<void> {
 
 /** Native folder picker for the destination a repo will be cloned INTO (the
  *  parent directory). Returns the chosen path, or null if cancelled. */
-export async function pickCloneParent(): Promise<string | null> {
+export async function pickCloneParent(title = "选择克隆到的文件夹"): Promise<string | null> {
   const sel = await openDialog({
     directory: true,
     multiple: false,
-    title: "选择克隆到的文件夹",
+    title,
   });
   return typeof sel === "string" ? sel : null;
 }
@@ -777,6 +777,25 @@ export async function commitFileDiff(path: string, hash: string, file: string): 
   return stripDiffHeader(d);
 }
 
+export type FileContentSource =
+  | { kind: "commit"; hash: string }
+  | { kind: "stash"; index: number }
+  | { kind: "working" };
+export interface FileContent {
+  kind: "text" | "binary" | "too_large" | "empty" | "missing";
+  content: string;
+  lines: number;
+  size: number;
+}
+export async function gitFileContent(path: string, file: string, source: FileContentSource, before = false): Promise<FileContent> {
+  return invoke<FileContent>("git_file_content", {
+    path, file,
+    hash: source.kind === "commit" ? source.hash : null,
+    stashIndex: source.kind === "stash" ? source.index : null,
+    before,
+  });
+}
+
 export interface FilePreview {
   kind: "text" | "binary" | "too_large" | "empty" | "missing";
   diff: string; lines: number; truncated: boolean; size: number;
@@ -792,11 +811,6 @@ export async function workingFileDiff(path: string, file: string, staged: boolea
 }
 
 // ── polish & release (section E) ────────────────────────────────────────────
-
-/** Toggle the macOS frosted-glass window material at runtime. No-op elsewhere. */
-export async function setVibrancy(enabled: boolean): Promise<void> {
-  await invoke("set_vibrancy", { enabled });
-}
 
 export interface UpdateInfo { version: string; currentVersion: string; date?: string; notes?: string }
 
