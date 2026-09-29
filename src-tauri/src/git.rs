@@ -1514,7 +1514,7 @@ fn sync_tracking_branches_with(run: impl Fn(&[&str]) -> Result<String, String>) 
 }
 
 /// One local branch that has fallen behind its upstream.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BehindBranch {
     pub name: String,
@@ -1592,6 +1592,10 @@ pub(crate) async fn check_updates(
 }
 
 /// Compare every local branch with its upstream (read-only; assumes a fetch just ran).
+pub(crate) async fn local_updates(path: String) -> Result<UpdateCheck, String> {
+    run_blocking(move || collect_behind(&path, None)).await
+}
+
 fn collect_behind(path: &str, operation: Option<&GitOperation>) -> Result<UpdateCheck, String> {
     let run = |args: &[&str]| {
         if let Some(operation) = operation {
@@ -1912,19 +1916,82 @@ pub async fn git_push_tag(path: String, name: String, token: Option<String>) -> 
     .await
 }
 
-/// Stash working-tree changes (including untracked files).
+/// Stash working-tree changes (including untracked files), using the selected
+/// commit identity when supplied without changing repository/global config.
 #[tauri::command]
-pub async fn git_stash_push(path: String, message: String) -> Result<(), String> {
+pub async fn git_stash_push(
+    path: String,
+    message: String,
+    name: Option<String>,
+    email: Option<String>,
+) -> Result<(), String> {
     run_blocking(move || {
     let msg = if message.trim().is_empty() {
         "GitKit stash".to_string()
     } else {
         message
     };
-    run_git(&path, &["stash", "push", "-u", "-m", &msg])?;
+    let name_cfg = name.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        .map(|n| format!("user.name={n}"));
+    let email_cfg = email.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        .map(|e| format!("user.email={e}"));
+    let mut args: Vec<&str> = Vec::new();
+    if let Some(ref c) = name_cfg {
+        args.extend(["-c", c]);
+    }
+    if let Some(ref c) = email_cfg {
+        args.extend(["-c", c]);
+    }
+    args.extend(["stash", "push", "-u", "-m", &msg]);
+    run_git(&path, &args)?;
     Ok(())
     })
     .await
+}
+
+#[cfg(test)]
+mod stash_identity_tests {
+    use super::git_stash_push;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git").arg("-C").arg(repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn stash_uses_selected_identity_then_falls_back_to_repo_config() {
+        let repo = std::env::temp_dir().join(format!(
+            "gitkit-stash-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "--quiet"]);
+        git(&repo, &["config", "user.name", "Repo User"]);
+        git(&repo, &["config", "user.email", "repo@example.com"]);
+        std::fs::write(repo.join("file.txt"), "first\n").unwrap();
+        git(&repo, &["add", "file.txt"]);
+        git(&repo, &["commit", "--quiet", "-m", "initial"]);
+
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let path = repo.to_string_lossy().into_owned();
+        std::fs::write(repo.join("file.txt"), "second\n").unwrap();
+        runtime.block_on(git_stash_push(
+            path.clone(), "selected".into(), Some("Chosen User".into()), Some("chosen@example.com".into()),
+        )).unwrap();
+        assert_eq!(git(&repo, &["show", "-s", "--format=%an <%ae>|%cn <%ce>", "stash@{0}"]),
+            "Chosen User <chosen@example.com>|Chosen User <chosen@example.com>");
+
+        std::fs::write(repo.join("file.txt"), "third\n").unwrap();
+        runtime.block_on(git_stash_push(path, "repo default".into(), None, None)).unwrap();
+        assert_eq!(git(&repo, &["show", "-s", "--format=%an <%ae>|%cn <%ce>", "stash@{0}"]),
+            "Repo User <repo@example.com>|Repo User <repo@example.com>");
+        assert_eq!(git(&repo, &["config", "user.email"]), "repo@example.com");
+        std::fs::remove_dir_all(repo).unwrap();
+    }
 }
 
 #[derive(Serialize)]

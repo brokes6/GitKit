@@ -7,6 +7,7 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  worker: { format: "es" },
   // Tauri expects a fixed port and clear-screen off for readable logs
   clearScreen: false,
   server: {

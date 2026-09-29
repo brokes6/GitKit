@@ -19,7 +19,7 @@ import {
   Pin, EyeOff, Eye, Folder, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
   Settings, UserPlus, Trash2, Star, Users, Github, Laptop, Sparkles, Languages, RotateCcw, TerminalSquare,
   Tag as TagIcon, Square, DownloadCloud, Pencil, FolderGit2, Search, PanelLeft, MoreHorizontal,
-  CircleDot, ArrowDown, ArrowUp, ExternalLink,
+  CircleDot, ArrowDown, ArrowUp, ExternalLink, Maximize2,
 } from "lucide-react";
 import {
   pickRepoFolder, openRepo, loadBranches, loadRemotes, loadHistory,
@@ -34,6 +34,8 @@ import {
 } from "./git";
 import type { DepInfo, Tag, RepoInfo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged } from "./git";
 import { buildSmartMergeCommits, commitBranchName, commitHistoryDate, orderedEquivalentCommits } from "./smartMerge";
+import { highlightDiffRows } from "./diffSyntax";
+import type { DiffSyntaxToken, DiffSyntaxPalette } from "./diffSyntax";
 
 // ─── theme ────────────────────────────────────────────────────────────────────
 
@@ -1883,6 +1885,7 @@ type DiffRowData = {
   kind: "add" | "del" | "ctx" | "hunk" | "meta";
   oldNo: number | null; newNo: number | null; text: string;
   change?: { start: number; end: number };
+  hunkIndex?: number;
 };
 
 // Parse unified-diff lines into rows carrying old/new line numbers, taken from
@@ -1890,12 +1893,13 @@ type DiffRowData = {
 // diff (an untracked file's synthetic all-additions preview) numbers correctly.
 function parseDiffRows(lines: string[]): DiffRowData[] {
   let oldNo = 1, newNo = 1;
+  let hunkIndex = 0;
   const rows: DiffRowData[] = [];
   for (const line of lines) {
     if (line.startsWith("@@")) {
       const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
       if (m) { oldNo = parseInt(m[1], 10); newNo = parseInt(m[2], 10); }
-      rows.push({ kind: "hunk", oldNo: null, newNo: null, text: line });
+      rows.push({ kind: "hunk", oldNo: null, newNo: null, text: line, hunkIndex: hunkIndex++ });
     } else if (line.startsWith("\\")) {           // "\ No newline at end of file"
       rows.push({ kind: "meta", oldNo: null, newNo: null, text: line });
     } else if (line.startsWith("+")) {
@@ -1913,33 +1917,16 @@ function parseDiffRows(lines: string[]): DiffRowData[] {
   return rows;
 }
 
-const CODE_KEYWORDS = new Set([
-  "import", "from", "export", "default", "async", "function", "const", "let", "var", "await",
-  "return", "if", "else", "for", "while", "new", "throw", "try", "catch", "null", "true", "false",
-  "undefined", "fn", "pub", "use", "impl", "struct", "enum", "match", "mut", "def", "class",
-]);
-const CODE_TOKEN = /("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`[^`]*`|\b\d+(?:\.\d+)?\b|\b(?:import|from|export|default|async|function|const|let|var|await|return|if|else|for|while|new|throw|try|catch|null|true|false|undefined|fn|pub|use|impl|struct|enum|match|mut|def|class)\b|[A-Za-z_$][\w$]*(?=\s*\())/g;
-const CODE_EXTENSIONS = /\.(?:[cm]?[jt]sx?|rs|py|java|kt|go|swift|c|cc|cpp|h|hpp|css|scss|json|html?|xml|ya?ml|sh|sql|vue|svelte|dart)$/i;
-
-function SyntaxText({ text, filePath, change, changeBg }: {
-  text: string; filePath: string; change?: { start: number; end: number }; changeBg?: string;
+function SyntaxText({ text, tokens, change, changeBg }: {
+  text: string; tokens?: DiffSyntaxToken[]; change?: { start: number; end: number }; changeBg?: string;
 }) {
-  const t = useTheme();
   const segments: { start: number; end: number; color?: string }[] = [];
-  if (CODE_EXTENSIONS.test(filePath)) {
-    let last = 0;
-    for (const match of text.matchAll(CODE_TOKEN)) {
-      const index = match.index ?? 0;
-      if (index > last) segments.push({ start: last, end: index });
-      const token = match[0];
-      const color = /^["'`\d]/.test(token) ? t.amber : CODE_KEYWORDS.has(token) ? t.accent : t.text;
-      segments.push({ start: index, end: index + token.length, color });
-      last = index + token.length;
-    }
-    if (last < text.length) segments.push({ start: last, end: text.length });
-  } else {
-    segments.push({ start: 0, end: text.length });
+  let offset = 0;
+  for (const token of tokens ?? []) {
+    segments.push({ start: offset, end: offset + token.content.length, color: token.color });
+    offset += token.content.length;
   }
+  if (offset < text.length) segments.push({ start: offset, end: text.length });
   const nodes: React.ReactNode[] = [];
   for (const segment of segments) {
     const boundaries = [segment.start, segment.end];
@@ -1949,6 +1936,10 @@ function SyntaxText({ text, filePath, change, changeBg }: {
     for (let i = 0; i < boundaries.length - 1; i++) {
       const start = boundaries[i], end = boundaries[i + 1];
       const changed = change && start >= change.start && end <= change.end;
+      if (!segment.color && !changed) {
+        nodes.push(text.slice(start, end));
+        continue;
+      }
       nodes.push(<span key={start} style={{ color: segment.color,
         background: changed ? changeBg : undefined,
         borderRadius: changed ? 3 : undefined,
@@ -1987,14 +1978,18 @@ function markDiffChanges(rows: DiffRowData[]): DiffRowData[] {
   return marked;
 }
 
-function DiffRow({ row, gutterW, filePath }: { row: DiffRowData; gutterW: number; filePath: string }) {
+function DiffRow({ row, gutterW, tokens, activeHunk }: {
+  row: DiffRowData; gutterW: number; tokens?: DiffSyntaxToken[]; activeHunk?: number;
+}) {
   const t = useTheme();
   const add = row.kind === "add", del = row.kind === "del";
   const lineNo = del ? row.oldNo : row.newNo;
   const background = add ? t.greenBg : del ? t.redBg : row.kind === "hunk" ? t.accentBg : "transparent";
   return (
     <div className="gk-code-row relative grid min-w-full font-mono text-[12px] leading-[1.65]"
-      style={{ gridTemplateColumns: `${gutterW}px minmax(0, 1fr)`, background }}>
+      data-diff-hunk={row.hunkIndex}
+      style={{ gridTemplateColumns: `${gutterW}px minmax(0, 1fr)`, background,
+        boxShadow: row.hunkIndex === activeHunk ? `inset 3px 0 ${t.accent}` : undefined }}>
       {(add || del) && <span className="absolute inset-y-0 left-0 w-[3px]"
         style={{ background: add ? t.green : t.red }} aria-hidden="true" />}
       <span className="select-none text-right pr-2 tabular-nums" aria-hidden="true"
@@ -2005,7 +2000,7 @@ function DiffRow({ row, gutterW, filePath }: { row: DiffRowData; gutterW: number
         <span className="px-3 whitespace-pre-wrap break-words select-none" style={{ color: row.kind === "hunk" ? t.accent : t.textMuted }}>{row.text || " "}</span>
       ) : (
         <code className="pl-3 pr-4 whitespace-pre-wrap break-words" style={{ color: t.textSec, overflowWrap: "anywhere" }}>
-          <SyntaxText text={row.text || " "} filePath={filePath} change={row.change}
+          <SyntaxText text={row.text || " "} tokens={tokens} change={row.change}
             changeBg={add ? t.green + "33" : t.red + "33"} />
         </code>
       )}
@@ -2013,11 +2008,29 @@ function DiffRow({ row, gutterW, filePath }: { row: DiffRowData; gutterW: number
   );
 }
 
-function DiffRows({ lines, filePath }: { lines: string[]; filePath: string }) {
+function DiffRows({ lines, filePath, activeHunk }: { lines: string[]; filePath: string; activeHunk?: number }) {
+  const t = useTheme();
   const rows = useMemo(() => markDiffChanges(parseDiffRows(lines)), [lines]);
+  const palette = useMemo<DiffSyntaxPalette>(() => ({
+    name: `gitkit-${t.accent}-${t.isDark ? "dark" : "light"}`,
+    dark: t.isDark, text: t.textSec, muted: t.textMuted,
+    keyword: t.accentFg, string: t.accent3Fg, number: t.amber,
+    function: t.accent2Fg, type: t.accent2Fg,
+  }), [t]);
+  const syntaxKey = useMemo(() => `${palette.name}\0${filePath}\0${lines.join("\n")}`,
+    [palette.name, filePath, lines]);
+  const [syntaxResult, setSyntaxResult] = useState<{ key: string; tokens: DiffSyntaxToken[][] | null } | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    highlightDiffRows(rows, filePath, palette, syntaxKey, controller.signal).then((result) => {
+      if (!controller.signal.aborted) setSyntaxResult({ key: syntaxKey, tokens: result });
+    });
+    return () => controller.abort();
+  }, [rows, filePath, palette, syntaxKey]);
+  const tokens = syntaxResult?.key === syntaxKey ? syntaxResult.tokens : null;
   const maxNo = rows.reduce((m, r) => Math.max(m, r.oldNo ?? 0, r.newNo ?? 0), 0);
   const gutterW = Math.max(String(maxNo).length, 2) * 8 + 22;
-  return <>{rows.map((r, i) => <DiffRow key={i} row={r} gutterW={gutterW} filePath={filePath} />)}</>;
+  return <>{rows.map((r, i) => <DiffRow key={i} row={r} gutterW={gutterW} tokens={tokens?.[i]} activeHunk={activeHunk} />)}</>;
 }
 
 function DiffSkeleton() {
@@ -2038,11 +2051,16 @@ function DiffSkeleton() {
 }
 
 function CodeDiffSurface({ filePath, diff, additions, deletions, statusLabel, statusColor,
-  loading = false, diffError = false, diffNotice, diffTruncated = false, diffExtraNotice }: {
+  loading = false, diffError = false, diffNotice, diffTruncated = false, diffExtraNotice,
+  onExpand, onClose, toolbar, scrollRef, onScroll, onWheel, activeHunk }: {
   filePath: string; diff?: string; additions?: number; deletions?: number;
   statusLabel: string; statusColor: string;
   loading?: boolean; diffError?: boolean;
   diffNotice?: string | null; diffTruncated?: boolean; diffExtraNotice?: string;
+  onExpand?: (trigger: HTMLButtonElement) => void; onClose?: () => void;
+  toolbar?: React.ReactNode; scrollRef?: React.Ref<HTMLDivElement>;
+  onScroll?: React.UIEventHandler<HTMLDivElement>;
+  onWheel?: React.WheelEventHandler<HTMLDivElement>; activeHunk?: number;
 }) {
   const t = useTheme();
   const diffLines = useMemo(() => {
@@ -2051,6 +2069,7 @@ function CodeDiffSurface({ filePath, diff, additions, deletions, statusLabel, st
     if (lines[lines.length - 1] === "") lines.pop();
     return lines;
   }, [diff]);
+  const visibleDiffLines = useMemo(() => diffLines.slice(0, DIFF_RENDER_CAP), [diffLines]);
   const effectiveDiffNotice = diffError ? tx("无法读取差异")
     : diffNotice || (diff && /^(?:Binary files .+ differ|GIT binary patch)$/m.test(diff)
       ? tx("二进制文件,无法预览") : null);
@@ -2061,20 +2080,38 @@ function CodeDiffSurface({ filePath, diff, additions, deletions, statusLabel, st
         style={{ borderBottom: "0.5px solid " + t.border }}>
         <FileText size={15} className="flex-shrink-0" aria-hidden="true" style={{ color: t.textMuted }} />
         <span className="font-mono text-[12px] font-semibold flex-shrink-0" style={{ color: statusColor }}>{statusLabel}</span>
-        <span className="font-mono text-[12px] truncate" title={filePath} style={{ color: t.text }}>{filePath}</span>
+        <span className="font-mono text-[12px] min-w-0 truncate" title={filePath} style={{ color: t.text }}>{filePath}</span>
         <span className="ml-auto flex gap-2 flex-shrink-0 font-mono text-[11px] tabular-nums">
           {additions !== undefined && <span style={{ color: t.green }}>+{additions}</span>}
           {deletions !== undefined && <span style={{ color: t.red }}>−{deletions}</span>}
         </span>
+        {onExpand && <button type="button" onClick={(event) => onExpand(event.currentTarget)}
+          data-gk-expand-diff
+          className="flex-shrink-0 flex items-center justify-center w-7 h-7 ml-1 cursor-pointer transition-colors duration-100"
+          style={{ color: t.textMuted, borderRadius: R - 3 }}
+          onMouseEnter={(event) => { event.currentTarget.style.background = t.inputBg; event.currentTarget.style.color = t.text; }}
+          onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; event.currentTarget.style.color = t.textMuted; }}
+          aria-label={tx("展开文件差异")} title={tx("展开文件差异")}>
+          <Maximize2 size={14} aria-hidden="true" />
+        </button>}
+        {onClose && <button type="button" {...press(onClose)}
+          className="flex-shrink-0 flex items-center justify-center w-7 h-7 ml-1 cursor-pointer transition-colors duration-100"
+          style={{ color: t.textMuted, borderRadius: R - 3 }}
+          onMouseEnter={(event) => (event.currentTarget.style.background = t.inputBg)}
+          onMouseLeave={(event) => (event.currentTarget.style.background = "transparent")}
+          aria-label={tx("关闭文件差异")} title={tx("关闭")}>
+          <X size={15} aria-hidden="true" />
+        </button>}
       </div>
-      <div className="flex-1 min-h-0 overflow-auto py-2" style={{ overscrollBehavior: "none" }}>
+      {toolbar}
+      <div ref={scrollRef} onScroll={onScroll} onWheel={onWheel} className="flex-1 min-h-0 overflow-auto py-2" style={{ overscrollBehavior: "none" }}>
         {loading ? <DiffSkeleton />
         : effectiveDiffNotice ? (
           <div className="h-full flex flex-col items-center justify-center gap-2 text-xs" style={{ color: t.textFaint }}>
             <FileText size={24} opacity={0.3} aria-hidden="true" />{effectiveDiffNotice}
           </div>
         ) : diffLines.length > 0 ? <>
-          <DiffRows lines={diffLines.slice(0, DIFF_RENDER_CAP)} filePath={filePath} />
+          <DiffRows lines={visibleDiffLines} filePath={filePath} activeHunk={activeHunk} />
           {(diffTruncated || diffLines.length > DIFF_RENDER_CAP) && (
             <div className="px-4 py-3 text-[11px] text-center" style={{ color: t.textFaint }}>
               {tx("差异较长,仅显示前")} {DIFF_RENDER_CAP} {tx("行")}{diffExtraNotice}
@@ -2092,10 +2129,11 @@ function CodeDiffSurface({ filePath, diff, additions, deletions, statusLabel, st
 
 // Shared body for commit- and stash-detail panes: a file list on the left and
 // the selected file's diff on the right. The header above it differs per caller.
-function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, repoPath, sourceKey, emptyHint = tx("无文件更改") }: {
+function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, onExpand, repoPath, sourceKey, emptyHint = tx("无文件更改") }: {
   files: CommitFile[]; selectedFile: CommitFile | null;
   onFileSelect: (f: CommitFile | null) => void;
   onRevealFile?: (f: CommitFile) => void;
+  onExpand?: (trigger: HTMLButtonElement) => void;
   repoPath: string; sourceKey: string | number;
   emptyHint?: string;
 }) {
@@ -2167,7 +2205,7 @@ function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, repoPat
           diff={selectedFile.diff} additions={selectedFile.additions} deletions={selectedFile.deletions}
           statusLabel={fss(selectedFile.status).label} statusColor={fss(selectedFile.status).color}
           loading={!!repoPath && selectedFile.diff === undefined && !selectedFile.diffError}
-          diffError={selectedFile.diffError} />
+          diffError={selectedFile.diffError} onExpand={onExpand} />
       ) : (
         <div className="flex-1 flex flex-col items-center justify-center gap-2"
           style={{ background: t.diffBg, color: t.textFaint }}>
@@ -2179,9 +2217,165 @@ function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, repoPat
   );
 }
 
-function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onCherryPick, onCheckout, checkoutBranch, repoPath }: {
+function ExpandedDiffDialog({ files, file, onFileSelect, onClose, repoPath }: {
+  files: CommitFile[]; file: CommitFile;
+  onFileSelect: (file: CommitFile) => void; onClose: () => void; repoPath: string;
+}) {
+  const t = useTheme();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  const pendingHunkRef = useRef<"first" | "last">("first");
+  const smoothScrollRef = useRef<number | null>(null);
+  const scrollSettledTimerRef = useRef<number | null>(null);
+  const [activeHunk, setActiveHunk] = useState(-1);
+  onCloseRef.current = onClose;
+
+  const fileIndex = files.findIndex((entry) => entry.path === file.path);
+  const loading = !!repoPath && file.diff === undefined && !file.diffError;
+  const hunkCount = useMemo(() => {
+    if (!file.diff) return 0;
+    return file.diff.split("\n").slice(0, DIFF_RENDER_CAP).filter((line) => line.startsWith("@@")).length;
+  }, [file.diff]);
+
+  const clearSmoothScroll = () => {
+    if (scrollSettledTimerRef.current !== null) window.clearTimeout(scrollSettledTimerRef.current);
+    scrollSettledTimerRef.current = null;
+    smoothScrollRef.current = null;
+  };
+  useEffect(() => clearSmoothScroll, []);
+
+  const scrollToHunk = (index: number, animate = false) => {
+    const scroller = scrollRef.current;
+    const target = scroller?.querySelector<HTMLElement>(`[data-diff-hunk="${index}"]`);
+    if (!scroller || !target) return;
+    const top = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 8;
+    clearSmoothScroll();
+    const smooth = animate && !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (smooth) {
+      smoothScrollRef.current = index;
+      scrollSettledTimerRef.current = window.setTimeout(clearSmoothScroll, 650);
+    }
+    scroller.scrollTo({ top, behavior: smooth ? "smooth" : "auto" });
+    setActiveHunk(index);
+  };
+
+  useLayoutEffect(() => {
+    if (file.diff === undefined && !file.diffError) return;
+    const index = hunkCount === 0 ? -1 : pendingHunkRef.current === "last" ? hunkCount - 1 : 0;
+    pendingHunkRef.current = "first";
+    setActiveHunk(index);
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    if (index > 0) scrollToHunk(index);
+  }, [file.path, file.diff, file.diffError, hunkCount]);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    dialog?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onCloseRef.current();
+      } else if (event.key === "Tab" && dialog) {
+        const buttons = [...dialog.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
+        if (!buttons.length) { event.preventDefault(); return; }
+        if (event.shiftKey && (document.activeElement === buttons[0] || document.activeElement === dialog)) {
+          event.preventDefault(); buttons[buttons.length - 1].focus();
+        } else if (!event.shiftKey && (document.activeElement === buttons[buttons.length - 1] || document.activeElement === dialog)) {
+          event.preventDefault(); buttons[0].focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
+  const selectAdjacentFile = (direction: -1 | 1, hunk: "first" | "last") => {
+    const next = files[fileIndex + direction];
+    if (!next) return;
+    clearSmoothScroll();
+    pendingHunkRef.current = hunk;
+    setActiveHunk(-1);
+    onFileSelect(next);
+  };
+  const goToChange = (direction: -1 | 1) => {
+    const next = activeHunk + direction;
+    if (next >= 0 && next < hunkCount) {
+      scrollToHunk(next, true);
+    } else if (direction > 0 && fileIndex < files.length - 1) {
+      selectAdjacentFile(1, "first");
+    } else if (direction < 0 && fileIndex > 0) {
+      selectAdjacentFile(-1, "last");
+    }
+  };
+  const trackVisibleHunk = () => {
+    if (smoothScrollRef.current !== null) return;
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const top = scroller.getBoundingClientRect().top + 16;
+    let current = hunkCount > 0 ? 0 : -1;
+    scroller.querySelectorAll<HTMLElement>("[data-diff-hunk]").forEach((node) => {
+      if (node.getBoundingClientRect().top <= top) current = Number(node.dataset.diffHunk);
+    });
+    setActiveHunk((previous) => previous === current ? previous : current);
+  };
+
+  const status = {
+    added: { label: "A", color: t.green }, modified: { label: "M", color: t.amber },
+    deleted: { label: "D", color: t.red }, renamed: { label: "R", color: "#60a5fa" },
+  }[file.status];
+  const navButton = (label: string, Icon: typeof ChevronLeft, action: () => void, disabled: boolean) => (
+    <button type="button" {...press(action)} disabled={disabled} aria-label={label} title={label}
+      className="gk-diff-nav-button flex items-center justify-center w-7 h-7 cursor-pointer disabled:cursor-default"
+      style={{ color: disabled ? t.textFaint : t.textSec, borderRadius: R - 3,
+        "--gk-diff-nav-hover": t.rowHover } as React.CSSProperties}>
+      <Icon size={14} aria-hidden="true" />
+    </button>
+  );
+
+  return createPortal(
+    <div className="gk-expanded-diff-overlay fixed inset-0 flex items-center justify-center"
+      style={{ zIndex: 220, colorScheme: t.isDark ? "dark" : "light",
+        padding: "64px clamp(12px, 2vw, 24px) 24px" }}>
+      <div className="absolute inset-0 gk-overlay-in" style={{ background: "rgba(0,0,0,0.45)" }}
+        {...press(onClose)} />
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={tx("展开文件差异")}
+        tabIndex={-1} className="gk-expanded-diff-card gk-modal-in relative flex flex-col overflow-hidden outline-none"
+        style={{ width: "100%", height: "100%", maxWidth: 1440,
+          background: t.dialogBg, borderRadius: 14, boxShadow: t.shadowWindow }}>
+        <CodeDiffSurface filePath={file.path} diff={file.diff}
+          additions={file.additions} deletions={file.deletions}
+          statusLabel={status.label} statusColor={status.color}
+          loading={loading}
+          diffError={file.diffError} onClose={onClose}
+          scrollRef={scrollRef} onScroll={trackVisibleHunk} onWheel={clearSmoothScroll} activeHunk={activeHunk}
+          toolbar={<div className="flex-shrink-0 flex items-center justify-center h-11"
+            style={{ background: t.bgPanel, borderBottom: `0.5px solid ${t.border}` }}>
+            <div className="flex items-center gap-0.5 px-1.5 py-0.5"
+              style={{ background: t.dialogBg, border: `0.5px solid ${t.inputBorder}`,
+                borderRadius: R - 2, boxShadow: t.shadowEl }}>
+              {navButton(tx("上一个文件"), ChevronLeft, () => selectAdjacentFile(-1, "first"), fileIndex <= 0)}
+              <span className="min-w-[52px] text-center font-mono text-[11px] tabular-nums"
+                style={{ color: t.textSec }} title={tx("当前文件")}>{tx("文件")} {fileIndex + 1}/{files.length}</span>
+              {navButton(tx("下一个文件"), ChevronRight, () => selectAdjacentFile(1, "first"), fileIndex < 0 || fileIndex >= files.length - 1)}
+              <span className="h-4 mx-1" style={{ borderLeft: `0.5px solid ${t.border}` }} aria-hidden="true" />
+              {navButton(tx("上一个更改点"), ArrowUp, () => goToChange(-1), loading || (activeHunk <= 0 && fileIndex <= 0))}
+              <span className="min-w-[56px] text-center font-mono text-[11px] tabular-nums"
+                style={{ color: t.textSec }} title={tx("当前更改点")}>{tx("更改")} {activeHunk + 1}/{hunkCount}</span>
+              {navButton(tx("下一个更改点"), ArrowDown, () => goToChange(1),
+                loading || ((activeHunk >= hunkCount - 1 || hunkCount === 0) && fileIndex >= files.length - 1))}
+            </div>
+          </div>} />
+      </div>
+    </div>, document.body,
+  );
+}
+
+function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onExpand, onCherryPick, onCheckout, checkoutBranch, repoPath }: {
   commit: Commit; selectedFile: CommitFile | null; onFileSelect: (f: CommitFile | null) => void;
   onRevealFile?: (f: CommitFile) => void;
+  onExpand?: (trigger: HTMLButtonElement) => void;
   onCherryPick?: () => void; onCheckout?: () => void; checkoutBranch?: string | null;
   repoPath: string;
 }) {
@@ -2255,7 +2449,7 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onCher
       </div>
 
       <FileDiffView files={commit.files} selectedFile={selectedFile}
-        onFileSelect={onFileSelect} onRevealFile={onRevealFile}
+        onFileSelect={onFileSelect} onRevealFile={onRevealFile} onExpand={onExpand}
         repoPath={repoPath} sourceKey={commit.fullHash}
         emptyHint={tx("合并提交，无直接更改")} />
     </div>
@@ -2264,9 +2458,10 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onCher
 
 // Stash-detail pane: a stash-specific header (label / message / date + apply &
 // drop actions) over the shared file+diff body.
-function StashDetail({ stash, files, selectedFile, onFileSelect, onApply, onDrop, repoPath }: {
+function StashDetail({ stash, files, selectedFile, onFileSelect, onExpand, onApply, onDrop, repoPath }: {
   stash: Stash; files: CommitFile[]; selectedFile: CommitFile | null;
   onFileSelect: (f: CommitFile | null) => void; onApply: () => void; onDrop: () => void;
+  onExpand?: (trigger: HTMLButtonElement) => void;
   repoPath: string;
 }) {
   const t = useTheme();
@@ -2315,7 +2510,7 @@ function StashDetail({ stash, files, selectedFile, onFileSelect, onApply, onDrop
         </div>
       </div>
       <FileDiffView files={files} selectedFile={selectedFile} onFileSelect={onFileSelect}
-        repoPath={repoPath} sourceKey={stash.index}
+        onExpand={onExpand} repoPath={repoPath} sourceKey={stash.index}
         emptyHint={tx("此储藏没有已跟踪文件的改动")} />
     </div>
   );
@@ -2408,18 +2603,11 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFile
 
   // Committer: a remembered per-project choice wins; otherwise the default
   // identity. Selecting one persists it for this project.
-  const resolveIdentity = (): string => {
-    const remembered = loadProjectIdentity(projectKey);
-    if (remembered !== null && (remembered === "" || identities.some((i) => i.id === remembered))) {
-      return remembered;
-    }
-    return defaultIdentityId && identities.some((i) => i.id === defaultIdentityId)
-      ? defaultIdentityId : (identities[0]?.id ?? "");
-  };
+  const resolveIdentity = () => resolveIdentityId(projectKey, identities, defaultIdentityId);
   const [identityId, setIdentityId] = useState<string>(resolveIdentity);
   // Reload the remembered choice when the project changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { setIdentityId(resolveIdentity()); }, [projectKey]);
+  useEffect(() => { setIdentityId(resolveIdentity()); }, [projectKey, defaultIdentityId]);
   // Fall back if the selected identity is deleted.
   useEffect(() => {
     if (identityId !== "" && !identities.some((i) => i.id === identityId)) setIdentityId(resolveIdentity());
@@ -2791,6 +2979,14 @@ function loadProjectIdentity(key: string): string | null {
   const v = loadPrefMap(IDENTITY_PREFS)[key];
   return typeof v === "string" ? v : null;
 }
+function resolveIdentityId(projectKey: string, identities: Identity[], defaultIdentityId: string): string {
+  const remembered = loadProjectIdentity(projectKey);
+  if (remembered !== null && (remembered === "" || identities.some((i) => i.id === remembered))) {
+    return remembered;
+  }
+  return defaultIdentityId && identities.some((i) => i.id === defaultIdentityId)
+    ? defaultIdentityId : (identities[0]?.id ?? "");
+}
 function saveProjectIdentity(key: string, id: string): void {
   setPrefMapEntry(IDENTITY_PREFS, key, id);
 }
@@ -2987,7 +3183,7 @@ function CommitSearchDialog({ commits, ready, errored, onClose, onSelect }: {
       <div className={`absolute inset-0 ${closing ? "gk-overlay-out" : "gk-overlay-in"}`}
         style={{ background: "rgba(0,0,0,0.45)" }} {...press(requestClose)} />
       <div role="dialog" aria-modal="true" aria-label={tx("搜索提交")}
-        className={`gk-search-surface relative flex flex-col min-h-0 overflow-hidden ${closing ? "gk-modal-out" : "gk-modal-in"}`}
+        className={`relative flex flex-col min-h-0 overflow-hidden ${closing ? "gk-modal-out" : "gk-modal-in"}`}
         onAnimationEnd={(event) => {
           if (closing && event.currentTarget === event.target) {
             const action = closeActionRef.current;
@@ -2996,7 +3192,7 @@ function CommitSearchDialog({ commits, ready, errored, onClose, onSelect }: {
           }
         }}
         style={{ width: 620, maxWidth: "calc(100vw - 32px)", maxHeight: "85vh",
-          background: t.dialogBg, border: `0.5px solid ${t.inputBorder}`, borderRadius: R + 2,
+          background: t.dialogBg, borderRadius: R + 2,
           boxShadow: t.shadowWindow,
           "--gk-search-input-bg": t.inputBg, "--gk-search-input-hover": t.rowHover,
           "--gk-search-clear-hover": t.inputBorder, "--gk-search-muted": t.textMuted,
@@ -5130,13 +5326,14 @@ function UpdatesDialog({ rows, busy, onPull, onClose }: {
   const toggle = (id: string) => setSel((p) => p.includes(id) ? p.filter((x) => x !== id) : [...p, id]);
   // A project already pulled drops out of the selection — re-running it would be a
   // no-op, and the button going to (0) is what says the batch is finished.
-  const selectable = rows.filter((r) => !r.error && r.state !== "done" && ffable(r).length);
+  const selectable = rows.filter((r) => !r.error && r.state === "idle" && ffable(r).length);
   const chosen = sel.filter((id) => selectable.some((r) => r.id === id));
   const finished = rows.some((r) => r.state === "done" || r.state === "failed");
-  const total = rows.reduce((n, r) => n + r.behind.reduce((m, b) => m + b.behind, 0), 0);
+  const total = rows.reduce((n, r) => n + (r.error ? 0 : r.behind.reduce((m, b) => m + b.behind, 0)), 0);
+  const pending = rows.filter((r) => !r.error && r.behind.length).length;
 
   return (
-    <Modal title={rows.some((r) => !r.error) ? tx("远程有新的提交") : tx("部分项目检查失败")} Icon={DownloadCloud} onClose={busy ? () => {} : onClose} width={560}
+    <Modal title={pending ? tx("远程有新的提交") : rows.some((r) => r.error) ? tx("部分项目检查失败") : tx("操作已完成")} Icon={DownloadCloud} onClose={busy ? () => {} : onClose} width={560}
       footer={
         <>
           <button {...(busy ? {} : press(onClose))} disabled={busy}
@@ -5156,12 +5353,14 @@ function UpdatesDialog({ rows, busy, onPull, onClose }: {
         </>
       }>
       <div className="text-xs" style={{ color: t.textSec }}>
-        {rows.filter((r) => !r.error).length} {tx("个项目有更新，共")} {total} {tx("个提交")}{rows.some((r) => r.error) ? tf("；{0} 个项目检查失败", rows.filter((r) => r.error).length) : ""}{tx("。拉取只做快进，不会产生合并提交。")}
+        {pending || rows.some((r) => r.error) ? <>
+          {pending} {tx("个项目有更新，共")} {total} {tx("个提交")}{rows.some((r) => r.error) ? tf("；{0} 个项目检查失败", rows.filter((r) => r.error).length) : ""}{tx("。拉取只做快进，不会产生合并提交。")}
+        </> : tx("所有项目都已是最新")}
       </div>
 
       <div className="flex flex-col gap-1.5">
         {rows.map((r) => {
-          const can = !r.error && ffable(r).length > 0;
+          const can = !r.error && r.state === "idle" && ffable(r).length > 0;
           const checked = can && sel.includes(r.id);
           const diverged = r.behind.filter((b) => b.ahead > 0);
           const dirtyBlocked = r.behind.some((b) => b.current && r.dirty && b.ahead === 0);
@@ -5406,9 +5605,24 @@ export default function App() {
   const [confirmBusy, setConfirmBusy] = useState(false);
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailClosing, setDetailClosing] = useState(false); // keep mounted for the exit slide
+  const [diffExpanded, setDiffExpanded] = useState(false);
+  const diffExpandTriggerRef = useRef<HTMLButtonElement | null>(null);
   const detailPanelRef = useRef<HTMLDivElement>(null);
   const openDetail = () => { setDetailClosing(false); setDetailOpen(true); };
-  const closeDetail = () => { setDetailOpen(false); setDetailClosing(true); };
+  const closeDetail = () => { setDiffExpanded(false); setDetailOpen(false); setDetailClosing(true); };
+  const openExpandedDiff = (trigger: HTMLButtonElement) => {
+    diffExpandTriggerRef.current = trigger;
+    setDiffExpanded(true);
+  };
+  const closeExpandedDiff = () => {
+    setDiffExpanded(false);
+    requestAnimationFrame(() => {
+      const trigger = diffExpandTriggerRef.current?.isConnected
+        ? diffExpandTriggerRef.current
+        : document.querySelector<HTMLButtonElement>("[data-gk-expand-diff]");
+      trigger?.focus();
+    });
+  };
   const [gitBusy, setGitBusy] = useState<null | "fetch" | "pull" | "push">(null);
   // Mirror gitBusy for background jobs that must avoid overlapping a user Git op.
   const gitBusyRef = useRef(gitBusy);
@@ -5560,9 +5774,10 @@ export default function App() {
   // Esc or a pointer press outside the drawer closes the detail overlay.
   useEffect(() => {
     if (!detailOpen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") closeDetail(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !diffExpanded) closeDetail(); };
     const onMouseDown = (e: MouseEvent) => {
       if (detailPanelRef.current?.contains(e.target as Node)) return;
+      if ((e.target as Element | null)?.closest?.(".gk-expanded-diff-overlay")) return;
       if ((e.target as Element | null)?.closest?.(".gk-operation-capsule")) return;
       e.preventDefault();
       e.stopPropagation();
@@ -5574,7 +5789,7 @@ export default function App() {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("mousedown", onMouseDown, true);
     };
-  }, [detailOpen]);
+  }, [detailOpen, diffExpanded]);
 
   // Data belongs to the active project only when its path matches. On a tab
   // switch this flips false on the very first (urgent) render, so the target
@@ -6235,7 +6450,7 @@ export default function App() {
     try {
       // Handle uncommitted changes first: stash them away, discard them, or (default)
       // let `checkout -b` carry them onto the new branch.
-      if (mode === "stash") await stashPush(p, `GitKit: 新建分支 ${name} 前的改动`);
+      if (mode === "stash") await stashWithSelectedIdentity(p, `GitKit: 新建分支 ${name} 前的改动`);
       else if (mode === "discard") await discardAll(p);
       await createBranch(p, name, base, true);
       setCurrentBranch(name);
@@ -6283,6 +6498,11 @@ export default function App() {
   };
 
   // ── stash: save working changes, then apply / drop saved entries ──
+  const stashWithSelectedIdentity = (path: string, message: string) => {
+    const identityId = resolveIdentityId(path, identities, defaultIdentityId);
+    const identity = identities.find((i) => i.id === identityId);
+    return stashPush(path, message, identity?.name, identity?.email);
+  };
   // Open the stash dialog (optional title). Guard here so the button feedback
   // still happens even though the actual stash runs from the dialog.
   const requestStash = () => {
@@ -6296,7 +6516,7 @@ export default function App() {
     setStashBusy(true);
     const tid = toast.loading(tx("正在储藏…"));
     try {
-      await stashPush(p, message);   // empty → backend default ("GitKit stash")
+      await stashWithSelectedIdentity(p, message);   // empty → backend default ("GitKit stash")
       realCache.current.delete(p);
       setReloadTick((n) => n + 1);
       setStashDialogOpen(false);
@@ -6455,6 +6675,13 @@ export default function App() {
       // Cancellation can arrive after some refs have already changed.
       realCache.current.delete(p);
       if (activePathRef.current === p) setReloadTick((n) => n + 1);
+      if (kind !== "push") {
+        try {
+          applyCheckSnapshot.current(await invoke<CheckSnapshot>("daily_check_reconcile"));
+        } catch (error) {
+          toast.error(tf("读取检查状态失败：{0}", error));
+        }
+      }
       setGitBusy(null);
       setCancelling(false);
       gitOpId.current = null;
@@ -6491,6 +6718,7 @@ export default function App() {
   const checkRevisionRef = useRef(-1);
   const completedCheckRef = useRef(0);
   const presentedCheckRef = useRef(0);
+  const openingCheckRef = useRef(false);
   const checkErrorRef = useRef("");
   const applyCheckSnapshot = useRef((_: CheckSnapshot) => {});
   applyCheckSnapshot.current = (snapshot) => {
@@ -6518,7 +6746,7 @@ export default function App() {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     let focusRevision = 0;
-    const refresh = () => invoke<CheckSnapshot>("daily_check_snapshot").then((snapshot) => {
+    const refresh = () => invoke<CheckSnapshot>("daily_check_reconcile").then((snapshot) => {
       if (!disposed) applyCheckSnapshot.current(snapshot);
     }).catch((error) => { if (!disposed) toast.error(tf("读取检查状态失败：{0}", error)); });
     const keep = (unlisten: () => void) => { if (disposed) unlisten(); else unlisteners.push(unlisten); };
@@ -6570,6 +6798,25 @@ export default function App() {
     void invoke("daily_check_mark_viewed", { id: result.id })
       .catch((error) => toast.error(tf("保存已读状态失败：{0}", error)));
   };
+  const openCheckResult = async (result: CheckResult) => {
+    if (openingCheckRef.current) return;
+    openingCheckRef.current = true;
+    // The saved check is a point-in-time finding. Local branches may have been
+    // fast-forwarded by another action since then, including outside GitKit.
+    presentedCheckRef.current = result.id;
+    try {
+      const snapshot = await invoke<CheckSnapshot>("daily_check_reconcile");
+      applyCheckSnapshot.current(snapshot);
+      const current = snapshot.result;
+      if (!current) return;
+      if (!current.rows.length && !current.manual) toast.success(tx("所有项目都已是最新"));
+      showCheckResult(current);
+    } catch (error) {
+      toast.error(tf("读取检查状态失败：{0}", error));
+    } finally {
+      openingCheckRef.current = false;
+    }
+  };
   useEffect(() => {
     const result = checkSnapshot?.result ?? null;
     if (!result || presentedCheckRef.current === result.id || updateRows || pullBusy || gitBusy || busyLabel) return;
@@ -6590,12 +6837,15 @@ export default function App() {
     if (!updateRows || pullBusy) return;
     setPullBusy(true);
     let touchedActive = false;
+    const resultId = checkSnapshot?.result?.id;
+    const synced = new Map<string, string[]>();
     for (const id of ids) {
       const row = updateRows.find((r) => r.id === id);
       if (!row) continue;
       setUpdateRows((prev) => prev?.map((r) => r.id === id ? { ...r, state: "pulling", detail: undefined } : r) ?? null);
       try {
         const s = await syncLocal(row.path);
+        synced.set(id, s.synced);
         const parts: string[] = [];
         if (s.synced.length) parts.push(tf("已快进 {0}", s.synced.join("、")));
         if (s.dirtySkipped) parts.push(tx("当前分支有未提交更改,已跳过"));
@@ -6608,6 +6858,27 @@ export default function App() {
       } catch (e) {
         setUpdateRows((prev) => prev?.map((r) => r.id === id ? { ...r, state: "failed", detail: String(e) } : r) ?? null);
       }
+    }
+    try {
+      const snapshot = await invoke<CheckSnapshot>("daily_check_reconcile");
+      applyCheckSnapshot.current(snapshot);
+      const latest = snapshot.result;
+      const current = new Map((latest?.rows ?? []).map((r) => [r.id, r]));
+      if (latest?.id === resultId) {
+        setUpdateRows((prev) => prev?.map((r) => {
+          const live = current.get(r.id);
+          if (!ids.includes(r.id)) return r;
+          const next = { ...r, behind: live?.behind ?? [], dirty: live?.dirty ?? r.dirty,
+            currentBranch: live?.currentBranch ?? r.currentBranch,
+            error: live ? live.error ?? undefined : r.error };
+          if (synced.has(r.id) && !synced.get(r.id)?.length && !next.behind.length) {
+            return { ...next, state: "done" as const, detail: tx("所有项目都已是最新") };
+          }
+          return next;
+        }) ?? null);
+      }
+    } catch (error) {
+      toast.error(tf("读取检查状态失败：{0}", error));
     }
     setPullBusy(false);
     if (touchedActive) pendingJumpLatest.current = true;
@@ -6645,6 +6916,9 @@ export default function App() {
       realCache.current.delete(activeProject.path);
       pendingViewReset.current = true;
       setReloadTick((n) => n + 1);
+      void invoke<CheckSnapshot>("daily_check_reconcile")
+        .then((snapshot) => applyCheckSnapshot.current(snapshot))
+        .catch((error) => toast.error(tf("读取检查状态失败：{0}", error)));
       toast.success(tf("已检出 {0} 并同步到 {1}", branch, commit.hash), { id: tid });
     } catch (e) { toast.error(tf("检出失败：{0}", e), { id: tid }); }
   };
@@ -6671,6 +6945,9 @@ export default function App() {
       realCache.current.delete(activeProject.path);
       pendingViewReset.current = true;
       setReloadTick((n) => n + 1);
+      void invoke<CheckSnapshot>("daily_check_reconcile")
+        .then((snapshot) => applyCheckSnapshot.current(snapshot))
+        .catch((error) => toast.error(tf("读取检查状态失败：{0}", error)));
       toast.success(tf("已检出并同步 {0}", branchName), { id: tid });
     } catch (e) { toast.error(tf("同步失败：{0}", e), { id: tid }); }
   };
@@ -6739,7 +7016,7 @@ export default function App() {
     let outcomeTitle = tf("已切换到 {0}", branch);
     let outcomePhase = tx("工作区已更新");
     try {
-      if (stash) await stashPush(p, `GitKit: 切换到 ${branch} 前的改动`);
+      if (stash) await stashWithSelectedIdentity(p, `GitKit: 切换到 ${branch} 前的改动`);
       await checkoutBranch(p, branch);
       setProjects((prev) => prev.map((project) => project.id === projectId ? { ...project, branch } : project));
       realCache.current.delete(p);
@@ -7407,12 +7684,14 @@ export default function App() {
                   ) : selectedStash ? (
                     <StashDetail stash={selectedStash} files={selectedStash.files}
                       selectedFile={selectedStashFile} onFileSelect={selectStashFile}
+                      onExpand={openExpandedDiff}
                       repoPath={isReal ? path ?? "" : ""}
                       onApply={() => doStashApply(selectedStash.index)}
                       onDrop={() => doStashDrop(selectedStash.index)} />
                   ) : selectedCommit ? (
                     <CommitDetail commit={selectedCommit} selectedFile={selectedFile}
                       onFileSelect={selectDetailFile}
+                      onExpand={openExpandedDiff}
                       repoPath={isReal ? path ?? "" : ""}
                       onRevealFile={isReal ? revealCommitFile : undefined}
                       onCherryPick={isReal ? () => requestCherryPick(selectedCommit) : undefined}
@@ -7435,10 +7714,22 @@ export default function App() {
           <StatusBar project={activeProject} branch={branches.find((b) => b.current)} changes={changesCount}
             ready={dataReady} errored={errored}
             checkProgress={checkProgress} checkResult={checkSnapshot?.result ?? null}
-            onShowCheckResult={() => { if (!pullBusy && checkSnapshot?.result) showCheckResult(checkSnapshot.result); }}
+            onShowCheckResult={() => { if (!pullBusy && checkSnapshot?.result) void openCheckResult(checkSnapshot.result); }}
             onShowChanges={() => { setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
             onSearch={() => setSearchOpen(true)} />
         </div>
+
+        {diffExpanded && detailOpen && !viewChanges && (
+          selectedStash && selectedStashFile
+            ? <ExpandedDiffDialog files={selectedStash.files} file={selectedStashFile}
+                onFileSelect={selectStashFile} onClose={closeExpandedDiff}
+                repoPath={isReal ? path ?? "" : ""} />
+            : selectedCommit && selectedFile
+              ? <ExpandedDiffDialog files={selectedCommit.files} file={selectedFile}
+                  onFileSelect={selectDetailFile} onClose={closeExpandedDiff}
+                  repoPath={isReal ? path ?? "" : ""} />
+              : null
+        )}
 
         {searchOpen && activeProject && (
           <CommitSearchDialog key={activeProject.id} commits={commits}

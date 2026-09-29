@@ -43,14 +43,6 @@ select:focus-visible,
   outline-offset: 2px;
 }
 
-.gk-search-surface {
-  transition: border-color 140ms ease;
-}
-
-.gk-search-surface:focus-within {
-  border-color: color-mix(in srgb, var(--gk-accent, #4567f2) 68%, transparent) !important;
-}
-
 .gk-search-input-row {
   background: var(--gk-search-input-bg);
   transition: background-color 120ms ease-out;
@@ -116,6 +108,10 @@ select:focus-visible,
 .gk-modal-in   { animation: gk-modal-in 0.18s cubic-bezier(0.32, 0.72, 0, 1); }
 .gk-overlay-out { animation: gk-overlay-out 0.12s ease-in forwards; }
 .gk-modal-out   { animation: gk-modal-out 0.14s cubic-bezier(0.4, 0, 1, 1) forwards; }
+
+.gk-diff-nav-button:not(:disabled):hover {
+  background: var(--gk-diff-nav-hover);
+}
 
 /* Timeline reveal after a project or branch-visibility change: the freshly
    computed history resolves from its skeleton without a hard content swap. */

@@ -77,6 +77,7 @@ pub fn run() {
             git::git_fetch,
             git::git_check_updates,
             git::git_sync_local,
+            daily_check::daily_check_reconcile,
             git::git_pull,
             git::git_push,
             git::git_cancel,

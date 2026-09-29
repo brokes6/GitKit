@@ -94,7 +94,7 @@ impl Credentials {
             })
     }
 }
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Row {
     id: String,
@@ -241,6 +241,59 @@ fn due(config: &Config, now: DateTime<Local>) -> bool {
 #[tauri::command]
 pub fn daily_check_snapshot(state: tauri::State<'_, DailyCheckState>) -> Snapshot {
     state.0.lock().unwrap().snapshot()
+}
+
+/// Recheck saved findings against local refs before presenting them. This never
+/// fetches or moves a branch; another Git operation may have synced them since
+/// the scheduled check wrote its result.
+#[tauri::command]
+pub async fn daily_check_reconcile(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, DailyCheckState>,
+) -> Result<Snapshot, String> {
+    let result = state.0.lock().unwrap().saved.result.clone();
+    let Some(result) = result else {
+        return Ok(state.0.lock().unwrap().snapshot());
+    };
+    let rows = reconcile_rows(result.rows).await;
+    let mut inner = state.0.lock().unwrap();
+    if let Some(saved) = inner
+        .saved
+        .result
+        .as_mut()
+        .filter(|saved| saved.id == result.id)
+    {
+        if saved.rows != rows {
+            saved.rows = rows;
+            inner.save();
+            inner.publish(&app);
+        }
+    }
+    Ok(inner.snapshot())
+}
+
+async fn reconcile_rows(saved: Vec<Row>) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for mut row in saved {
+        // A failed local reread keeps its last findings so a later focus can
+        // retry. An original remote-check error has no findings to reread.
+        if row.error.is_none() || !row.behind.is_empty() {
+            match git::local_updates(row.path.clone()).await {
+                Ok(current) if current.behind.is_empty() => continue,
+                Ok(current) => {
+                    row.behind = current.behind;
+                    row.dirty = current.dirty;
+                    row.current_branch = current.current_branch;
+                    row.error = None;
+                }
+                Err(error) => {
+                    row.error = Some(error);
+                }
+            }
+        }
+        rows.push(row);
+    }
+    rows
 }
 #[tauri::command]
 pub fn daily_check_configure(
@@ -760,5 +813,79 @@ mod tests {
             credentials.token_for("repo", "https://unrelated.example/repo"),
             None
         );
+    }
+
+    #[test]
+    fn saved_update_disappears_after_branch_was_fast_forwarded_elsewhere() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            use std::path::Path;
+            use std::process::Command;
+            fn git(path: &Path, args: &[&str]) -> String {
+                let output = Command::new("git")
+                    .arg("-C")
+                    .arg(path)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8(output.stdout).unwrap().trim().to_string()
+            }
+            let root = std::env::temp_dir().join(format!(
+                "gitkit-check-reconcile-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            git(
+                &root,
+                &["init", "--bare", "--initial-branch=main", "origin"],
+            );
+            git(&root, &["clone", "origin", "seed"]);
+            let seed = root.join("seed");
+            git(&seed, &["config", "user.name", "Test User"]);
+            git(&seed, &["config", "user.email", "test@example.com"]);
+            std::fs::write(seed.join("file.txt"), "one\n").unwrap();
+            git(&seed, &["add", "file.txt"]);
+            git(&seed, &["commit", "-m", "initial"]);
+            git(&seed, &["push", "-u", "origin", "main"]);
+            git(&root, &["clone", "origin", "local"]);
+            let local = root.join("local");
+            std::fs::write(seed.join("file.txt"), "two\n").unwrap();
+            git(&seed, &["commit", "-am", "remote update"]);
+            git(&seed, &["push"]);
+            git(&local, &["fetch", "origin"]);
+
+            let path = local.to_string_lossy().into_owned();
+            let check = git::local_updates(path.clone()).await.unwrap();
+            assert_eq!(check.behind.len(), 1);
+            assert_eq!(check.behind[0].behind, 1);
+            let row = Row {
+                id: "local".into(),
+                name: "Local".into(),
+                path,
+                behind: check.behind,
+                dirty: check.dirty,
+                current_branch: check.current_branch,
+                error: None,
+            };
+            let head = git(&local, &["rev-parse", "HEAD"]);
+            assert!(reconcile_rows(vec![row.clone()]).await == vec![row.clone()]);
+            assert_eq!(git(&local, &["rev-parse", "HEAD"]), head);
+
+            git(&local, &["merge", "--ff-only", "origin/main"]);
+            assert!(reconcile_rows(vec![row]).await.is_empty());
+            std::fs::remove_dir_all(root).unwrap();
+        });
     }
 }

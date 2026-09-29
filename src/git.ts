@@ -523,8 +523,8 @@ export async function checkoutBranch(path: string, branch: string): Promise<void
   await invoke("git_checkout", { path, branch });
 }
 
-export async function stashPush(path: string, message = ""): Promise<void> {
-  await invoke("git_stash_push", { path, message });
+export async function stashPush(path: string, message = "", name?: string, email?: string): Promise<void> {
+  await invoke("git_stash_push", { path, message, name, email });
 }
 
 export interface MergePreview { conflict: boolean; files: string[] }
