@@ -40,6 +40,179 @@ impl Drop for TestRepo {
 }
 
 #[test]
+fn undo_last_unpushed_commit_preserves_worktree_and_unstages_files() {
+    let (repo, _) = force_push_fixture();
+    std::fs::write(repo.0.join("tracked.txt"), "base\n").unwrap();
+    repo.git(&["add", "tracked.txt"]);
+    repo.git(&["commit", "-m", "tracked base"]);
+    repo.git(&["push", "origin", "HEAD:main"]);
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.0.join("first.txt"), "first\n").unwrap();
+    repo.git(&["add", "first.txt"]);
+    repo.git(&["commit", "-m", "first local commit"]);
+    let first = repo.git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.0.join("latest.txt"), "latest\n").unwrap();
+    std::fs::write(repo.0.join("tracked.txt"), "latest tracked\n").unwrap();
+    repo.git(&["add", "latest.txt", "tracked.txt"]);
+    repo.git(&["commit", "-m", "latest local commit"]);
+    std::fs::write(repo.0.join("staged.txt"), "staged\n").unwrap();
+    repo.git(&["add", "staged.txt"]);
+    std::fs::write(repo.0.join("unstaged.txt"), "unstaged\n").unwrap();
+
+    let preview = undo_commit_preview_inner(repo.path()).unwrap();
+    assert_eq!(preview.subject, "latest local commit");
+    undo_last_commit_inner(repo.path(), &preview.branch, &preview.head).unwrap();
+
+    assert_ne!(repo.git(&["rev-parse", "HEAD"]), base);
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), first);
+    assert_eq!(std::fs::read_to_string(repo.0.join("latest.txt")).unwrap(), "latest\n");
+    assert_eq!(std::fs::read_to_string(repo.0.join("tracked.txt")).unwrap(), "latest tracked\n");
+    assert_eq!(std::fs::read_to_string(repo.0.join("staged.txt")).unwrap(), "staged\n");
+    assert_eq!(std::fs::read_to_string(repo.0.join("unstaged.txt")).unwrap(), "unstaged\n");
+    assert!(repo.git(&["diff", "--cached", "--name-only"]).is_empty());
+    assert!(repo.git(&["diff", "--name-only"]).contains("tracked.txt"));
+}
+
+#[test]
+fn undo_commit_refuses_pushed_and_changed_heads() {
+    let (repo, remote) = force_push_fixture();
+    std::fs::write(repo.0.join("local.txt"), "local\n").unwrap();
+    repo.git(&["add", "local.txt"]);
+    repo.git(&["commit", "-m", "local"]);
+    let preview = undo_commit_preview_inner(repo.path()).unwrap();
+    repo.git(&["commit", "--allow-empty", "-m", "later"]);
+    assert!(undo_last_commit_inner(repo.path(), &preview.branch, &preview.head)
+        .unwrap_err().contains("已变化"));
+    repo.git(&["push", "origin", "HEAD:main"]);
+    let pushed = repo.git(&["rev-parse", "HEAD"]);
+    assert!(undo_commit_preview_inner(repo.path()).unwrap_err().contains("没有未推送"));
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), pushed);
+    assert_eq!(run_git(&remote, &["rev-parse", "HEAD"]).unwrap().trim(), pushed);
+}
+
+#[test]
+fn undo_commit_refuses_diverged_branch() {
+    let (repo, _) = force_push_fixture();
+    repo.git(&["commit", "--amend", "--allow-empty", "-m", "rewritten base"]);
+    assert!(undo_commit_preview_inner(repo.path()).unwrap_err().contains("已分叉"));
+}
+
+#[test]
+fn undo_commit_supports_local_branch_without_upstream_but_refuses_known_pushed_head() {
+    let (repo, _) = force_push_fixture();
+    repo.git(&["branch", "--unset-upstream"]);
+    assert!(undo_commit_preview_inner(repo.path()).unwrap_err().contains("远端跟踪分支"));
+    repo.git(&["commit", "--allow-empty", "-m", "local only"]);
+    let preview = undo_commit_preview_inner(repo.path()).unwrap();
+    assert_eq!(preview.subject, "local only");
+    undo_last_commit_inner(repo.path(), &preview.branch, &preview.head).unwrap();
+    assert!(undo_commit_preview_inner(repo.path()).unwrap_err().contains("远端跟踪分支"));
+}
+
+#[test]
+fn undo_initial_commit_leaves_an_unborn_branch_and_keeps_files() {
+    let repo = TestRepo::new();
+    std::fs::write(repo.0.join("initial.txt"), "initial\n").unwrap();
+    repo.git(&["add", "initial.txt"]);
+    repo.git(&["commit", "--amend", "--no-edit"]);
+    std::fs::write(repo.0.join("staged.txt"), "staged\n").unwrap();
+    repo.git(&["add", "staged.txt"]);
+
+    let preview = undo_commit_preview_inner(repo.path()).unwrap();
+    assert!(preview.initial);
+    undo_last_commit_inner(repo.path(), &preview.branch, &preview.head).unwrap();
+
+    assert_eq!(repo.git(&["branch", "--show-current"]), "main");
+    assert!(run_git(repo.path(), &["rev-parse", "--verify", "HEAD"]).is_err());
+    assert_eq!(std::fs::read_to_string(repo.0.join("initial.txt")).unwrap(), "initial\n");
+    assert_eq!(std::fs::read_to_string(repo.0.join("staged.txt")).unwrap(), "staged\n");
+    assert!(repo.git(&["ls-files"]).is_empty());
+}
+
+fn force_push_fixture() -> (TestRepo, String) {
+    let repo = TestRepo::new();
+    let remote = repo.0.join("remote.git");
+    let remote = remote.to_str().unwrap().to_string();
+    repo.git(&["init", "--bare", "--initial-branch=main", &remote]);
+    repo.git(&["remote", "add", "origin", &remote]);
+    repo.git(&["push", "-u", "origin", "main"]);
+    repo.git(&["branch", "-m", "local"]);
+    repo.git(&["config", "push.default", "upstream"]);
+    (repo, remote)
+}
+
+#[test]
+fn force_push_previews_rewritten_history_and_backs_up_old_remote_tip() {
+    let (repo, remote) = force_push_fixture();
+    let old_head = repo.git(&["rev-parse", "HEAD"]);
+    repo.git(&["-c", "user.name=Rewritten Author", "commit", "--amend", "--allow-empty", "--no-edit", "--reset-author"]);
+    let new_head = repo.git(&["rev-parse", "HEAD"]);
+    assert_ne!(old_head, new_head);
+
+    let preview = force_push_preview_inner(repo.path(), None).unwrap();
+    assert_eq!(preview.remote, "origin");
+    assert_eq!(preview.branch, "local");
+    assert_eq!(preview.remote_branch, "main");
+    assert_eq!(preview.local_head, new_head);
+    assert_eq!(preview.remote_head, old_head);
+    assert_eq!((preview.ahead, preview.behind), (1, 1));
+    assert!(preview.same_tree);
+
+    let backup = force_push_inner(
+        repo.path(), None, &preview.remote, &preview.branch, &preview.remote_branch,
+        &preview.local_head, &preview.remote_head,
+    ).unwrap();
+    assert_eq!(run_git(&remote, &["rev-parse", "refs/heads/main"]).unwrap().trim(), new_head);
+    assert_eq!(repo.git(&["rev-parse", &backup]), old_head);
+}
+
+#[test]
+fn force_push_rejects_a_remote_update_after_preview() {
+    let (repo, remote) = force_push_fixture();
+    repo.git(&["-c", "user.name=Rewritten Author", "commit", "--amend", "--allow-empty", "--no-edit", "--reset-author"]);
+    let preview = force_push_preview_inner(repo.path(), None).unwrap();
+
+    let other = repo.0.join("other-checkout");
+    let other = other.to_str().unwrap().to_string();
+    repo.git(&["clone", &remote, &other]);
+    run_git(&other, &["config", "user.name", "Other Author"]).unwrap();
+    run_git(&other, &["config", "user.email", "other@example.invalid"]).unwrap();
+    run_git(&other, &["commit", "--allow-empty", "-m", "new remote commit"]).unwrap();
+    let advanced = run_git(&other, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    run_git(&other, &["push", "origin", "main"]).unwrap();
+
+    let result = force_push_inner(
+        repo.path(), None, &preview.remote, &preview.branch, &preview.remote_branch,
+        &preview.local_head, &preview.remote_head,
+    );
+    assert!(result.is_err());
+    assert_eq!(run_git(&remote, &["rev-parse", "refs/heads/main"]).unwrap().trim(), advanced);
+}
+
+#[test]
+fn force_push_rejects_a_local_commit_after_preview() {
+    let (repo, remote) = force_push_fixture();
+    repo.git(&["-c", "user.name=Rewritten Author", "commit", "--amend", "--allow-empty", "--no-edit", "--reset-author"]);
+    let preview = force_push_preview_inner(repo.path(), None).unwrap();
+    repo.git(&["commit", "--allow-empty", "-m", "new local commit"]);
+
+    let result = force_push_inner(
+        repo.path(), None, &preview.remote, &preview.branch, &preview.remote_branch,
+        &preview.local_head, &preview.remote_head,
+    );
+    assert!(result.unwrap_err().contains("本地分支已有新提交"));
+    assert_eq!(run_git(&remote, &["rev-parse", "refs/heads/main"]).unwrap().trim(), preview.remote_head);
+}
+
+#[test]
+fn force_push_refuses_different_fetch_and_push_urls() {
+    let (repo, remote) = force_push_fixture();
+    let other = format!("{remote}-other");
+    repo.git(&["remote", "set-url", "--push", "origin", &other]);
+    assert!(force_push_target(repo.path()).unwrap_err().contains("获取与推送地址不同"));
+}
+
+#[test]
 fn cancellable_sync_preserves_dirty_diverged_and_linked_branches() {
     let repo = TestRepo::new();
     let base = repo.git(&["rev-parse", "HEAD"]);

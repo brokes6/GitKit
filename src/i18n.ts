@@ -1,8 +1,20 @@
-import catalog from "./i18n-catalog.json";
+import catalog from "./i18n-catalog.json" with { type: "json" };
+import nativeTranslations from "./i18n-native.json" with { type: "json" };
 
 export type Language = "zh-CN" | "en";
 
 const EN: Record<string, string> = {
+  ...nativeTranslations,
+  "https://github.com/user/repo.git 或 git@github.com:user/repo.git": "https://github.com/user/repo.git or git@github.com:user/repo.git",
+  "将 {0} 遴选到 {1} 会在 {2} 个文件产生冲突：": "Cherry-picking {0} onto {1} will cause conflicts in {2} files:",
+  "仍可创建{0}，冲突需在合并时解决。": "You can still create the {0}. Resolve the conflicts when merging.",
+  "{0} 个项目有更新，共 {1} 个提交": "{0} projects have updates, totaling {1} commits",
+  "。拉取只做快进，不会产生合并提交。": ". Pulls only fast-forward branches and do not create merge commits.",
+  "已将 {0} 组相同变更合并展示，不会修改 Git 历史": "Showing {0} groups of identical changes together. Git history is unchanged.",
+  "与 {0} 完全一致": "Identical to {0}",
+  "GitKit: 新建分支 {0} 前的改动": "GitKit: changes before creating branch {0}",
+  "GitKit: 切换到 {0} 前的改动": "GitKit: changes before switching to {0}",
+  "未归属": "Unassigned",
   "账户": "Accounts",
   "工作区": "Workspace",
   "偏好": "Preferences",
@@ -105,6 +117,43 @@ const EN: Record<string, string> = {
   "获取": "Fetch",
   "拉取": "Pull",
   "推送": "Push",
+  "撤回": "Undo",
+  "撤回最近一次未推送提交到工作区": "Undo the latest unpushed commit to the working tree",
+  "当前分支没有可撤回的未推送提交": "No unpushed commit is available to undo on this branch",
+  "撤回最近一次提交": "Undo latest commit",
+  "即将撤回 {0}：{1}": "Undo {0}: {1}",
+  "提交记录将被移除，文件改动保留在工作区并取消暂存。": "The commit will be removed. File changes will remain in the working tree and become unstaged.",
+  "这是初始提交，撤回后当前分支将暂时没有提交。": "This is the initial commit. The branch will have no commits after undoing it.",
+  "撤回到工作区": "Undo to working tree",
+  "正在撤回提交…": "Undoing commit…",
+  "提交已撤回，改动已回到工作区": "Commit undone; changes are back in the working tree",
+  "撤回提交失败：{0}": "Could not undo commit: {0}",
+  "仓库已切换或正在执行其他 Git 操作，请重新检查": "The repository changed or another Git operation is running. Check again.",
+  "强制推送": "Force push",
+  "强制推送…": "Force push…",
+  "确认强制推送": "Confirm force push",
+  "强制推送会改写远端分支历史。请核对目标和远端独有提交后再继续。": "Force pushing rewrites the remote branch history. Review the target and remote-only commits before continuing.",
+  "正在检查远端分支…": "Checking the remote branch…",
+  "当前分支已变化，请重新发起强制推送。": "The current branch changed. Start force push again.",
+  "推送目标": "Push target",
+  "远端仓库": "Remote repository",
+  "本地提交": "Local commit",
+  "远端提交": "Remote commit",
+  "本地独有 {0} 个提交": "{0} local-only commits",
+  "远端独有 {0} 个提交": "{0} remote-only commits",
+  "两端文件内容相同，但提交历史不同。": "The file contents match, but the commit histories differ.",
+  "远端独有提交可能从该分支历史中消失，请先核对这些改动。": "Remote-only commits may disappear from this branch history. Review them first.",
+  "远端独有提交（最多显示 5 条）": "Remote-only commits (up to 5 shown)",
+  "本地没有独有提交，不能用强制推送回退远端。": "There are no local-only commits. Force push cannot be used to roll back the remote here.",
+  "远端没有独有提交，请使用普通推送。": "There are no remote-only commits. Use a normal push.",
+  "输入分支名 {0} 以确认": "Enter the branch name {0} to confirm",
+  "确认分支名": "Confirm branch name",
+  "没有配置远程仓库，无法强制推送。": "No remote is configured; force push is unavailable.",
+  "找不到当前分支的推送远端。": "The push remote for the current branch could not be found.",
+  "正在强制推送…": "Force pushing…",
+  "旧远端提交已备份到本地：{0}": "The previous remote commit was backed up locally: {0}",
+  "强制推送完成": "Force push complete",
+  "强制推送失败": "Force push failed",
   "获取（Fetch）": "Fetch",
   "拉取（Pull）": "Pull",
   "推送（Push）": "Push",
@@ -713,6 +762,24 @@ const EN: Record<string, string> = {
   "已隐藏 (": "Hidden (",
 };
 
+// Match only messages authored by GitKit. Captured paths, names and Git output
+// remain untouched; specific patterns precede generic error wrappers.
+const nativePatterns = Object.entries(nativeTranslations)
+  .filter(([source]) => /\{\d+\}/.test(source))
+  .sort(([a], [b]) => b.replace(/\{\d+\}/g, "").length - a.replace(/\{\d+\}/g, "").length)
+  .map(([source, translation]) => {
+    const indexes: number[] = [];
+    const parts = source.split(/(\{\d+\})/g).map((part) => {
+      const placeholder = /^\{(\d+)\}$/.exec(part);
+      if (placeholder) {
+        indexes.push(Number(placeholder[1]));
+        return "([\\s\\S]*?)";
+      }
+      return part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    });
+    return { source, translation, indexes, regex: new RegExp(`^${parts.join("")}$`) };
+  });
+
 let currentLanguage: Language = getLanguage();
 
 export function getCurrentLanguage(): Language {
@@ -738,6 +805,24 @@ export function tx(source: string): string {
   if (days) return `${days[1]} days remaining`;
   const hours = /^剩余 (\d+) 小时$/.exec(source);
   if (hours) return `${hours[1]} hours remaining`;
+  return source;
+}
+
+export function translateNativeMessage(source: string): string {
+  if (currentLanguage !== "en") return source;
+  const exact = (nativeTranslations as Record<string, string>)[source];
+  if (exact) return exact;
+  for (const pattern of nativePatterns) {
+    const match = pattern.regex.exec(source);
+    if (!match) continue;
+    const values: string[] = [];
+    const nested = pattern.source === "{0}；恢复分支失败：{1}" || pattern.source === "任务失败：{0}";
+    pattern.indexes.forEach((index, capture) => {
+      const value = match[capture + 1];
+      values[index] = nested ? translateNativeMessage(value) : value;
+    });
+    return pattern.translation.replace(/\{(\d+)\}/g, (_, index: string) => values[Number(index)]);
+  }
   return source;
 }
 

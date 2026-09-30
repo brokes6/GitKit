@@ -1370,6 +1370,94 @@ pub async fn git_commit(
     .await
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoCommitPreview {
+    pub branch: String,
+    pub head: String,
+    pub subject: String,
+    pub initial: bool,
+}
+
+fn undo_commit_preview_inner(path: &str) -> Result<UndoCommitPreview, String> {
+    let branch = run_git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .map_err(|_| "当前处于分离 HEAD 状态，无法撤回提交".to_string())?
+        .trim().to_string();
+    match run_git(path, &["rev-parse", "--symbolic-full-name", "@{upstream}"]) {
+        Ok(upstream) => {
+            if !upstream.trim().starts_with("refs/remotes/") {
+                return Err("当前分支的上游不是远端分支，无法确认提交是否已推送".into());
+            }
+            if run_git(path, &["merge-base", "--is-ancestor", "@{upstream}", "HEAD"]).is_err() {
+                return Err("当前分支与上游已分叉，无法安全撤回提交".into());
+            }
+            let ahead = run_git(path, &["rev-list", "--count", "@{upstream}..HEAD"])?;
+            if ahead.trim() == "0" {
+                return Err("当前分支没有未推送的提交".into());
+            }
+        }
+        Err(_) => {
+            // An untracked local branch can still have unpublished commits.
+            // A configured but unresolved upstream is ambiguous, so reject it.
+            if run_git(path, &["config", "--get", &format!("branch.{branch}.merge")]).is_ok() {
+                return Err("当前分支的上游引用不可用，无法确认提交是否已推送".into());
+            }
+        }
+    }
+    let published = run_git(path, &["for-each-ref", "--format=%(refname)", "--contains=HEAD", "refs/remotes"])?;
+    if !published.trim().is_empty() {
+        return Err("最新提交已存在于远端跟踪分支，无法撤回".into());
+    }
+    let initial = run_git(path, &["rev-parse", "HEAD^"]).is_err();
+    for state in ["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"] {
+        let git_path = run_git(path, &["rev-parse", "--git-path", state])?;
+        let git_path = std::path::Path::new(git_path.trim());
+        let git_path = if git_path.is_absolute() { git_path.to_path_buf() } else { std::path::Path::new(path).join(git_path) };
+        if git_path.exists() {
+            return Err("请先完成当前的合并、遴选或变基，再撤回提交".into());
+        }
+    }
+    Ok(UndoCommitPreview {
+        branch,
+        head: run_git(path, &["rev-parse", "HEAD"])?.trim().to_string(),
+        subject: run_git(path, &["log", "-1", "--format=%s"])?.trim().to_string(),
+        initial,
+    })
+}
+
+#[tauri::command]
+pub async fn git_undo_commit_preview(path: String) -> Result<UndoCommitPreview, String> {
+    run_blocking(move || undo_commit_preview_inner(&path)).await
+}
+
+fn undo_last_commit_inner(path: &str, expected_branch: &str, expected_head: &str) -> Result<(), String> {
+    let preview = undo_commit_preview_inner(path)?;
+    if preview.branch != expected_branch || preview.head != expected_head {
+        return Err("当前分支或最新提交已变化，请重新检查后再撤回".into());
+    }
+    if preview.initial {
+        // The first commit has no parent for `git reset`. Make the branch unborn,
+        // then empty the index; neither step touches files in the worktree.
+        let branch_ref = format!("refs/heads/{}", preview.branch);
+        run_git(path, &["update-ref", "-d", &branch_ref, &preview.head])?;
+        if let Err(error) = run_git(path, &["read-tree", "--empty"]) {
+            let restore = run_git(path, &["update-ref", &branch_ref, &preview.head]);
+            return Err(match restore {
+                Ok(_) => error,
+                Err(restore_error) => format!("{error}；恢复分支失败：{restore_error}"),
+            });
+        }
+    } else {
+        run_git(path, &["reset", "--mixed", "HEAD^"])?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn git_undo_last_commit(path: String, expected_branch: String, expected_head: String) -> Result<(), String> {
+    run_blocking(move || undo_last_commit_inner(&path, &expected_branch, &expected_head)).await
+}
+
 // Every git op shells out to `git`, which blocks. Tauri runs synchronous `#[command]`
 // fns ON THE MAIN THREAD, so a sync command that calls git freezes the whole UI for
 // the duration (≈1s on a first, uncached repo load). Running the work through this
@@ -1723,6 +1811,151 @@ pub async fn git_push(path: String, token: Option<String>) -> Result<(), String>
         }
     })
     .await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForcePushPreview {
+    pub remote: String,
+    pub remote_url: Option<String>,
+    pub branch: String,
+    pub remote_branch: String,
+    pub local_head: String,
+    pub remote_head: String,
+    pub ahead: usize,
+    pub behind: usize,
+    pub same_tree: bool,
+    pub remote_commits: Vec<String>,
+}
+
+fn force_push_target(path: &str) -> Result<(String, String, String), String> {
+    let branch = run_git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .map_err(|_| "当前处于分离 HEAD 状态，无法强制推送".to_string())?
+        .trim()
+        .to_string();
+    let remote = run_git(path, &["config", "--get", &format!("branch.{branch}.remote")])
+        .map_err(|_| "当前分支没有上游远端，无法强制推送".to_string())?
+        .trim()
+        .to_string();
+    let remote_ref = run_git(path, &["config", "--get", &format!("branch.{branch}.merge")])
+        .map_err(|_| "当前分支没有上游分支，无法强制推送".to_string())?
+        .trim()
+        .to_string();
+    if remote == "." || !remote_ref.starts_with("refs/heads/") || remote_ref == "refs/heads/" {
+        return Err("仅支持推送到已配置的远端分支".into());
+    }
+    // The ordinary push may use a distinct push remote. Never preview one ref
+    // and silently force-update another.
+    let push_ref = run_git(path, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}"])
+        .map_err(|_| "无法确认普通推送的目标分支，请检查 push.default 和上游配置".to_string())?;
+    let expected_push_ref = format!("{remote}/{}", remote_ref.trim_start_matches("refs/heads/"));
+    if push_ref.trim() != expected_push_ref {
+        return Err("普通推送目标与上游分支不一致，无法安全地强制推送".into());
+    }
+    let fetch_urls = run_git(path, &["remote", "get-url", "--all", &remote])?;
+    let push_urls = run_git(path, &["remote", "get-url", "--push", "--all", &remote])?;
+    if fetch_urls.lines().count() != 1 || push_urls.lines().count() != 1
+        || fetch_urls.trim() != push_urls.trim() {
+        return Err("获取与推送地址不同，无法确认强制推送的远端状态".into());
+    }
+    Ok((remote, branch, remote_ref))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForcePushTarget {
+    pub remote: String,
+    pub branch: String,
+}
+
+#[tauri::command]
+pub async fn git_force_push_target(path: String) -> Result<ForcePushTarget, String> {
+    run_blocking(move || {
+        let (remote, branch, _) = force_push_target(&path)?;
+        Ok(ForcePushTarget { remote, branch })
+    }).await
+}
+
+fn force_push_preview_inner(path: &str, token: Option<&str>) -> Result<ForcePushPreview, String> {
+    let (remote, branch, remote_ref) = force_push_target(path)?;
+    let remote_url = run_git(path, &["remote", "get-url", "--push", &remote])
+        .ok().and_then(|url| remote_web_url(&url));
+    let remote_branch = remote_ref.trim_start_matches("refs/heads/");
+    let tracking_ref = format!("refs/remotes/{remote}/{remote_branch}");
+    let refspec = format!("+{remote_ref}:{tracking_ref}");
+    // Fetch only this remote-tracking ref. git_fetch also syncs local branches,
+    // which would make a force-push confirmation change the working repository.
+    run_git_auth(path, &["fetch", "--no-tags", &remote, &refspec], token)?;
+    let local_head = run_git(path, &["rev-parse", "HEAD"])?.trim().to_string();
+    let remote_head = run_git(path, &["rev-parse", &tracking_ref])?.trim().to_string();
+    let counts = run_git(path, &["rev-list", "--left-right", "--count", &format!("{local_head}...{remote_head}")])?;
+    let mut counts = counts.split_whitespace();
+    let ahead = counts.next().and_then(|s| s.parse().ok()).ok_or("无法读取本地独有提交数")?;
+    let behind = counts.next().and_then(|s| s.parse().ok()).ok_or("无法读取远端独有提交数")?;
+    let local_tree = run_git(path, &["rev-parse", &format!("{local_head}^{{tree}}")])?;
+    let remote_tree = run_git(path, &["rev-parse", &format!("{remote_head}^{{tree}}")])?;
+    let remote_commits = run_git(path, &[
+        "log", "--format=%h %s", "--max-count=5", &remote_head, "--not", &local_head,
+    ])?.lines().map(str::to_string).collect();
+    Ok(ForcePushPreview {
+        remote, remote_url, branch, remote_branch: remote_branch.to_string(), local_head, remote_head, ahead, behind,
+        same_tree: local_tree.trim() == remote_tree.trim(), remote_commits,
+    })
+}
+
+#[tauri::command]
+pub async fn git_force_push_preview(path: String, token: Option<String>) -> Result<ForcePushPreview, String> {
+    run_blocking(move || force_push_preview_inner(&path, token.as_deref())).await
+}
+
+fn force_push_inner(
+    path: &str, token: Option<&str>, expected_remote: &str, expected_branch: &str,
+    expected_remote_branch: &str,
+    expected_local_head: &str, expected_remote_head: &str,
+) -> Result<String, String> {
+    let (remote, branch, remote_ref) = force_push_target(path)?;
+    if remote != expected_remote || branch != expected_branch
+        || remote_ref != format!("refs/heads/{expected_remote_branch}") {
+        return Err("推送目标已变化，请重新检查远端状态".into());
+    }
+    let local_head = run_git(path, &["rev-parse", "HEAD"])?;
+    if local_head.trim() != expected_local_head {
+        return Err("本地分支已有新提交，请重新检查后再推送".into());
+    }
+    if !matches!(expected_remote_head.len(), 40 | 64)
+        || !expected_remote_head.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return Err("远端提交标识无效，请重新检查".into());
+    }
+    run_git(path, &["cat-file", "-e", &format!("{expected_remote_head}^{{commit}}")])?;
+    let counts = run_git(path, &["rev-list", "--left-right", "--count", &format!("{expected_local_head}...{expected_remote_head}")])?;
+    let mut counts = counts.split_whitespace();
+    let ahead = counts.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+    let behind = counts.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+    if ahead == 0 || behind == 0 {
+        return Err("当前分支不需要强制推送，请重新检查远端状态".into());
+    }
+    // Preserve the old remote tip before any history rewrite, even if the push
+    // subsequently fails. The ref keeps it reachable for recovery.
+    let backup_ref = format!("refs/gitkit/force-push-backups/{expected_remote_head}");
+    run_git(path, &["update-ref", &backup_ref, expected_remote_head])?;
+    let lease = format!("--force-with-lease={remote_ref}:{expected_remote_head}");
+    let target = format!("{expected_local_head}:{remote_ref}");
+    run_git_auth(path, &["push", "--no-follow-tags", &lease, &remote, &target], token)?;
+    Ok(backup_ref)
+}
+
+#[tauri::command]
+pub async fn git_force_push(
+    path: String, token: Option<String>, expected_remote: String, expected_branch: String,
+    expected_remote_branch: String,
+    expected_local_head: String, expected_remote_head: String,
+) -> Result<String, String> {
+    run_blocking(move || force_push_inner(
+        &path, token.as_deref(), &expected_remote, &expected_branch,
+        &expected_remote_branch,
+        &expected_local_head, &expected_remote_head,
+    )).await
 }
 
 /// Create a branch `name` from `base`. When `checkout` is true, switch to it

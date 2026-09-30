@@ -1,7 +1,9 @@
 // GitKit — frontend Git API. Wraps the Rust `invoke` commands and maps their
 // output into the shapes the existing UI components already consume.
 
-import { invoke, Channel } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, Channel } from "@tauri-apps/api/core";
+import type { InvokeArgs, InvokeOptions } from "@tauri-apps/api/core";
+import { translateNativeMessage } from "./i18n.ts";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type {
   Branch,
@@ -11,6 +13,15 @@ import type {
   Remote,
   WorkingFile,
 } from "./App";
+
+/** Keep native errors local to the active UI language without changing payloads. */
+export async function invoke<T>(command: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+  try {
+    return await tauriInvoke<T>(command, args, options);
+  } catch (error) {
+    throw typeof error === "string" ? translateNativeMessage(error) : error;
+  }
+}
 
 // ── Rust-facing types ──────────────────────────────────────────────────────
 export interface RepoInfo {
@@ -624,6 +635,21 @@ export async function commit(
   await invoke("git_commit", { path, message, files, name: name ?? null, email: email ?? null });
 }
 
+export interface UndoCommitPreview {
+  branch: string;
+  head: string;
+  subject: string;
+  initial: boolean;
+}
+
+export async function undoCommitPreview(path: string): Promise<UndoCommitPreview> {
+  return invoke<UndoCommitPreview>("git_undo_commit_preview", { path });
+}
+
+export async function undoLastCommit(path: string, preview: UndoCommitPreview): Promise<void> {
+  await invoke("git_undo_last_commit", { path, expectedBranch: preview.branch, expectedHead: preview.head });
+}
+
 /**
  * What a fetch synced. Local branches strictly behind their upstream are
  * fast-forwarded; diverged ones are reported instead of touched, and the
@@ -707,6 +733,35 @@ export function isCancelled(err: unknown): boolean {
 
 export async function push(path: string, token?: string): Promise<void> {
   await invoke("git_push", { path, token: token ?? null });
+}
+
+export interface ForcePushPreview {
+  remote: string;
+  remoteUrl: string | null;
+  branch: string;
+  remoteBranch: string;
+  localHead: string;
+  remoteHead: string;
+  ahead: number;
+  behind: number;
+  sameTree: boolean;
+  remoteCommits: string[];
+}
+
+export async function forcePushTarget(path: string): Promise<{ remote: string; branch: string }> {
+  return await invoke("git_force_push_target", { path });
+}
+
+export async function forcePushPreview(path: string, token?: string): Promise<ForcePushPreview> {
+  return await invoke<ForcePushPreview>("git_force_push_preview", { path, token: token ?? null });
+}
+
+export async function forcePush(path: string, preview: ForcePushPreview, token?: string): Promise<string> {
+  return await invoke<string>("git_force_push", {
+    path, token: token ?? null, expectedRemote: preview.remote, expectedBranch: preview.branch,
+    expectedRemoteBranch: preview.remoteBranch,
+    expectedLocalHead: preview.localHead, expectedRemoteHead: preview.remoteHead,
+  });
 }
 
 /** A repository created on GitHub, with the URLs needed to wire it up locally. */

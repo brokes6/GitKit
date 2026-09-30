@@ -1,11 +1,11 @@
-import { tf, tx, getLanguage, getCurrentLanguage, setCurrentLanguage, languageProgress } from "./i18n";
+import { tf, tx, translateNativeMessage, getLanguage, getCurrentLanguage, setCurrentLanguage, languageProgress } from "./i18n";
 import type { Language } from "./i18n";
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useDeferredValue, startTransition, useTransition, createContext, useContext, memo } from "react";
 import { createPortal } from "react-dom";
 import { Toaster, toast } from "sonner";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import { GITLAB_CAPABILITIES, tokenCapability, tokenExpiry } from "./gitlabToken";
 import type { GitlabTokenInfo } from "./gitlabToken";
 import { GITHUB_CAPABILITIES, GITHUB_TOKEN_KINDS, githubCapability, githubTokenExpiry, validGithubUrl } from "./githubToken";
@@ -22,17 +22,17 @@ import {
   CircleDot, ArrowDown, ArrowUp, ExternalLink, Maximize2,
 } from "lucide-react";
 import {
-  pickRepoFolder, openRepo, loadBranches, loadRemotes, loadHistory,
+  invoke, pickRepoFolder, openRepo, loadBranches, loadRemotes, loadHistory,
   loadStatus, loadStatusPaths, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
   attributeBranches, filterHistoryByHiddenBranches, historyBranchContext, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
-  createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, fetchAll, pull, push, gitlabTest, gitlabTokenInfo, githubTokenInfo,
+  createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, undoCommitPreview, undoLastCommit, fetchAll, pull, push, forcePushTarget, forcePushPreview, forcePush, gitlabTest, gitlabTokenInfo, githubTokenInfo,
   createPullRequest, branchColor, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
   cancelGitOp, isCancelled, syncLocal, revealInFileManager, openRepositoryRemote,
   authorColor, authorInitials,
 } from "./git";
-import type { DepInfo, Tag, RepoInfo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged } from "./git";
+import type { DepInfo, Tag, RepoInfo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged, ForcePushPreview } from "./git";
 import { buildSmartMergeCommits, commitBranchName, commitHistoryDate, orderedEquivalentCommits } from "./smartMerge";
 import { highlightDiffRows } from "./diffSyntax";
 import type { DiffSyntaxToken, DiffSyntaxPalette } from "./diffSyntax";
@@ -885,10 +885,10 @@ function ProjectSidebar({ projects, activeId, open, onSelect, onClose, onContext
 
 // ─── ActionBar ────────────────────────────────────────────────────────────────
 
-function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBranch, onFetch, onPull, onPush,
+function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBranch, onFetch, onPull, onPush, onUndoCommit, onForcePush,
   onCreateTag, onCherryPick, onStash, onCreatePR, pushCount = 0, busy }: {
   project?: Project; branch: string; sidebarOpen: boolean; onToggleSidebar: () => void;
-  onCreateBranch?: () => void; onFetch?: () => void; onPull?: () => void; onPush?: () => void;
+  onCreateBranch?: () => void; onFetch?: () => void; onPull?: () => void; onPush?: () => void; onUndoCommit?: () => void; onForcePush?: () => void;
   onCreateTag?: () => void; onCherryPick?: () => void; onStash?: () => void; onCreatePR?: () => void;
   pushCount?: number; busy?: null | GitOperationKind | "other";
 }) {
@@ -920,6 +920,7 @@ function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBran
     { label: tx("储藏"), Icon: Layers, action: onStash },
     { label: tx("创建 Tag 并推送"), Icon: TagIcon, action: onCreateTag },
     { label: tx("创建合并请求"), Icon: GitPullRequest, action: onCreatePR },
+    { label: tx("强制推送…"), Icon: AlertTriangle, action: onForcePush },
   ];
   return (
     <div className="gk-action-bar flex items-center gap-1.5 px-3 flex-shrink-0 select-none"
@@ -954,6 +955,14 @@ function ActionBar({ project, branch, sidebarOpen, onToggleSidebar, onCreateBran
           </button>
         );
       })}
+      <button onClick={onUndoCommit} disabled={!onUndoCommit || !!busy}
+        className="gk-shell-button gk-git-action flex items-center justify-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
+        title={onUndoCommit ? tx("撤回最近一次未推送提交到工作区") : tx("当前分支没有可撤回的未推送提交")}
+        style={{ borderRadius: R - 3, "--gk-action-accent": t.accentFg,
+          "--gk-action-active-bg": t.accentBg } as React.CSSProperties}>
+        <RotateCcw size={15} aria-hidden="true" className="gk-git-action-icon" />
+        {tx("撤回")}
+      </button>
       <div className="flex-1" />
       <button onClick={onCreateBranch} disabled={!onCreateBranch || !!busy}
         className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
@@ -1015,10 +1024,10 @@ function OperationCapsule({ kind, title, context, progress, outcome, settledPhas
   const actionVisible = cancellable || errorAction;
   const pct = progress?.percent;
   const summaryPct = outcome === "success" ? 100 : pct;
-  const phase = cancelling
+  const phase = translateNativeMessage(cancelling
     ? tx("正在取消…")
     : settledPhase ?? progress?.phase
-      ?? (kind === "push" ? tx("正在等待远程响应…") : kind === "other" ? tx("正在更新工作区…") : tx("正在连接远程…"));
+      ?? (kind === "push" ? tx("正在等待远程响应…") : kind === "other" ? tx("正在更新工作区…") : tx("正在连接远程…")));
   const statusColor = outcome === "success" ? t.green : outcome === "error" ? t.red
     : outcome === "cancelled" ? t.textMuted : t.accent;
   const StatusIcon = running ? RefreshCw : outcome === "success" ? Check : outcome === "error" ? AlertTriangle : X;
@@ -3313,6 +3322,114 @@ function ModalFooter({ onCancel, onConfirm, confirmLabel, disabled, busy, danger
   );
 }
 
+interface ForcePushRequest {
+  path: string;
+  project: string;
+  branch: string;
+  token?: string;
+}
+
+function ForcePushDialog({ request, onCancel, onConfirm }: {
+  request: ForcePushRequest;
+  onCancel: () => void;
+  onConfirm: (preview: ForcePushPreview) => Promise<void>;
+}) {
+  const t = useTheme();
+  const [preview, setPreview] = useState<ForcePushPreview | null>(null);
+  const [error, setError] = useState("");
+  const [typedBranch, setTypedBranch] = useState("");
+  const [checking, setChecking] = useState(true);
+  const [pushing, setPushing] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setChecking(true);
+    setError("");
+    setPreview(null);
+    setTypedBranch("");
+    forcePushPreview(request.path, request.token).then((result) => {
+      if (!cancelled) {
+        if (result.branch !== request.branch) setError(tx("当前分支已变化，请重新发起强制推送。"));
+        else setPreview(result);
+        setChecking(false);
+      }
+    }).catch((e) => {
+      if (!cancelled) { setError(String(e)); setChecking(false); }
+    });
+    return () => { cancelled = true; };
+  }, [request.path, request.token, retry]);
+  useEffect(() => { if (preview) inputRef.current?.focus(); }, [preview]);
+  const canPush = !!preview && preview.ahead > 0 && preview.behind > 0 && typedBranch.trim() === preview.remoteBranch;
+  const submit = async () => {
+    if (!preview || !canPush || pushing) return;
+    setPushing(true);
+    setError("");
+    try {
+      await onConfirm(preview);
+    } catch (e) {
+      setPreview(null); // A failed lease requires a fresh remote check.
+      setError(String(e));
+    } finally {
+      setPushing(false);
+    }
+  };
+  const close = () => { if (!pushing) onCancel(); };
+  return (
+    <Modal title={tx("强制推送")} Icon={AlertTriangle} onClose={close} width={520}
+      footer={<ModalFooter onCancel={close} onConfirm={submit} confirmLabel={tx("确认强制推送")}
+        disabled={!canPush} busy={pushing} danger />}>
+      <div className="text-xs leading-relaxed" style={{ color: t.textSec }}>
+        {tx("强制推送会改写远端分支历史。请核对目标和远端独有提交后再继续。")}
+      </div>
+      <div className="text-xs rounded-lg px-3 py-2.5 space-y-1" style={{ background: t.inputBg, color: t.textSec }}>
+        <div>{tx("项目")}：<span style={{ color: t.text }}>{request.project}</span></div>
+        <div>{tx("当前分支")}：<span style={{ color: t.text }}>{preview?.branch ?? request.branch}</span></div>
+      </div>
+      {checking && <div role="status" className="flex items-center gap-2 text-xs" style={{ color: t.textSec }}>
+        <RefreshCw size={13} className="animate-spin" />{tx("正在检查远端分支…")}
+      </div>}
+      {error && <div role="alert" className="text-xs leading-relaxed space-y-2" style={{ color: t.red }}>
+        <div className="whitespace-pre-wrap break-words">{translateNativeMessage(error)}</div>
+        <button type="button" onClick={() => setRetry((n) => n + 1)} disabled={checking || pushing}
+          className="cursor-pointer font-medium underline underline-offset-2">{tx("重新检查")}</button>
+      </div>}
+      {preview && <>
+        <div className="space-y-2 text-xs">
+          <div style={{ color: t.textSec }}>{tx("推送目标")}</div>
+          <div className="font-semibold break-all" style={{ color: t.text }}>{preview.remote}/{preview.remoteBranch}</div>
+          {preview.remoteUrl && <div className="break-all" style={{ color: t.textSec }}>{tx("远端仓库")}：{preview.remoteUrl}</div>}
+          <div className="grid grid-cols-2 gap-2 tabular-nums" style={{ color: t.textSec }}>
+            <div>{tx("本地提交")} <code style={{ color: t.text }}>{preview.localHead.slice(0, 10)}</code></div>
+            <div>{tx("远端提交")} <code style={{ color: t.text }}>{preview.remoteHead.slice(0, 10)}</code></div>
+            <div>{tf("本地独有 {0} 个提交", preview.ahead)}</div>
+            <div>{tf("远端独有 {0} 个提交", preview.behind)}</div>
+          </div>
+        </div>
+        <div className="rounded-lg px-3 py-2.5 text-xs leading-relaxed" style={{ background: preview.sameTree ? t.greenBg : t.redBg, color: t.text }}>
+          {preview.sameTree ? tx("两端文件内容相同，但提交历史不同。")
+            : tx("远端独有提交可能从该分支历史中消失，请先核对这些改动。")}
+        </div>
+        {preview.remoteCommits.length > 0 && <div className="space-y-1.5 text-xs">
+          <div style={{ color: t.textSec }}>{tx("远端独有提交（最多显示 5 条）")}</div>
+          <div className="max-h-28 overflow-y-auto space-y-1 rounded-lg px-3 py-2" style={{ background: t.inputBg, color: t.textSec }}>
+            {preview.remoteCommits.map((commit, index) => <div key={index} className="break-words">{commit}</div>)}
+          </div>
+        </div>}
+        {preview.ahead === 0 || preview.behind === 0 ? <div className="text-xs" style={{ color: t.textSec }}>
+          {preview.ahead === 0 ? tx("本地没有独有提交，不能用强制推送回退远端。") : tx("远端没有独有提交，请使用普通推送。")}
+        </div> : <label className="space-y-1.5 text-xs" style={{ color: t.textSec }}>
+          <span>{tf("输入分支名 {0} 以确认", preview.remoteBranch)}</span>
+          <input ref={inputRef} value={typedBranch} onChange={(e) => setTypedBranch(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); void submit(); } }}
+            autoComplete="off" spellCheck={false} className="w-full px-3 py-2 focus-visible:outline-2 focus-visible:outline-offset-2"
+            style={dlgCtl(t)} aria-label={tx("确认分支名")} />
+        </label>}
+      </>}
+    </Modal>
+  );
+}
+
 // Shared field control styling.
 const dlgCtl = (t: ThemeColors, err = false): React.CSSProperties =>
   ({ background: t.inputBg, color: t.text, border: `0.5px solid ${err ? t.red + "88" : t.inputBorder}`, borderRadius: R - 2 });
@@ -3549,7 +3666,7 @@ function CloneDialog({ onClose, onDone }: {
       {prog && (
         <div className="flex flex-col gap-2 pt-1">
           <div className="flex items-center justify-between text-[11px]">
-            <span style={{ color: t.textSec }}>{prog.phase}</span>
+            <span style={{ color: t.textSec }}>{translateNativeMessage(prog.phase)}</span>
             <span className="font-mono" style={{ color: t.textMuted }}>
               {prog.percent != null ? `${prog.percent}%` : ""}
             </span>
@@ -3561,7 +3678,7 @@ function CloneDialog({ onClose, onDone }: {
                 opacity: prog.percent != null ? 1 : 0.45 }} />
           </div>
           {prog.raw && (
-            <span className="text-[10px] font-mono truncate" style={{ color: t.textFaint }}>{prog.raw}</span>
+            <span className="text-[10px] font-mono truncate" style={{ color: t.textFaint }}>{translateNativeMessage(prog.raw)}</span>
           )}
         </div>
       )}
@@ -3569,7 +3686,7 @@ function CloneDialog({ onClose, onDone }: {
       {err && !busy && (
         <div className="flex items-start gap-1.5 text-[11px]" style={{ color: t.red }}>
           <AlertTriangle size={13} className="flex-shrink-0 mt-px" />
-          <span className="min-w-0 break-words">{err}</span>
+          <span className="min-w-0 break-words">{translateNativeMessage(err)}</span>
         </div>
       )}
     </Modal>
@@ -3816,6 +3933,8 @@ function CherryPickConflictDialog({ commit, target, files, onCancel, onContinue 
       .catch(() => {});
     return () => { alive = false; };
   }, []);
+  const [beforeTarget, afterTarget] = tf("将 {0} 遴选到 {1} 会在 {2} 个文件产生冲突：",
+    commit.hash, "{target}", files.length).split("{target}");
 
   return (
     <Modal title={tx("遴选存在冲突")} Icon={AlertTriangle} width={480} onClose={onCancel}
@@ -3845,7 +3964,7 @@ function CherryPickConflictDialog({ commit, target, files, onCancel, onContinue 
         <span className="text-xs truncate" style={{ color: t.text }}>{commit.message}</span>
       </div>
       <span className="text-[11px]" style={{ color: t.textMuted }}>
-        {tx("将")} {commit.hash} {tx("遴选到")} <b style={{ color: t.text }}>{target}</b> {tx("会在")} {files.length} {tx("个文件产生冲突：")}
+        {beforeTarget}<b style={{ color: t.text }}>{target}</b>{afterTarget}
       </span>
       <div className="flex flex-col gap-1 max-h-44 overflow-auto px-3 py-2"
         style={{ background: t.inputBg, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 }}>
@@ -3963,7 +4082,7 @@ function CreatePRDialog({ path, branches, currentBranch, defaultTarget, term, on
               ))}
             </div>
             <span className="text-[10.5px] leading-relaxed" style={{ color: t.red, opacity: 0.85 }}>
-              {tx("仍可创建")}{term}{tx("，冲突需在合并时解决。")}
+              {tf("仍可创建{0}，冲突需在合并时解决。", term)}
             </span>
           </div>
         )}
@@ -4233,7 +4352,7 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
         </div>)}
       </dl>
       {infoError && <div role="status" className="flex items-start gap-2 text-[11px] leading-relaxed" style={{ color: t.amber }}>
-        <AlertTriangle size={14} className="shrink-0 mt-0.5" /><span>{infoError}</span>
+        <AlertTriangle size={14} className="shrink-0 mt-0.5" /><span>{translateNativeMessage(infoError)}</span>
       </div>}
       <div className="flex flex-col gap-3">
         <div className="flex items-baseline justify-between gap-2">
@@ -4332,7 +4451,7 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
           <div className="flex flex-col gap-2" aria-live="polite">
             {status.kind === "ok" || status.kind === "err" ? <span className="flex items-start gap-1.5 text-[11px] leading-relaxed"
               style={{ color: status.kind === "ok" ? t.green : t.red }}>
-              {status.kind === "ok" ? <Check size={14} className="shrink-0 mt-0.5" /> : <AlertTriangle size={14} className="shrink-0 mt-0.5" />}{status.msg}
+              {status.kind === "ok" ? <Check size={14} className="shrink-0 mt-0.5" /> : <AlertTriangle size={14} className="shrink-0 mt-0.5" />}{translateNativeMessage(status.msg ?? "")}
             </span> : <span className="text-[10px]" style={{ color: t.textSec }}>{loading ? tx("正在检测连接并读取令牌信息…") : tx("检测连接可预览当前令牌的有效期和权限。")}</span>}
           </div>
           <div className="flex items-center gap-2 pt-4" style={{ borderTop: `0.5px solid ${t.border}` }}>
@@ -4374,7 +4493,7 @@ function GithubTokenDetails({ info, loading, error, now }: {
       </div>)}
     </dl>
     {error && <div role="status" className="flex items-start gap-2 text-[11px] leading-relaxed" style={{ color: t.amber }}>
-      <AlertTriangle size={14} className="shrink-0 mt-0.5" /><span>{error}</span>
+      <AlertTriangle size={14} className="shrink-0 mt-0.5" /><span>{translateNativeMessage(error)}</span>
     </div>}
     {info && (info.scopes === null || !info.expires_at) && <p className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>
       {info.scopes === null ? tx("GitHub 未返回此 Token 的完整权限，请在 GitHub 的令牌设置中核对。") : ""}
@@ -4566,7 +4685,7 @@ function GithubAccountsSettings() {
       <div className="text-[11px] leading-relaxed" aria-live="polite" style={{ color: draftInfo ? t.green : t.textSec }}>
         {testing ? tx("正在检测账号并读取 Token 信息…") : draftInfo ? tf("已连接：{0}(@{1})", draftInfo.name ? `${draftInfo.name} ` : "", draftInfo.login) : tx("检测连接可预览当前账号、有效期和权限。")}
       </div>
-      {draftError && <p role="alert" className="text-[11px] leading-relaxed" style={{ color: t.red }}>{draftError}</p>}
+      {draftError && <p role="alert" className="text-[11px] leading-relaxed" style={{ color: t.red }}>{translateNativeMessage(draftError)}</p>}
       <div className="flex items-center gap-2 pt-3" style={{ borderTop: `0.5px solid ${t.border}` }}>
         <button type="button" {...press(runTest)} disabled={!valid || testing} className="gk-conn-button flex items-center gap-1.5 px-3 py-2 text-[11px] cursor-pointer disabled:opacity-40" style={buttonStyle}>
           <RefreshCw size={12} className={testing ? "animate-spin" : undefined} />{tx("检测连接")}</button>
@@ -4992,7 +5111,7 @@ function UpdateSettings() {
                   <span className="text-xs font-semibold" style={{ color: t.text }}>
                     {up.stage === "install" ? tx("更新未完成") : tx("检查更新失败")}
                   </span>
-                  <span className="text-[11px] leading-relaxed break-words" style={{ color: t.red }}>{up.msg}</span>
+                  <span className="text-[11px] leading-relaxed break-words" style={{ color: t.red }}>{translateNativeMessage(up.msg)}</span>
                   <span className="text-[11px]" style={{ color: t.textMuted }}>{tx("请检查网络后重新尝试。")}</span>
                 </div>
               </div>
@@ -5354,7 +5473,7 @@ function UpdatesDialog({ rows, busy, onPull, onClose }: {
       }>
       <div className="text-xs" style={{ color: t.textSec }}>
         {pending || rows.some((r) => r.error) ? <>
-          {pending} {tx("个项目有更新，共")} {total} {tx("个提交")}{rows.some((r) => r.error) ? tf("；{0} 个项目检查失败", rows.filter((r) => r.error).length) : ""}{tx("。拉取只做快进，不会产生合并提交。")}
+          {tf("{0} 个项目有更新，共 {1} 个提交", pending, total)}{rows.some((r) => r.error) ? tf("；{0} 个项目检查失败", rows.filter((r) => r.error).length) : ""}{tx("。拉取只做快进，不会产生合并提交。")}
         </> : tx("所有项目都已是最新")}
       </div>
 
@@ -5384,7 +5503,7 @@ function UpdatesDialog({ rows, busy, onPull, onClose }: {
                   {r.state === "failed" && <AlertTriangle size={12} className="flex-shrink-0" style={{ color: t.red }} />}
                 </div>
                 {r.error ? (
-                  <span className="text-[11px]" style={{ color: t.red }}>{tx("检查失败：")}{r.error}</span>
+                  <span className="text-[11px]" style={{ color: t.red }}>{tx("检查失败：")}{translateNativeMessage(r.error)}</span>
                 ) : (
                   <div className="flex flex-wrap items-center gap-1.5">
                     {r.behind.map((b) => (
@@ -5400,7 +5519,7 @@ function UpdatesDialog({ rows, busy, onPull, onClose }: {
                   </div>
                 )}
                 {r.detail && (
-                  <span className="text-[11px]" style={{ color: r.state === "failed" ? t.red : t.textMuted }}>{r.detail}</span>
+                  <span className="text-[11px]" style={{ color: r.state === "failed" ? t.red : t.textMuted }}>{translateNativeMessage(r.detail)}</span>
                 )}
                 {!r.detail && diverged.length > 0 && (
                   <span className="text-[11px]" style={{ color: t.amber }}>
@@ -5624,6 +5743,8 @@ export default function App() {
     });
   };
   const [gitBusy, setGitBusy] = useState<null | "fetch" | "pull" | "push">(null);
+  const [undoChecking, setUndoChecking] = useState(false);
+  const [forcePushRequest, setForcePushRequest] = useState<ForcePushRequest | null>(null);
   // Mirror gitBusy for background jobs that must avoid overlapping a user Git op.
   const gitBusyRef = useRef(gitBusy);
   gitBusyRef.current = gitBusy;
@@ -6450,7 +6571,7 @@ export default function App() {
     try {
       // Handle uncommitted changes first: stash them away, discard them, or (default)
       // let `checkout -b` carry them onto the new branch.
-      if (mode === "stash") await stashWithSelectedIdentity(p, `GitKit: 新建分支 ${name} 前的改动`);
+      if (mode === "stash") await stashWithSelectedIdentity(p, tf("GitKit: 新建分支 {0} 前的改动", name));
       else if (mode === "discard") await discardAll(p);
       await createBranch(p, name, base, true);
       setCurrentBranch(name);
@@ -6610,9 +6731,83 @@ export default function App() {
     }
   };
 
+  const requestForcePush = async () => {
+    if (!activeProject || !dataReady || switching || gitBusy || busyLabel || forcePushRequest) return;
+    if (remotes.length === 0) { toast.error(tx("没有配置远程仓库，无法强制推送。")); return; }
+    try {
+      const target = await forcePushTarget(activeProject.path);
+      const remoteUrl = remotes.find((r) => r.name === target.remote)?.url;
+      if (!remoteUrl) throw new Error(tx("找不到当前分支的推送远端。"));
+      const resolved = await resolveRemoteToken(remoteUrl, tx("强制推送"));
+      if (!resolved) return;
+      setForcePushRequest({ path: activeProject.path, project: activeProject.name, branch: target.branch, token: resolved.token });
+    } catch (e) { toast.error(String(e)); }
+  };
+
+  const requestUndoCommit = async () => {
+    if (!activeProject || !dataReady || switching || gitBusy || busyLabel || undoChecking || confirmState) return;
+    const p = activeProject.path;
+    setUndoChecking(true);
+    try {
+      const preview = await undoCommitPreview(p);
+      if (activePathRef.current !== p) return;
+      setConfirmState({
+        title: tx("撤回最近一次提交"),
+        message: `${tf("即将撤回 {0}：{1}", preview.head.slice(0, 7), preview.subject)}\n${tx("提交记录将被移除，文件改动保留在工作区并取消暂存。")}${preview.initial ? `\n${tx("这是初始提交，撤回后当前分支将暂时没有提交。")}` : ""}`,
+        confirmLabel: tx("撤回到工作区"),
+        onConfirm: async () => {
+          if (activePathRef.current !== p || gitBusyRef.current || busyLabel) {
+            throw new Error(tx("仓库已切换或正在执行其他 Git 操作，请重新检查"));
+          }
+          setBusyLabel(tx("正在撤回提交…"));
+          try {
+            await undoLastCommit(p, preview);
+            realCache.current.delete(p);
+            setSelectedCommit(null);
+            setSelectedFile(null);
+            setSelectedWorkingFile(null);
+            setViewChanges(true);
+            openDetail();
+            setReloadTick((n) => n + 1);
+            toast.success(tx("提交已撤回，改动已回到工作区"));
+          } finally {
+            setBusyLabel(null);
+          }
+        },
+      });
+    } catch (e) {
+      toast.error(tf("撤回提交失败：{0}", e));
+    } finally {
+      setUndoChecking(false);
+    }
+  };
+
+  const confirmForcePush = async (request: ForcePushRequest, preview: ForcePushPreview) => {
+    if (gitBusy || busyLabel) throw new Error(tx("请等待当前 Git 操作完成"));
+    setGitBusy("push");
+    beginOperationDisplay({
+      kind: "push", title: tx("正在强制推送…"),
+      context: { project: request.project, path: request.path, branch: request.branch },
+    });
+    try {
+      const backupRef = await forcePush(request.path, preview, request.token);
+      realCache.current.delete(request.path);
+      if (activePathRef.current === request.path) setReloadTick((n) => n + 1);
+      setForcePushRequest(null);
+      const description = tf("旧远端提交已备份到本地：{0}", backupRef);
+      toast.success(tx("强制推送完成"), { description });
+      settleOperationDisplay("success", tx("强制推送完成"), description);
+    } catch (e) {
+      settleOperationDisplay("error", tx("强制推送失败"), String(e));
+      throw e;
+    } finally {
+      setGitBusy(null);
+    }
+  };
+
   // Fetch / pull / push. Each refreshes the repo afterwards (cache-busting reload).
   const runGitAction = async (kind: "fetch" | "pull" | "push") => {
-    if (!activeProject || !dataReady || switching || gitBusy || busyLabel) return;
+    if (!activeProject || !dataReady || switching || gitBusy || busyLabel || forcePushRequest) return;
     const p = activeProject.path;
     const verbs = { fetch: tx("获取"), pull: tx("拉取"), push: tx("推送") } as const;
     if (remotes.length === 0) {
@@ -6670,6 +6865,10 @@ export default function App() {
         outcome = "error";
         outcomeTitle = tf("{0}失败", verbs[kind]);
         outcomePhase = String(e);
+        if (kind === "push" && activePathRef.current === p
+          && /non-fast-forward|\(fetch first\)|tip of your current branch is behind/i.test(outcomePhase)) {
+          setForcePushRequest({ path: p, project: activeProject.name, branch: currentBranch, token });
+        }
       }
     } finally {
       // Cancellation can arrive after some refs have already changed.
@@ -6738,7 +6937,7 @@ export default function App() {
     }
     if (snapshot.persistenceError && snapshot.persistenceError !== checkErrorRef.current) {
       checkErrorRef.current = snapshot.persistenceError;
-      toast.error(snapshot.persistenceError);
+      toast.error(translateNativeMessage(snapshot.persistenceError));
     }
   };
   useEffect(() => {
@@ -7016,7 +7215,7 @@ export default function App() {
     let outcomeTitle = tf("已切换到 {0}", branch);
     let outcomePhase = tx("工作区已更新");
     try {
-      if (stash) await stashWithSelectedIdentity(p, `GitKit: 切换到 ${branch} 前的改动`);
+      if (stash) await stashWithSelectedIdentity(p, tf("GitKit: 切换到 {0} 前的改动", branch));
       await checkoutBranch(p, branch);
       setProjects((prev) => prev.map((project) => project.id === projectId ? { ...project, branch } : project));
       realCache.current.delete(p);
@@ -7360,12 +7559,15 @@ export default function App() {
             onFetch={activeProject && dataReady && !switching ? () => runGitAction("fetch") : undefined}
             onPull={activeProject && dataReady && !switching ? () => runGitAction("pull") : undefined}
             onPush={activeProject && dataReady && !switching ? () => runGitAction("push") : undefined}
+            onUndoCommit={activeProject && dataReady && !switching && branches.some((b) => b.current && (!b.remote || b.ahead > 0))
+              ? requestUndoCommit : undefined}
+            onForcePush={activeProject && dataReady && !switching ? requestForcePush : undefined}
             onCreateTag={activeProject ? () => setTagDialogOpen(true) : undefined}
             onCherryPick={activeProject ? requestCherryPickActive : undefined}
             onStash={activeProject ? requestStash : undefined}
             onCreatePR={activeProject ? requestCreatePR : undefined}
             pushCount={branches.find((b) => b.current)?.ahead ?? 0}
-            busy={gitBusy ?? (busyLabel ? "other" : null)} />
+            busy={gitBusy ?? (busyLabel || forcePushRequest || undoChecking ? "other" : null)} />
 
           <div className="gk-workspace flex-1 min-h-0 overflow-hidden" data-projects-open={projectSidebarOpen}>
             <div className="gk-project-disclosure min-w-0 min-h-0 overflow-hidden" aria-hidden={!projectSidebarOpen}
@@ -7498,7 +7700,7 @@ export default function App() {
                   style={{ borderBottom: `0.5px solid ${theme.border}`, background: theme.accent2Bg }}>
                   <Check size={11} aria-hidden="true" style={{ color: theme.accent2 }} />
                   <span className="text-[11px] truncate" style={{ color: theme.accent2Fg }}>
-                    {tx("已将")} {smartMergeResult.mergedGroups} {tx("组相同变更合并展示，不会修改 Git 历史")}
+                    {tf("已将 {0} 组相同变更合并展示，不会修改 Git 历史", smartMergeResult.mergedGroups)}
                   </span>
                   <button type="button" onClick={() => startTransition(() => setSmartMerge(false))}
                     className="ml-auto text-[11px] cursor-pointer flex-shrink-0"
@@ -7527,7 +7729,7 @@ export default function App() {
                 {errored ? (
                   <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center" style={{ color: theme.red }}>
                     <span className="text-xs font-medium">{tx("读取失败")}</span>
-                    <span className="text-[11px]" style={{ color: theme.textMuted }}>{loadError?.msg}</span>
+                    <span className="text-[11px]" style={{ color: theme.textMuted }}>{loadError && translateNativeMessage(loadError.msg)}</span>
                   </div>
                 ) : (!dataReady || switching || branchViewLoading) ? (
                   <div className="gk-timeline-skeleton py-1" role="status" aria-label={tx("正在更新提交历史")}>
@@ -7553,7 +7755,7 @@ export default function App() {
                         <span className="text-xs font-medium" style={{ color: theme.textSec }}>{tx("该分支还没有独立提交")}</span>
                         {focusInfo?.base && (
                           <span className="text-[11px]" style={{ color: theme.textMuted }}>
-                            {tx("与")} {focusInfo.base} {tx("完全一致")}
+                            {tf("与 {0} 完全一致", focusInfo.base)}
                           </span>
                         )}
                       </div>
@@ -7876,6 +8078,16 @@ export default function App() {
             canRemember={acctPicker.canRemember}
             onPick={(a, remember) => { acctPicker.resolve({ account: a, remember }); setAcctPicker(null); }}
             onCancel={() => { acctPicker.resolve(null); setAcctPicker(null); }} />
+        )}
+
+        {forcePushRequest && (
+          <ForcePushDialog request={forcePushRequest}
+            onCancel={() => {
+              realCache.current.delete(forcePushRequest.path);
+              if (activePathRef.current === forcePushRequest.path) setReloadTick((n) => n + 1);
+              setForcePushRequest(null);
+            }}
+            onConfirm={(preview) => confirmForcePush(forcePushRequest, preview)} />
         )}
 
         {confirmState && (
