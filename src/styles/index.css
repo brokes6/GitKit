@@ -93,6 +93,16 @@ select:focus-visible,
 }
 .gk-panel-out { animation: gk-panel-out 0.22s cubic-bezier(0.4, 0, 1, 1) forwards; }
 
+.gk-detail-panel { transition: width 0.22s cubic-bezier(0.4, 0, 1, 1); }
+.gk-detail-panel[data-tracing="true"] { transition-duration: 0.28s; transition-timing-function: cubic-bezier(0.32, 0.72, 0, 1); }
+.gk-detail-icon:hover { background: var(--gk-detail-hover); }
+.gk-detail-panel .gk-trace-record:hover:not([aria-pressed="true"]) { background: var(--gk-detail-hover); }
+.gk-file-trace { container-type: inline-size; }
+.gk-file-trace-columns { display: grid; grid-template-columns: clamp(220px, 28%, 300px) minmax(0, 1fr); }
+@container (max-width: 620px) {
+  .gk-file-trace-columns { grid-template-columns: 190px minmax(0, 1fr); }
+}
+
 /* Dialog entrance (backdrop fade + panel scale) — transform/opacity only, cheap */
 @keyframes gk-overlay-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes gk-modal-in {

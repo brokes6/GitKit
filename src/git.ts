@@ -7,6 +7,7 @@ import { translateNativeMessage } from "./i18n.ts";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import type {
   Branch,
+  Author,
   Commit,
   CommitFile,
   GraphRowInfo,
@@ -28,6 +29,8 @@ export interface RepoInfo {
   path: string;
   name: string;
   current_branch: string;
+  initialized: boolean;
+  has_head: boolean;
 }
 export interface WorkingTreeChanged {
   path: string;
@@ -246,6 +249,11 @@ export async function pickRepoFolder(title = "选择一个 Git 仓库文件夹")
 
 export async function openRepo(path: string): Promise<RepoInfo> {
   return invoke<RepoInfo>("open_repo", { path });
+}
+
+/** Initialize only after the user agrees in the project dialog. */
+export async function initRepo(path: string): Promise<RepoInfo> {
+  return invoke<RepoInfo>("git_init", { path });
 }
 
 /** Reveal a file in Finder / Explorer, or open the repository folder when no
@@ -509,6 +517,52 @@ export async function loadCommitFiles(path: string, hash: string): Promise<Commi
   }));
 }
 
+interface RFileHistoryEntry {
+  hash: string; parents: string[];
+  author_name: string; author_email: string; author_date: string;
+  committer_name: string; committer_email: string; committer_date: string;
+  subject: string; body: string; file: string; old_file: string | null;
+  status: string; additions: number; deletions: number; binary: boolean;
+}
+export interface FileHistoryEntry {
+  hash: string; fullHash: string; parents: string[];
+  author: Author; date: string; committer: Author; committerDate: string;
+  message: string; body: string; file: CommitFile; oldPath: string | null; binary: boolean;
+}
+export interface FileHistoryPage {
+  revision: string; file: string; entries: FileHistoryEntry[]; nextOffset: number | null;
+}
+function traceAuthor(name: string, email: string): Author {
+  return { name, email, initials: authorInitials(name), color: authorColor(email) };
+}
+function mapFileHistoryEntry(raw: RFileHistoryEntry): FileHistoryEntry {
+  return {
+    hash: raw.hash.slice(0,8), fullHash: raw.hash, parents: raw.parents,
+    author: traceAuthor(raw.author_name,raw.author_email), date: raw.author_date,
+    committer: traceAuthor(raw.committer_name,raw.committer_email), committerDate: raw.committer_date,
+    message: raw.subject, body: raw.body, oldPath: raw.old_file, binary: raw.binary,
+    file: { path: raw.file, status: raw.status === "A" ? "added" : raw.status === "D" ? "deleted" : raw.status === "R" ? "renamed" : "modified",
+      additions: raw.additions, deletions: raw.deletions },
+  };
+}
+export async function loadFileHistory(path: string, anchor: string, file: string, branch: string | null = null, offset = 0): Promise<FileHistoryPage> {
+  const raw = await invoke<{ revision: string; file: string; entries: RFileHistoryEntry[]; next_offset: number | null }>("file_history", { path, anchor, file, branch, offset });
+  return { revision: raw.revision, file: raw.file, entries: raw.entries.map(mapFileHistoryEntry), nextOffset: raw.next_offset };
+}
+export interface FileTraceDiff { commit: FileHistoryEntry; diff: string; parent: string | null }
+export async function loadFileTraceDiff(path: string, hash: string, file: string, parentIndex = 0): Promise<FileTraceDiff> {
+  const raw = await invoke<{ commit: RFileHistoryEntry; diff: string; parent: string | null }>("file_trace_diff", { path, hash, file, parentIndex });
+  return { commit: mapFileHistoryEntry(raw.commit), diff: stripDiffHeader(raw.diff), parent: raw.parent };
+}
+export interface FileBlameLine {
+  hash: string; file: string; line: number; original_line: number;
+  author_name: string; author_email: string; author_date: string; summary: string; content: string;
+}
+export interface FileBlame { kind: FileContent["kind"]; lines: FileBlameLine[]; truncated: boolean }
+export async function loadFileBlame(path: string, hash: string, file: string): Promise<FileBlame> {
+  return invoke<FileBlame>("file_blame", { path, hash, file });
+}
+
 export interface DepInfo { name: string; found: boolean; version: string; path: string }
 
 /** Probe the CLI dependencies GitKit relies on (git, git-lfs) on the app's PATH. */
@@ -764,14 +818,23 @@ export async function forcePush(path: string, preview: ForcePushPreview, token?:
   });
 }
 
-/** A repository created on GitHub, with the URLs needed to wire it up locally. */
-export interface GithubRepo { cloneUrl: string; htmlUrl: string; fullName: string }
+/** A newly created remote repository, with the URLs needed to connect it locally. */
+export interface CreatedRepo { cloneUrl: string; htmlUrl: string; fullName: string }
 
 /** Create a repo under the token's GitHub account. `instanceUrl` is "" for public github.com. */
 export async function githubCreateRepo(
   instanceUrl: string, token: string, name: string, isPrivate: boolean, description: string,
-): Promise<GithubRepo> {
+): Promise<CreatedRepo> {
   const r = await invoke<{ clone_url: string; html_url: string; full_name: string }>("github_create_repo",
+    { instanceUrl, token, name, private: isPrivate, description });
+  return { cloneUrl: r.clone_url, htmlUrl: r.html_url, fullName: r.full_name };
+}
+
+/** Create an empty project in the authenticated user's GitLab namespace. */
+export async function gitlabCreateRepo(
+  instanceUrl: string, token: string, name: string, isPrivate: boolean, description: string,
+): Promise<CreatedRepo> {
+  const r = await invoke<{ clone_url: string; html_url: string; full_name: string }>("gitlab_create_repo",
     { instanceUrl, token, name, private: isPrivate, description });
   return { cloneUrl: r.clone_url, htmlUrl: r.html_url, fullName: r.full_name };
 }

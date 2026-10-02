@@ -12,10 +12,13 @@ use std::time::Duration;
 use tauri::Emitter;
 
 mod operation;
+pub mod file_trace;
 pub use operation::CancelState;
 use operation::GitOperation;
 #[cfg(all(test, unix))]
 mod operation_tests;
+#[cfg(test)]
+mod project_tests;
 
 /// macOS GUI apps (launched from Finder/Dock) inherit a minimal PATH — usually
 /// just `/usr/bin:/bin:/usr/sbin:/sbin` — that omits Homebrew and other common
@@ -202,35 +205,70 @@ pub struct RepoInfo {
     pub path: String,
     pub name: String,
     pub current_branch: String,
+    pub initialized: bool,
+    pub has_head: bool,
 }
 
-/// Validate that `path` is inside a work tree and return basic repo info.
+/// Opening a plain directory is read-only. Repository access/configuration
+/// failures must still surface instead of being mistaken for an uninitialized project.
+fn open_repo_inner(path: &str) -> Result<RepoInfo, String> {
+    let directory = std::path::Path::new(path)
+        .canonicalize()
+        .map_err(|e| format!("无法访问项目目录：{e}"))?;
+    if !directory.is_dir() {
+        return Err("请选择一个项目文件夹".into());
+    }
+    let path = directory.to_string_lossy().to_string();
+    let probe = git_auth_command(&path, &["rev-parse", "--is-inside-work-tree"], None)
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|e| format!("无法执行 git：{e}"))?;
+    let initialized = if probe.status.success() {
+        if String::from_utf8_lossy(&probe.stdout).trim() != "true" {
+            return Err("该目录不是一个 Git 仓库".into());
+        }
+        true
+    } else {
+        let error = String::from_utf8_lossy(&probe.stderr).trim().to_string();
+        let has_metadata = directory.ancestors().any(|parent| parent.join(".git").symlink_metadata().is_ok());
+        if !error.contains("not a git repository") || has_metadata {
+            return Err(if error.is_empty() { "git 命令失败".into() } else { error });
+        }
+        false
+    };
+    let top = if initialized {
+        run_git(&path, &["rev-parse", "--show-toplevel"])?.trim().to_string()
+    } else {
+        path
+    };
+    let name = std::path::Path::new(&top).file_name()
+        .map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "repo".into());
+    let current_branch = if initialized {
+        let current = run_git(&top, &["branch", "--show-current"])?.trim().to_string();
+        if current.is_empty() { "HEAD".into() } else { current }
+    } else {
+        String::new()
+    };
+    let has_head = initialized && run_git(&top, &["rev-parse", "--verify", "HEAD^{commit}"]).is_ok();
+    Ok(RepoInfo { path: top, name, current_branch, initialized, has_head })
+}
+
 #[tauri::command]
 pub async fn open_repo(path: String) -> Result<RepoInfo, String> {
-    run_blocking(move || {
-        let inside = run_git(&path, &["rev-parse", "--is-inside-work-tree"])?;
-        if inside.trim() != "true" {
-            return Err("该目录不是一个 Git 仓库".to_string());
-        }
-        let top = run_git(&path, &["rev-parse", "--show-toplevel"])?
-            .trim()
-            .to_string();
-        let name = std::path::Path::new(&top)
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "repo".to_string());
-        let current = run_git(&top, &["branch", "--show-current"])?.trim().to_string();
-        Ok(RepoInfo {
-            path: top,
-            name,
-            current_branch: if current.is_empty() {
-                "HEAD".to_string()
-            } else {
-                current
-            },
-        })
-    })
-    .await
+    run_blocking(move || open_repo_inner(&path)).await
+}
+
+fn init_repo_inner(path: &str) -> Result<RepoInfo, String> {
+    let info = open_repo_inner(path)?;
+    if info.initialized { return Ok(info); }
+    // Respect init.defaultBranch; initialization neither stages nor commits files.
+    run_git(&info.path, &["init"])?;
+    open_repo_inner(&info.path)
+}
+
+#[tauri::command]
+pub async fn git_init(path: String) -> Result<RepoInfo, String> {
+    run_blocking(move || init_repo_inner(&path)).await
 }
 
 /// Reveal a working-tree file in the platform file manager. Historical commits
@@ -2838,7 +2876,7 @@ pub async fn create_pull_request(
 }
 
 #[derive(Serialize)]
-pub struct GithubRepo {
+pub struct CreatedRepo {
     pub clone_url: String,
     pub html_url: String,
     pub full_name: String,
@@ -2854,7 +2892,7 @@ pub async fn github_create_repo(
     name: String,
     private: bool,
     description: String,
-) -> Result<GithubRepo, String> {
+) -> Result<CreatedRepo, String> {
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("仓库名称不能为空".into());
@@ -2885,7 +2923,7 @@ pub async fn github_create_repo(
     let status = resp.status();
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     if status.is_success() {
-        Ok(GithubRepo {
+        Ok(CreatedRepo {
             clone_url: v.get("clone_url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             html_url: v.get("html_url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
             full_name: v.get("full_name").and_then(|x| x.as_str()).unwrap_or("").to_string(),
@@ -2905,6 +2943,58 @@ pub async fn github_create_repo(
             None => format!("GitHub：{}", msg),
         })
     }
+}
+
+/// Create an empty project in the token owner's personal GitLab namespace.
+#[tauri::command]
+pub async fn gitlab_create_repo(
+    instance_url: String,
+    token: String,
+    name: String,
+    private: bool,
+    description: String,
+) -> Result<CreatedRepo, String> {
+    let name = name.trim();
+    if name.is_empty() { return Err("仓库名称不能为空".into()); }
+    if token.trim().is_empty() { return Err("请先配置访问令牌".into()); }
+    let base = instance_url.trim().trim_end_matches('/');
+    let base = if base.is_empty() { "https://gitlab.com" } else { base };
+    let parsed = reqwest::Url::parse(base).map_err(|_| "请填写有效的 GitLab 实例地址")?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none()
+        || !parsed.username().is_empty() || parsed.password().is_some()
+        || parsed.query().is_some() || parsed.fragment().is_some()
+    {
+        return Err("请填写有效的 GitLab 实例地址".into());
+    }
+    let client = reqwest::Client::builder().timeout(Duration::from_secs(20))
+        .redirect(reqwest::redirect::Policy::none())
+        .build().map_err(|e| e.to_string())?;
+    let response = client.post(format!("{base}/api/v4/projects"))
+        .header("PRIVATE-TOKEN", token.trim())
+        .header("User-Agent", "GitKit")
+        .json(&serde_json::json!({
+            "name": name, "path": name, "description": description.trim(),
+            "visibility": if private { "private" } else { "public" },
+            "initialize_with_readme": false,
+        }))
+        .send().await.map_err(|e| format!("请求失败：{e}"))?;
+    let status = response.status();
+    let value: serde_json::Value = response.json().await.map_err(|e| format!("无法读取 GitLab 响应：{e}"))?;
+    if !status.is_success() {
+        let detail = value.get("message").or_else(|| value.get("error"))
+            .map(|message| message.as_str().map(str::to_string).unwrap_or_else(|| message.to_string()))
+            .unwrap_or_else(|| format!("HTTP {status}"));
+        return Err(format!("GitLab：{detail}"));
+    }
+    let clone_url = value.get("http_url_to_repo").and_then(|v| v.as_str()).unwrap_or("");
+    let html_url = value.get("web_url").and_then(|v| v.as_str()).unwrap_or("");
+    if clone_url.is_empty() || html_url.is_empty() {
+        return Err("仓库已创建，但服务未返回有效的仓库地址，请到对应平台检查。".into());
+    }
+    Ok(CreatedRepo {
+        clone_url: clone_url.into(), html_url: html_url.into(),
+        full_name: value.get("path_with_namespace").and_then(|v| v.as_str()).unwrap_or(name).into(),
+    })
 }
 
 /// Add a remote (`git remote add <name> <url>`) to a local repo.

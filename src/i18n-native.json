@@ -1,4 +1,7 @@
 {
+  "无法解析文件历史": "Could not parse file history",
+  "无法解析逐行归属": "Could not parse blame",
+  "无效的父提交": "Invalid parent commit",
   "{0}；恢复分支失败：{1}": "{0}\nCould not restore the branch: {1}",
   "本地分支已有新提交，请重新检查后再推送": "The local branch has new commits. Check again before pushing.",
   "标签名不能为空": "The tag name cannot be empty.",
