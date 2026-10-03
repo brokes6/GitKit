@@ -52,7 +52,7 @@ test("combined native errors translate both failures and prefer specific HTTP te
 });
 
 test("localized sentences and generated stash labels preserve dynamic values", () => {
-  assert.equal(tf("将 {0} 遴选到 {1} 会在 {2} 个文件产生冲突：", "abc123", "设置", 2),
+  assert.equal(tf("将 {0} Cherry-pick 到 {1} 会在 {2} 个文件产生冲突：", "abc123", "设置", 2),
     "Cherry-picking abc123 onto 设置 will cause conflicts in 2 files:");
   assert.equal(tf("GitKit: 新建分支 {0} 前的改动", "工作区"), "GitKit: changes before creating branch 工作区");
   assert.equal(tf("GitKit: 切换到 {0} 前的改动", "设置"), "GitKit: changes before switching to 设置");

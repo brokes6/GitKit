@@ -1,4 +1,5 @@
 @import './tailwind.css';
+@import './overview.css';
 @import './theme.css';
 
 :root {
@@ -195,12 +196,28 @@ select:focus-visible,
 /* The status strip keeps the current theme's neutral chrome and uses one
    capsule geometry for its primary state and trailing action. */
 .gk-action-bar { height: 44px; }
+.gk-toolbar-shell { transition: background-color 140ms ease-out; }
+.gk-toolbar-content {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+}
+@media (prefers-reduced-motion: reduce) {
+  .gk-toolbar-shell { transition: none; }
+}
+.gk-toolbar-text { white-space: nowrap; }
+.gk-toolbar-glyph { display: inline-block; white-space: pre; }
 .gk-toolbar-project { flex: 0 1 auto; }
 .gk-toolbar-name { max-width: 108px; }
 .gk-toolbar-branch { max-width: 104px; }
+/* Keep the text baseline and ellipsis while giving jumping glyphs room. */
+.gk-toolbar-name, .gk-toolbar-branch { padding-block: 8px; margin-block: -8px; }
 .gk-workspace {
   --gk-project-width: 176px;
   --gk-workspace-gap: 12px;
+  position: relative;
   display: grid;
   grid-template-columns: var(--gk-project-width) minmax(0, 1fr);
   transition: grid-template-columns 220ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -223,6 +240,65 @@ select:focus-visible,
 .gk-project-sidebar { width: var(--gk-project-width); height: 100%; padding-top: 8px; }
 .gk-branch-sidebar { width: 168px; }
 .gk-workspace-card { margin: 12px 12px 12px 0; border-radius: 14px; }
+
+/* Paused Git operations float below the workspace toolbar without changing
+   the sidebar/history geometry or intercepting clicks outside the panel. */
+.gk-repo-operation-layer {
+  position: absolute;
+  top: 56px;
+  right: 16px;
+  z-index: 70;
+  width: 480px;
+  max-width: calc(100% - 32px);
+  pointer-events: none;
+}
+.gk-repo-operation {
+  padding: 12px;
+  border-radius: 12px;
+  pointer-events: auto;
+}
+.gk-repo-operation-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 10px;
+}
+.gk-repo-operation-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--gk-repo-text);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+.gk-repo-operation-button:not(:disabled):hover { background: var(--gk-repo-hover); }
+.gk-repo-operation-primary {
+  color: var(--gk-repo-accent);
+  background: var(--gk-repo-accent-bg);
+  font-weight: 600;
+}
+.gk-repo-operation-primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--gk-repo-accent-bg), var(--gk-repo-accent) 12%);
+}
+.gk-repo-operation-danger { color: var(--gk-repo-danger); }
+.gk-repo-operation-danger:not(:disabled):hover { background: var(--gk-repo-danger-bg); }
+.gk-repo-operation-button:disabled {
+  color: var(--gk-repo-muted);
+  background: transparent;
+  cursor: default;
+}
+.gk-repo-operation-folder { width: 28px; padding: 0; margin-left: auto; color: var(--gk-repo-muted); }
+
 .gk-status-bar {
   height: 28px;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);

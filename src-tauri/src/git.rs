@@ -7,11 +7,14 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 use tauri::Emitter;
 
 mod operation;
+mod snapshot_hash;
+pub mod local_merge;
+pub mod project_overview;
 pub mod file_trace;
 pub use operation::CancelState;
 use operation::GitOperation;
@@ -19,6 +22,8 @@ use operation::GitOperation;
 mod operation_tests;
 #[cfg(test)]
 mod project_tests;
+#[cfg(test)]
+mod staging_tests;
 
 /// macOS GUI apps (launched from Finder/Dock) inherit a minimal PATH — usually
 /// just `/usr/bin:/bin:/usr/sbin:/sbin` — that omits Homebrew and other common
@@ -742,12 +747,21 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
     .await
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct StatusEntry {
     pub path: String,
     pub index_status: String,
     pub work_status: String,
     pub staged: bool,
+    pub original_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StagingStatus {
+    pub entries: Vec<StatusEntry>,
+    pub revision: String,
+    /// True when an index/ref change required an authoritative full refresh.
+    pub full: bool,
 }
 
 fn parse_status_entries(out: &str) -> Vec<StatusEntry> {
@@ -762,17 +776,19 @@ fn parse_status_entries(out: &str) -> Vec<StatusEntry> {
         let x = &entry[0..1];
         let y = &entry[1..2];
         let p = entry[3..].to_string();
-        // A rename/copy (R/C in either column) carries its source path as the NEXT
-        // NUL-separated field; consume it and keep the new path we already have.
-        if x == "R" || x == "C" || y == "R" || y == "C" {
-            let _ = fields.next();
-        }
+        // Porcelain -z puts the destination first, then the original path.
+        let original_path = if x == "R" || x == "C" || y == "R" || y == "C" {
+            fields.next().map(str::to_string)
+        } else {
+            None
+        };
         let staged = x != " " && x != "?";
         res.push(StatusEntry {
             path: p,
             index_status: x.to_string(),
             work_status: y.to_string(),
             staged,
+            original_path,
         });
     }
     res
@@ -803,29 +819,296 @@ pub async fn git_status(path: String) -> Result<Vec<StatusEntry>, String> {
     run_blocking(move || read_git_status(&path, &[])).await
 }
 
+fn validate_working_paths(paths: &[String]) -> Result<(), String> {
+    use std::path::{Component, Path};
+    for item in paths {
+        let candidate = Path::new(item);
+        if item.is_empty()
+            || item.contains('\0')
+            || candidate.is_absolute()
+            || !candidate.components().any(|part| matches!(part, Component::Normal(_)))
+            || candidate.components().any(|part| {
+                matches!(part, Component::Prefix(_) | Component::RootDir | Component::ParentDir)
+            })
+        {
+            return Err("工作区事件包含无效路径".into());
+        }
+    }
+    Ok(())
+}
+
 /// Incremental status for a coalesced batch of working-tree paths. Invalid or
 /// oversized batches fall back to the caller's next full reconciliation.
 #[tauri::command]
 pub async fn git_status_paths(path: String, paths: Vec<String>) -> Result<Vec<StatusEntry>, String> {
     run_blocking(move || {
-        use std::path::{Component, Path};
         if paths.is_empty() || paths.len() > 256 {
             return read_git_status(&path, &[]);
         }
-        for item in &paths {
-            let candidate = Path::new(item);
-            if item.is_empty()
-                || candidate.is_absolute()
-                || candidate.components().any(|part| {
-                    matches!(part, Component::Prefix(_) | Component::RootDir | Component::ParentDir)
-                })
-            {
-                return Err("工作区事件包含无效路径".into());
-            }
-        }
+        validate_working_paths(&paths)?;
         read_git_status(&path, &paths)
     })
     .await
+}
+
+/// Share a lock across aliases of the same checkout without retaining closed
+/// repositories forever. Git still provides its own cross-process index lock.
+fn with_staging_lock<T>(path: &str, action: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    static LOCKS: OnceLock<Mutex<HashMap<std::path::PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    let git_dir = run_git(path, &["rev-parse", "--absolute-git-dir"])?;
+    let key = std::fs::canonicalize(git_dir.trim()).map_err(|e| format!("无法打开仓库：{e}"))?;
+    let lock = {
+        let mut locks = LOCKS.get_or_init(Mutex::default).lock().map_err(|e| e.to_string())?;
+        locks.retain(|_, value| value.strong_count() > 0);
+        match locks.get(&key).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(Mutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        }
+    };
+    let _guard = lock.lock().map_err(|e| e.to_string())?;
+    action()
+}
+
+/// Hash only commit-relevant index entries, so editing working files or Git's
+/// stat-cache refresh does not invalidate a reviewed staging snapshot. No Git
+/// object is written and conflict stages remain readable (unlike write-tree).
+fn staging_revision(path: &str) -> Result<String, String> {
+    use std::io::Write;
+    let branch = run_git(path, &["symbolic-ref", "--quiet", "HEAD"]).ok();
+    let head = match run_git(path, &["rev-parse", "--verify", "HEAD"]) {
+        Ok(head) => head,
+        Err(_) if branch.is_some() => "unborn".into(),
+        Err(error) => return Err(error),
+    };
+    let entries = git_auth_command(path, &["--no-optional-locks", "ls-files", "--stage", "-z"], None)
+        .output().map_err(|e| format!("无法执行 git：{e}"))?;
+    if !entries.status.success() {
+        return Err(String::from_utf8_lossy(&entries.stderr).trim().to_string());
+    }
+    // ls-files cannot distinguish an intent-to-add empty file from a truly
+    // staged empty file. The cached raw diff captures that commit distinction.
+    let staged_diff = git_auth_command(path, &["--no-optional-locks", "diff", "--cached",
+        "--raw", "--no-abbrev", "--no-renames", "--no-ext-diff", "--no-textconv", "-z"], None)
+        .output().map_err(|e| format!("无法执行 git：{e}"))?;
+    if !staged_diff.status.success() {
+        return Err(String::from_utf8_lossy(&staged_diff.stderr).trim().to_string());
+    }
+    let mut input = snapshot_hash::SnapshotHasher::new();
+    input.write_all(branch.as_deref().unwrap_or("detached").as_bytes())
+        .and_then(|_| input.write_all(b"\0"))
+        .and_then(|_| input.write_all(head.as_bytes()))
+        .and_then(|_| input.write_all(b"\0"))
+        .and_then(|_| input.write_all(&entries.stdout))
+        .and_then(|_| input.write_all(b"\0"))
+        .and_then(|_| input.write_all(&staged_diff.stdout))
+        .map_err(|e| format!("无法读取暂存区快照：{e}"))?;
+    Ok(input.finish())
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct StagingFileStamp {
+    size: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+fn staging_file_stamp(path: &std::path::Path) -> Result<Option<StagingFileStamp>, String> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("无法读取暂存区快照：{error}")),
+    };
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    Ok(Some(StagingFileStamp {
+        size: metadata.len(), modified: metadata.modified().ok(), created: metadata.created().ok(),
+        #[cfg(unix)]
+        identity: (metadata.dev(), metadata.ino(), metadata.ctime(), metadata.ctime_nsec()),
+    }))
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct StagingStamp {
+    index_path: std::path::PathBuf,
+    files: Vec<Option<StagingFileStamp>>,
+    refs: Vec<Vec<u8>>,
+    replacements: Vec<(std::path::PathBuf, Option<StagingFileStamp>)>,
+}
+
+fn staging_replacement_stamps(path: &std::path::Path,
+    stamps: &mut Vec<(std::path::PathBuf, Option<StagingFileStamp>)>, seen: &mut HashSet<std::path::PathBuf>,
+) -> Result<(), String> {
+    let stamp = staging_file_stamp(path)?;
+    stamps.push((path.to_path_buf(), stamp.clone()));
+    if stamp.is_none() || !path.is_dir() { return Ok(()); }
+    let canonical = std::fs::canonicalize(path).map_err(|error| format!("无法读取暂存区快照：{error}"))?;
+    if !seen.insert(canonical) { return Ok(()); }
+    let mut entries = std::fs::read_dir(path).map_err(|error| format!("无法读取暂存区快照：{error}"))?
+        .collect::<Result<Vec<_>, _>>().map_err(|error| format!("无法读取暂存区快照：{error}"))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries { staging_replacement_stamps(&entry.path(), stamps, seen)?; }
+    Ok(())
+}
+
+impl StagingStamp {
+    fn read(roots: &WatchGitRoots, path: &str) -> Result<Self, String> {
+        let index_path = std::env::var_os("GIT_INDEX_FILE").map(std::path::PathBuf::from)
+            .map(|index| if index.is_absolute() { index } else { std::path::Path::new(path).join(index) })
+            .unwrap_or_else(|| roots.git_dir.join("index"));
+        let mut files = Vec::new();
+        for file in [index_path.clone(), roots.git_dir.join("HEAD"),
+            roots.common_dir.join("packed-refs"), roots.common_dir.join("config"),
+            roots.git_dir.join("config.worktree"), roots.common_dir.join("reftable/tables.list"),
+            roots.git_dir.join("reftable/tables.list")] {
+            files.push(staging_file_stamp(&file)?);
+        }
+        let mut refs = Vec::new();
+        let mut next = roots.git_dir.join("HEAD");
+        let mut seen = HashSet::new();
+        // Follow symbolic refs too; a loose ref can itself point to another ref.
+        while seen.insert(next.clone()) {
+            let bytes = match std::fs::read(&next) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => return Err(format!("无法读取暂存区快照：{error}")),
+            };
+            files.push(staging_file_stamp(&next)?);
+            let symbolic = std::str::from_utf8(&bytes).ok()
+                .and_then(|value| value.trim().strip_prefix("ref: ")).map(str::to_string);
+            refs.push(bytes);
+            let Some(reference) = symbolic else { break; };
+            let root = if ["refs/bisect/", "refs/worktree/", "refs/rewritten/"].iter()
+                .any(|prefix| reference.starts_with(prefix)) { &roots.git_dir } else { &roots.common_dir };
+            next = root.join(reference);
+            if seen.len() >= 32 { break; }
+        }
+        let replacement_base = std::env::var_os("GIT_REPLACE_REF_BASE").unwrap_or_else(|| "refs/replace".into());
+        let mut replacements = Vec::new();
+        staging_replacement_stamps(&roots.common_dir.join(replacement_base), &mut replacements, &mut HashSet::new())?;
+        Ok(Self { index_path, files, refs, replacements })
+    }
+}
+
+#[derive(Clone)]
+struct CachedStaging {
+    git_dir: std::path::PathBuf,
+    stamp: StagingStamp,
+    revision: String,
+    renames: Vec<(String, String)>,
+}
+
+fn staging_cache() -> &'static Mutex<std::collections::VecDeque<CachedStaging>> {
+    static CACHE: OnceLock<Mutex<std::collections::VecDeque<CachedStaging>>> = OnceLock::new();
+    CACHE.get_or_init(Mutex::default)
+}
+
+fn covers_working_path(candidate: &str, scope: &str) -> bool {
+    candidate == scope || candidate.strip_prefix(scope).is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn read_staging_status(path: &str, paths: &[String]) -> Result<StagingStatus, String> {
+    let roots = WatchGitRoots::resolve(path)?;
+    // Reuse a digest only while the index and relevant refs/config stay unchanged.
+    // Mutations still call staging_revision directly before using a reviewed index.
+    for _ in 0..3 {
+        let before = StagingStamp::read(&roots, path)?;
+        let cached = staging_cache().lock().map_err(|error| error.to_string())?
+            .iter().find(|entry| entry.git_dir == roots.git_dir && entry.stamp == before).cloned();
+        let full = paths.is_empty() || cached.is_none();
+        let revision = match &cached {
+            Some(entry) if !full => entry.revision.clone(),
+            _ => staging_revision(path)?,
+        };
+        let mut scopes = if full { Vec::new() } else { paths.to_vec() };
+        if let Some(cached) = &cached {
+            if !full {
+                for (destination, source) in &cached.renames {
+                    if paths.iter().any(|scope| covers_working_path(destination, scope) || covers_working_path(source, scope)) {
+                        scopes.extend([destination.clone(), source.clone()]);
+                    }
+                }
+                scopes.sort(); scopes.dedup();
+            }
+        }
+        let entries = read_git_status(path, &scopes)?;
+        if before == StagingStamp::read(&roots, path)? {
+            let renames = if full { entries.iter().filter_map(|entry| entry.original_path.as_ref()
+                .map(|source| (entry.path.clone(), source.clone()))).collect() }
+                else { cached.unwrap().renames };
+            let mut cache = staging_cache().lock().map_err(|error| error.to_string())?;
+            cache.retain(|entry| entry.git_dir != roots.git_dir);
+            cache.push_back(CachedStaging { git_dir: roots.git_dir.clone(), stamp: before, revision: revision.clone(), renames });
+            while cache.len() > 4 { cache.pop_front(); }
+            return Ok(StagingStatus { entries, revision, full });
+        }
+    }
+    Err("暂存区或当前分支已变化，请刷新后重新提交".into())
+}
+
+#[tauri::command]
+pub async fn git_staging_status(path: String, paths: Option<Vec<String>>) -> Result<StagingStatus, String> {
+    run_blocking(move || with_staging_lock(&path, || {
+        let paths = paths.unwrap_or_default();
+        if paths.is_empty() || paths.len() > 256 {
+            return read_staging_status(&path, &[]);
+        }
+        validate_working_paths(&paths)?;
+        read_staging_status(&path, &paths)
+    })).await
+}
+
+fn stage_files_inner(path: &str, files: &[String], unstage: bool) -> Result<StagingStatus, String> {
+    validate_working_paths(files)?;
+    let entries = read_git_status(path, &[])?;
+    let mut paths = Vec::new();
+    for file in files {
+        let Some(entry) = entries.iter().find(|entry| &entry.path == file) else { continue };
+        if unstage {
+            if !entry.staged { continue; }
+        } else if entry.work_status == " " { continue; }
+        paths.push(file.clone());
+        // Copies must never unstage their source. A staged rename's source has
+        // already left the index, so later edits stage only the destination.
+        let renamed = if unstage { entry.index_status == "R" } else { entry.work_status == "R" };
+        if renamed {
+            if let Some(original) = &entry.original_path {
+                paths.push(original.clone());
+            }
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    if !paths.is_empty() {
+        let mut args = vec!["--literal-pathspecs"];
+        if unstage {
+            if run_git(path, &["rev-parse", "--verify", "HEAD"]).is_ok() {
+                args.extend(["reset", "-q", "HEAD", "--"]);
+            } else {
+                args.extend(["rm", "--cached", "-r", "-f", "--"]);
+            }
+        } else {
+            args.extend(["add", "-A", "--"]);
+        }
+        args.extend(paths.iter().map(String::as_str));
+        run_git(path, &args)?;
+    }
+    read_staging_status(path, &[])
+}
+
+#[tauri::command]
+pub async fn git_stage_files(path: String, files: Vec<String>) -> Result<StagingStatus, String> {
+    run_blocking(move || with_staging_lock(&path, || stage_files_inner(&path, &files, false))).await
+}
+
+#[tauri::command]
+pub async fn git_unstage_files(path: String, files: Vec<String>) -> Result<StagingStatus, String> {
+    run_blocking(move || with_staging_lock(&path, || stage_files_inner(&path, &files, true))).await
 }
 
 #[derive(Serialize)]
@@ -1153,10 +1436,11 @@ pub async fn check_deps() -> Result<Vec<DepInfo>, String> {
 /// off the UI thread so a slow checkout doesn't freeze the app.
 #[tauri::command]
 pub async fn git_checkout(path: String, branch: String) -> Result<(), String> {
-    run_blocking(move || {
+    run_blocking(move || with_staging_lock(&path, || {
+        local_merge::ensure_no_operation(&path)?;
         run_git_nohooks(&path, &["checkout", &branch])?;
         Ok(())
-    })
+    }))
     .await
 }
 
@@ -1208,8 +1492,6 @@ fn launch_kaleidoscope_mergetool(repo: &str) -> Result<(), String> {
         .env("PATH", augmented_path())
         .env("GIT_TERMINAL_PROMPT", "0")
         .args([
-            "-c",
-            "core.hooksPath=/dev/null",
             "-c",
             cmd_cfg,
             "-c",
@@ -1278,7 +1560,7 @@ pub async fn git_cherry_pick_preflight(
             _ => {
                 let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
                 Err(if err.is_empty() {
-                    "遴选预检失败".to_string()
+                    "Cherry-pick 预检失败".to_string()
                 } else {
                     err
                 })
@@ -1288,10 +1570,10 @@ pub async fn git_cherry_pick_preflight(
     .await
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct CherryPickResult {
     /// "clean" — applied cleanly; "resolved" — conflicts resolved via Kaleidoscope
-    /// and the cherry-pick was continued; "conflict" — left mid-cherry-pick with
+    /// and paused for review/continue; "conflict" — left mid-cherry-pick with
     /// unresolved files.
     pub status: String,
     pub conflicts: Vec<String>,
@@ -1301,7 +1583,7 @@ pub struct CherryPickResult {
 /// check it out first so the commit lands on that branch. A conflict is not a
 /// hard error: it leaves the repo in a resolvable `CHERRY_PICK_HEAD` state and is
 /// reported as `status: "conflict"`. When `use_kaleidoscope` is set, conflicts are
-/// opened in Kaleidoscope and, once fully resolved, the cherry-pick is continued.
+/// opened in Kaleidoscope and left paused for review, even when fully resolved.
 #[tauri::command]
 pub async fn git_cherry_pick(
     path: String,
@@ -1309,14 +1591,15 @@ pub async fn git_cherry_pick(
     target: Option<String>,
     use_kaleidoscope: bool,
 ) -> Result<CherryPickResult, String> {
-    run_blocking(move || {
+    run_blocking(move || with_staging_lock(&path, || {
+        local_merge::ensure_no_operation(&path)?;
         if let Some(t) = target.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             let cur = run_git(&path, &["rev-parse", "--abbrev-ref", "HEAD"])?;
             if cur.trim() != t {
-                run_git_nohooks(&path, &["checkout", t])?;
+                run_git(&path, &["checkout", t])?;
             }
         }
-        let applied = run_git_nohooks(&path, &["cherry-pick", &hash]);
+        let applied = run_git(&path, &["-c", "core.editor=true", "cherry-pick", &hash]);
         if applied.is_ok() {
             return Ok(CherryPickResult {
                 status: "clean".to_string(),
@@ -1330,12 +1613,11 @@ pub async fn git_cherry_pick(
             return Err(applied.unwrap_err());
         }
         if use_kaleidoscope {
-            // Best-effort: whatever the tool does, re-derive state from the index.
-            let _ = launch_kaleidoscope_mergetool(&path);
+            // The tool updates files/index, then the user reviews before the
+            // explicit continue action. Tool errors remain visible to the UI.
+            launch_kaleidoscope_mergetool(&path)?;
             let remaining = unmerged_files(&path);
             if remaining.is_empty() {
-                // core.editor=true accepts the prepared message without prompting.
-                run_git_nohooks(&path, &["-c", "core.editor=true", "cherry-pick", "--continue"])?;
                 return Ok(CherryPickResult {
                     status: "resolved".to_string(),
                     conflicts: Vec::new(),
@@ -1350,62 +1632,52 @@ pub async fn git_cherry_pick(
             status: "conflict".to_string(),
             conflicts,
         })
-    })
+    }))
     .await
 }
 
-/// Stage `files` and commit them with `message`. When `name`/`email` are given,
-/// the identity is injected per-commit (`git -c user.name=… -c user.email=…`)
-/// without touching the repo/global config.
-#[tauri::command]
-pub async fn git_commit(
-    path: String,
-    message: String,
-    files: Vec<String>,
-    name: Option<String>,
-    email: Option<String>,
+/// Commit the reviewed index as-is. Identity overrides remain per-command and
+/// never modify repository or global configuration.
+fn commit_index_inner(
+    path: &str, message: &str, expected_revision: &str,
+    name: Option<&str>, email: Option<&str>,
 ) -> Result<(), String> {
-    run_blocking(move || {
+    if local_merge::active_operation_kind(path)?.is_some() {
+        return Err("请先完成当前 Git 操作；合并请使用继续合并".into());
+    }
     if message.trim().is_empty() {
         return Err("提交信息不能为空".into());
     }
-    if files.is_empty() {
+    if expected_revision.is_empty() || staging_revision(path)? != expected_revision {
+        return Err("暂存区或当前分支已变化，请刷新后重新提交".into());
+    }
+    if !run_git(path, &["ls-files", "--unmerged", "-z"])?.is_empty() {
+        return Err("仍有未解决的冲突，无法提交".into());
+    }
+    if run_git(path, &["diff", "--cached", "--name-only", "-z"])?.is_empty() {
         return Err("没有要提交的文件".into());
     }
-    // Stage exactly the requested files (handles adds, modifications, deletions).
-    // `git add -- <path>` matches pathspecs only against the working tree + index,
-    // so a file whose deletion is ALREADY staged (gone from both) fails with
-    // "pathspec … did not match any files" and aborts the whole commit. Since the
-    // UI commits from the staged list, this hits any already-staged deletion.
-    // `update-index --add --remove` takes literal paths and stages the current
-    // worktree state for each (add / modify / delete) without that pathspec check.
-    let mut add_args: Vec<&str> = vec!["update-index", "--add", "--remove", "--"];
-    for f in &files {
-        add_args.push(f.as_str());
+    let name_cfg = name.map(str::trim).filter(|value| !value.is_empty())
+        .map(|value| format!("user.name={value}"));
+    let email_cfg = email.map(str::trim).filter(|value| !value.is_empty())
+        .map(|value| format!("user.email={value}"));
+    let mut args = Vec::new();
+    for config in [&name_cfg, &email_cfg].into_iter().flatten() {
+        args.extend(["-c", config.as_str()]);
     }
-    run_git(&path, &add_args)?;
-
-    // Build `[-c user.name=…] [-c user.email=…] commit -m <message>`.
-    let name_cfg = name.as_deref().map(str::trim).filter(|s| !s.is_empty())
-        .map(|n| format!("user.name={}", n));
-    let email_cfg = email.as_deref().map(str::trim).filter(|s| !s.is_empty())
-        .map(|e| format!("user.email={}", e));
-    let mut args: Vec<&str> = Vec::new();
-    if let Some(ref c) = name_cfg {
-        args.push("-c");
-        args.push(c);
-    }
-    if let Some(ref c) = email_cfg {
-        args.push("-c");
-        args.push(c);
-    }
-    args.push("commit");
-    args.push("-m");
-    args.push(message.trim());
-    run_git(&path, &args)?;
+    args.extend(["commit", "-m", message.trim()]);
+    run_git(path, &args)?;
     Ok(())
-    })
-    .await
+}
+
+#[tauri::command]
+pub async fn git_commit(
+    path: String, message: String, expected_revision: String,
+    name: Option<String>, email: Option<String>,
+) -> Result<(), String> {
+    run_blocking(move || with_staging_lock(&path, || {
+        commit_index_inner(&path, &message, &expected_revision, name.as_deref(), email.as_deref())
+    })).await
 }
 
 #[derive(Debug, Serialize)]
@@ -1452,7 +1724,7 @@ fn undo_commit_preview_inner(path: &str) -> Result<UndoCommitPreview, String> {
         let git_path = std::path::Path::new(git_path.trim());
         let git_path = if git_path.is_absolute() { git_path.to_path_buf() } else { std::path::Path::new(path).join(git_path) };
         if git_path.exists() {
-            return Err("请先完成当前的合并、遴选或变基，再撤回提交".into());
+            return Err("请先完成当前的合并、Cherry-pick 或变基，再撤回提交".into());
         }
     }
     Ok(UndoCommitPreview {
@@ -1767,14 +2039,22 @@ fn collect_behind(path: &str, operation: Option<&GitOperation>) -> Result<Update
 /// branch are reported, never forced).
 #[tauri::command]
 pub async fn git_sync_local(path: String) -> Result<FetchSummary, String> {
-    run_blocking(move || Ok(sync_tracking_branches(&path))).await
+    run_blocking(move || sync_local_inner(&path)).await
+}
+
+fn sync_local_inner(path: &str) -> Result<FetchSummary, String> {
+    with_staging_lock(path, || {
+        local_merge::ensure_no_operation(path)?;
+        Ok(sync_tracking_branches(path))
+    })
 }
 
 /// Check out `branch` and fast-forward it to `hash` (a remote commit), syncing the
 /// local branch up to the remote without merging or losing history.
 #[tauri::command]
 pub async fn git_checkout_sync(path: String, branch: String, hash: String) -> Result<(), String> {
-    run_blocking(move || {
+    run_blocking(move || with_staging_lock(&path, || {
+        local_merge::ensure_no_operation(&path)?;
         // Skip the checkout when already on the target branch — re-checking-out
         // the current branch is a no-op that still fires the post-checkout hook
         // (and prints "Already on 'X'"), which is pure noise for a plain FF-sync.
@@ -1784,7 +2064,7 @@ pub async fn git_checkout_sync(path: String, branch: String, hash: String) -> Re
         }
         run_git_nohooks(&path, &["merge", "--ff-only", &hash])?;
         Ok(())
-    })
+    }))
     .await
 }
 
@@ -2005,19 +2285,20 @@ pub async fn git_create_branch(
     base: String,
     checkout: bool,
 ) -> Result<(), String> {
-    run_blocking(move || {
+    run_blocking(move || with_staging_lock(&path, || {
     let name = name.trim();
     let base = base.trim();
     if name.is_empty() {
         return Err("分支名称不能为空".into());
     }
     if checkout {
+        local_merge::ensure_no_operation(&path)?;
         run_git_nohooks(&path, &["checkout", "-b", name, base])?;
     } else {
         run_git(&path, &["branch", name, base])?;
     }
     Ok(())
-    })
+    }))
     .await
 }
 
@@ -2196,7 +2477,8 @@ pub async fn git_stash_push(
     name: Option<String>,
     email: Option<String>,
 ) -> Result<(), String> {
-    run_blocking(move || {
+    run_blocking(move || with_staging_lock(&path, || {
+    local_merge::ensure_no_operation(&path)?;
     let msg = if message.trim().is_empty() {
         "GitKit stash".to_string()
     } else {
@@ -2216,7 +2498,7 @@ pub async fn git_stash_push(
     args.extend(["stash", "push", "-u", "-m", &msg]);
     run_git(&path, &args)?;
     Ok(())
-    })
+    }))
     .await
 }
 
@@ -2365,10 +2647,11 @@ pub async fn git_merge_preview(
 /// Apply a stash entry to the working tree (keeps the entry in the stash list).
 #[tauri::command]
 pub async fn git_stash_apply(path: String, index: usize) -> Result<(), String> {
-    run_blocking(move || {
+    run_blocking(move || with_staging_lock(&path, || {
+        local_merge::ensure_no_operation(&path)?;
         run_git(&path, &["stash", "apply", &format!("stash@{{{index}}}")])?;
         Ok(())
-    })
+    }))
     .await
 }
 
@@ -2461,20 +2744,27 @@ pub async fn file_preview(path: String, file: String) -> Result<FilePreview, Str
     .await
 }
 
-/// Diff of a single working-tree file. Staging in GitKit is app-side (git's index
-/// isn't touched until commit), so we always show the TOTAL change vs HEAD — that
-/// way a file previews the same whether it sits in the staged or unstaged list.
-/// `_staged` is kept for API compatibility. Falls back to the index diff in a repo
-/// with no commits yet.
-#[tauri::command]
-pub async fn working_file_diff(path: String, file: String, _staged: bool) -> Result<String, String> {
-    run_blocking(move || {
-        match run_git(&path, &["diff", "HEAD", "--", file.as_str()]) {
-            Ok(d) => Ok(d),
-            Err(_) => run_git(&path, &["diff", "--", file.as_str()]),
+fn working_file_diff_inner(path: &str, file: &str, staged: bool, original_path: Option<&str>) -> Result<String, String> {
+    let mut paths = vec![file.to_string()];
+    if staged {
+        if let Some(original) = original_path.filter(|original| *original != file) {
+            paths.push(original.to_string());
         }
-    })
-    .await
+    }
+    validate_working_paths(&paths)?;
+    let mut args = vec!["--literal-pathspecs", "--no-optional-locks", "diff", "--no-ext-diff", "--no-textconv"];
+    if staged { args.push("--cached"); }
+    args.push("--");
+    args.extend(paths.iter().map(String::as_str));
+    run_git(path, &args)
+}
+
+/// Staged: HEAD → index (also valid on an unborn branch). Unstaged: index → work.
+#[tauri::command]
+pub async fn working_file_diff(
+    path: String, file: String, staged: bool, original_path: Option<String>,
+) -> Result<String, String> {
+    run_blocking(move || working_file_diff_inner(&path, &file, staged, original_path.as_deref())).await
 }
 
 /// Test a GitHub / GitHub Enterprise connection via `GET {api}/user`. `url` is
@@ -3285,10 +3575,57 @@ fn path_triggers_status(p: &std::path::Path) -> bool {
             || first == "packed-refs"
             || first == "refs"
             || first == "config"
+            || local_merge::is_operation_metadata(first)
             || (first == "info"
                 && components.next().is_some_and(|item| item.as_os_str() == "exclude"));
     }
     true
+}
+
+#[derive(Clone, Debug)]
+struct WatchGitRoots {
+    git_dir: std::path::PathBuf,
+    common_dir: std::path::PathBuf,
+}
+
+impl WatchGitRoots {
+    fn resolve(path: &str) -> Result<Self, String> {
+        let output = run_git(path, &["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"])?;
+        let mut directories = output.lines();
+        let mut resolve = || -> Result<std::path::PathBuf, String> {
+            let output = directories.next().ok_or("无法读取暂存区快照")?;
+            let directory = std::path::PathBuf::from(output.trim());
+            let absolute = if directory.is_absolute() { directory } else { std::path::Path::new(path).join(directory) };
+            std::fs::canonicalize(absolute).map_err(|e| e.to_string())
+        };
+        Ok(Self { git_dir: resolve()?, common_dir: resolve()? })
+    }
+
+    fn is_metadata(&self, path: &std::path::Path) -> bool {
+        path.starts_with(&self.git_dir) || path.starts_with(&self.common_dir)
+    }
+
+    fn triggers_status(&self, path: &std::path::Path) -> bool {
+        let relative = path.strip_prefix(&self.git_dir)
+            .or_else(|_| path.strip_prefix(&self.common_dir));
+        let Ok(relative) = relative else { return path_triggers_status(path); };
+        let mut parts = relative.components();
+        let Some(first) = parts.next().map(|part| part.as_os_str()) else { return true; };
+        first == "index" || first == "HEAD" || first == "packed-refs" || first == "refs"
+            || first == "config" || first == "config.worktree"
+            || local_merge::is_operation_metadata(first)
+            || (first == "info" && parts.next().is_some_and(|part| part.as_os_str() == "exclude"))
+    }
+
+    fn external_watch_dirs(&self, repo: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut directories = Vec::new();
+        for directory in [&self.common_dir, &self.git_dir] {
+            if !directory.starts_with(repo) && !directories.iter().any(|watched: &std::path::PathBuf| directory.starts_with(watched)) {
+                directories.push(directory.clone());
+            }
+        }
+        directories
+    }
 }
 
 /// Start watching `path` recursively. Emits one coalesced `working-tree-changed`
@@ -3305,6 +3642,9 @@ pub fn start_watch(
     if map.contains_key(&path) {
         return Ok(());
     }
+    let roots = WatchGitRoots::resolve(&path)?;
+    let repo_root = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
+    let external_watch_dirs = roots.external_watch_dirs(&repo_root);
     let repo = path.clone();
     // `notify` can deliver several events for one editor save. Coalesce them
     // before crossing the Rust/WebView boundary so idle and burst CPU stay low.
@@ -3319,9 +3659,9 @@ pub fn start_watch(
                     pending_batch.full = true;
                     pending_batch.paths.clear();
                 }
-                for event_path in ev.paths.iter().filter(|p| path_triggers_status(p)) {
+                for event_path in ev.paths.iter().filter(|p| roots.triggers_status(p)) {
                     relevant = true;
-                    if path_in_git(event_path) {
+                    if roots.is_metadata(event_path) || path_in_git(event_path) {
                         pending_batch.full = true;
                         pending_batch.paths.clear();
                         continue;
@@ -3382,6 +3722,10 @@ pub fn start_watch(
     watcher
         .watch(std::path::Path::new(&path), RecursiveMode::Recursive)
         .map_err(|e| format!("无法监听目录：{e}"))?;
+    for directory in external_watch_dirs {
+        watcher.watch(&directory, RecursiveMode::Recursive)
+            .map_err(|e| format!("无法监听 Git 暂存区：{e}"))?;
+    }
     map.insert(path, watcher);
     Ok(())
 }

@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import {
   invoke, pickRepoFolder, openRepo, initRepo, loadBranches, loadRemotes, loadHistory,
-  loadStatus, loadStatusPaths, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
+  loadStatus, loadWorkingStatus, stageFiles, unstageFiles, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
   attributeBranches, filterHistoryByHiddenBranches, historyBranchContext, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
   createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, undoCommitPreview, undoLastCommit, fetchAll, pull, push, forcePushTarget, forcePushPreview, forcePush, gitlabTest, gitlabTokenInfo, githubTokenInfo,
   createPullRequest, branchColor, checkForUpdate, getAppVersion, discardFile, discardAll,
@@ -31,15 +31,24 @@ import {
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
   cancelGitOp, isCancelled, syncLocal, revealInFileManager, openRepositoryRemote,
   authorColor, authorInitials, loadFileHistory, loadFileTraceDiff, loadFileBlame,
+  localMergePreview, mergeLocal, loadRepoOperation, continueMerge, abortMerge, continueCherryPick, abortCherryPick, mergeTool, loadProjectOverview,
 } from "./git";
-import type { DepInfo, Tag, RepoInfo, CreatedRepo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged, ForcePushPreview, FileHistoryPage, FileTraceDiff, FileBlame } from "./git";
+import type { DepInfo, Tag, RepoInfo, CreatedRepo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged, ForcePushPreview, FileHistoryPage, FileTraceDiff, FileBlame, LocalMergePreview, RepositoryOperation } from "./git";
 import { buildSmartMergeCommits, commitBranchName, commitHistoryDate, orderedEquivalentCommits } from "./smartMerge";
 import { highlightDiffRows } from "./diffSyntax";
 import type { DiffSyntaxToken, DiffSyntaxPalette } from "./diffSyntax";
+import { workingFileKey, workingFileCount, sameWorking, mergeWorkingPaths, shouldRefreshWorkingFile } from "./workingStatus";
+import type { WorkingFile } from "./workingStatus";
+import { ProjectOverview } from "./Workbench";
+import { ToolbarText } from "./ToolbarText";
+import { useProjectOverview } from "./useProjectOverview";
+import { overviewAttentionCount } from "./projectOverview";
+import type { OverviewTarget } from "./projectOverview";
+export type { WorkingFile } from "./workingStatus";
 
 // ─── theme ────────────────────────────────────────────────────────────────────
 
-interface ThemeColors {
+export interface ThemeColors {
   bg: string;
   bgPanel: string;
   glass: string;
@@ -436,13 +445,6 @@ export interface GraphRowInfo {
     bottom: string[];
   };
 }
-export interface WorkingFile {
-  path: string; status: "modified" | "added" | "deleted" | "untracked";
-  staged: boolean; diff?: string; diffError?: boolean;
-  // Set for untracked previews rendered by reading the file directly.
-  previewKind?: "text" | "binary" | "too_large" | "empty" | "missing";
-  previewTruncated?: boolean; previewSize?: number;
-}
 type GitOperationKind = "fetch" | "pull" | "push";
 interface OperationContext {
   project: string;
@@ -772,8 +774,9 @@ function ProjectItem({ project, isActive, onSelect, onClose, onContextMenu }: {
 
 // ─── Repository navigation ───────────────────────────────────────────────────
 
-function ProjectSidebar({ projects, activeId, open, onSelect, onClose, onContextMenu, onAdd, onClone }: {
+function ProjectSidebar({ projects, activeId, homeActive, attentionCount, open, onHome, onSelect, onClose, onContextMenu, onAdd, onClone }: {
   open: boolean; projects: Project[]; activeId: string;
+  homeActive: boolean; attentionCount: number; onHome: () => void;
   onSelect: (id: string) => void; onClose: (id: string) => void;
   onContextMenu: (event: React.MouseEvent, project: Project) => void;
   onAdd: () => void; onClone: () => void;
@@ -828,6 +831,15 @@ function ProjectSidebar({ projects, activeId, open, onSelect, onClose, onContext
         style={{ background: "transparent",
           "--gk-project-hover": t.rowHover, "--gk-project-selected": t.rowSelected,
           "--gk-project-close-hover": t.inputBg } as React.CSSProperties}>
+        <button type="button" onClick={onHome} aria-current={homeActive ? "page" : undefined}
+          className="gk-shell-button flex items-center gap-2.5 mx-2 mt-1 mb-2 px-2.5 h-9 text-xs font-semibold cursor-pointer"
+          style={{ borderRadius: R - 3, background: homeActive ? t.rowSelected : undefined,
+            color: homeActive ? t.text : t.textSec }}>
+          <LayoutGrid size={14} aria-hidden="true" style={{ color: homeActive ? t.accentFg : t.textMuted }} />
+          <span>{tx("工作台")}</span>
+          {attentionCount > 0 && <span className="ml-auto text-[10px] tabular-nums px-1.5 py-0.5"
+            style={{ borderRadius: 4, background: t.inputBg, color: t.textSec }}>{attentionCount}</span>}
+        </button>
         <div className="flex items-center justify-between h-10 px-3 flex-shrink-0">
           <span className="text-[11px] font-semibold" style={{ color: t.textMuted }}>{tx("仓库")}</span>
           <button ref={addButtonRef} onClick={toggleAddMenu}
@@ -887,9 +899,10 @@ function ProjectSidebar({ projects, activeId, open, onSelect, onClose, onContext
 
 // ─── ActionBar ────────────────────────────────────────────────────────────────
 
-function ActionBar({ project, branch, canMerge, sidebarOpen, onToggleSidebar, onCreateBranch, onFetch, onPull, onPush, onUndoCommit, onForcePush,
+function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch, onPull, onPush, onUndoCommit, onForcePush,
   onCreateTag, onCherryPick, onStash, onCreatePR, pushCount = 0, busy }: {
-  project?: Project; branch: string; canMerge: boolean; sidebarOpen: boolean; onToggleSidebar: () => void;
+  project?: Project; branch: string; canMerge: boolean;
+  onMerge?: () => void;
   onCreateBranch?: () => void; onFetch?: () => void; onPull?: () => void; onPush?: () => void; onUndoCommit?: () => void; onForcePush?: () => void;
   onCreateTag?: () => void; onCherryPick?: () => void; onStash?: () => void; onCreatePR?: () => void;
   pushCount?: number; busy?: null | GitOperationKind | "other";
@@ -918,31 +931,26 @@ function ActionBar({ project, branch, canMerge, sidebarOpen, onToggleSidebar, on
     { label: tx("推送"), Icon: Upload, action: onPush, op: "push" },
   ] as const;
   const moreActions = [
-    { label: tx("遴选"), Icon: GitCommit, action: onCherryPick },
+    { label: tx("Cherry-pick"), Icon: GitCommit, action: onCherryPick },
     { label: tx("储藏"), Icon: Layers, action: onStash },
     { label: tx("创建 Tag 并推送"), Icon: TagIcon, action: onCreateTag },
     { label: tx("创建合并请求"), Icon: GitPullRequest, action: onCreatePR },
     { label: tx("强制推送…"), Icon: AlertTriangle, action: onForcePush },
   ];
   return (
-    <div className="gk-action-bar flex items-center gap-1.5 px-3 flex-shrink-0 select-none"
+    <div className="flex items-center gap-1.5 h-full flex-1 min-w-0"
       role="group" aria-label={tx("仓库操作")}
-      style={{ background: t.bg, borderBottom: `0.5px solid ${t.border}`, color: t.textSec,
+      style={{ color: t.textSec,
         "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
-      <button onClick={onToggleSidebar} aria-label={sidebarOpen ? tx("收起项目栏") : tx("展开项目栏")}
-        aria-expanded={sidebarOpen} aria-controls="project-sidebar" title={sidebarOpen ? tx("收起项目栏") : tx("展开项目栏")}
-        className="gk-shell-button flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer">
-        <PanelLeft size={17} aria-hidden="true" />
-      </button>
       <div className="gk-toolbar-project flex items-center min-w-0 gap-2 px-2 mr-1"
         style={{ borderRight: `0.5px solid ${t.border}` }}>
-        <span className="gk-toolbar-name text-xs font-semibold truncate" title={project?.path} style={{ color: t.text }}>{project?.name ?? "GitKit"}</span>
+        <span className="gk-toolbar-name text-xs font-semibold truncate" title={project?.path} style={{ color: t.text }}><ToolbarText>{project?.name ?? "GitKit"}</ToolbarText></span>
         <span className="flex items-center gap-1 min-w-0" style={{ color: t.textMuted }}>
           <GitBranch size={12} className="flex-shrink-0" aria-hidden="true" />
-          <span className="gk-toolbar-branch text-[11px] truncate" title={branch}>{project?.initialized === false ? tx("未初始化 Git") : project ? branch || tx("未检出分支") : tx("选择仓库")}</span>
+          <span className="gk-toolbar-branch text-[11px] truncate" title={branch}><ToolbarText order={1}>{project?.initialized === false ? tx("未初始化 Git") : project ? branch || tx("未检出分支") : tx("选择仓库")}</ToolbarText></span>
         </span>
       </div>
-      {actions.map(({ label, Icon, action, op }) => {
+      {actions.map(({ label, Icon, action, op }, index) => {
         const running = busy === op;
         return (
           <button key={op} onClick={action} disabled={!action || !!busy} aria-busy={running || undefined}
@@ -952,7 +960,7 @@ function ActionBar({ project, branch, canMerge, sidebarOpen, onToggleSidebar, on
               "--gk-action-accent": t.accentFg,
               "--gk-action-active-bg": t.accentBg } as React.CSSProperties}>
             <Icon size={15} aria-hidden="true" className="gk-git-action-icon" />
-            {label}
+            <ToolbarText order={index + 2}>{label}</ToolbarText>
             {op === "push" && pushCount > 0 && <span className="text-[10px] tabular-nums" style={{ color: t.accentFg }}>{pushCount}</span>}
           </button>
         );
@@ -963,18 +971,18 @@ function ActionBar({ project, branch, canMerge, sidebarOpen, onToggleSidebar, on
         style={{ borderRadius: R - 3, "--gk-action-accent": t.accentFg,
           "--gk-action-active-bg": t.accentBg } as React.CSSProperties}>
         <RotateCcw size={15} aria-hidden="true" className="gk-git-action-icon" />
-        {tx("撤回")}
+        <ToolbarText order={5}>{tx("撤回")}</ToolbarText>
       </button>
       <div className="flex-1" />
       <button onClick={onCreateBranch} disabled={!onCreateBranch || !!busy}
         className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
         style={{ borderRadius: R - 3 }}>
-        <GitBranchPlus size={15} aria-hidden="true" /> {tx("新建分支")}
+        <GitBranchPlus size={15} aria-hidden="true" /><ToolbarText order={6}>{tx("新建分支")}</ToolbarText>
       </button>
-      <button disabled={!canMerge || !!busy} onClick={() => toast(tf("请选择要合并到 {0} 的分支", branch || tx("当前分支")))}
+      <button disabled={!canMerge || !onMerge || !!busy} onClick={onMerge}
         className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
         style={{ borderRadius: R - 3, background: canMerge ? t.accent : t.inputBg, color: canMerge ? "#fff" : t.textMuted }}>
-        <GitMerge size={15} aria-hidden="true" /> {tx("合并")}
+        <GitMerge size={15} aria-hidden="true" /><ToolbarText order={7}>{tx("合并")}</ToolbarText>
       </button>
       <button ref={moreButton} disabled={!moreActions.some(({ action }) => !!action) || !!busy} aria-label={tx("更多仓库操作")} title={tx("更多仓库操作")}
         aria-haspopup="menu" aria-expanded={!!morePos}
@@ -1161,8 +1169,9 @@ function OperationCapsule({ kind, title, context, progress, outcome, settledPhas
   );
 }
 
-function StatusBar({ project, branch, changes, ready, errored, checkProgress, checkResult, onShowCheckResult, onShowChanges, onSearch }: {
+function StatusBar({ project, branch, changes, ready, errored, home, checkProgress, checkResult, onShowCheckResult, onShowChanges, onSearch }: {
   project?: Project; branch?: Branch; changes: number; ready: boolean; errored: boolean;
+  home?: { projects: number; attention: number; refreshing: boolean };
   checkProgress: CheckProgress | null; checkResult: CheckResult | null; onShowCheckResult: () => void; onShowChanges: () => void; onSearch: () => void;
 }) {
   const t = useTheme();
@@ -1201,6 +1210,8 @@ function StatusBar({ project, branch, changes, ready, errored, checkProgress, ch
             <span className="truncate tabular-nums" title={checkProgress.project}>{checkProgress.paused ? tx("等待休眠恢复后补查") : tf("已检查 {0} / {1} · 正在检查 {2}", checkProgress.current, checkProgress.total, checkProgress.project)}</span>
             <RefreshCw size={12} className="animate-spin flex-shrink-0" aria-hidden="true" />
           </>
+        ) : home ? (
+          <><LayoutGrid size={12} aria-hidden="true" /><span>{tf("{0} 个仓库", home.projects)}</span></>
         ) : checkResult?.rows.length ? (
           <button onClick={onShowCheckResult} className="gk-status-pill gk-shell-button flex items-center gap-1.5 px-2 min-w-0 cursor-pointer"
             title={tf("检查完成于 {0}，点击查看结果", formatFullDate(new Date(checkResult.completedAt).toISOString()))}>
@@ -1221,7 +1232,8 @@ function StatusBar({ project, branch, changes, ready, errored, checkProgress, ch
         )}
       </div>
       <div className="flex items-center justify-center min-w-0" role="status">
-        {errored ? <span className="gk-status-pill px-3">{tx("仓库加载失败")}</span>
+        {home ? <span className="gk-status-pill px-3">{home.refreshing ? tx("正在刷新状态…") : tf("{0} 个项目需关注", home.attention)}</span>
+          : errored ? <span className="gk-status-pill px-3">{tx("仓库加载失败")}</span>
           : project && !ready ? <span className="gk-status-pill px-3">{tx("正在加载仓库…")}</span>
           : project?.initialized === false ? <span className="gk-status-pill px-3">{tx("点击推送以初始化 Git")}</span>
           : ready ?
@@ -1242,10 +1254,10 @@ function StatusBar({ project, branch, changes, ready, errored, checkProgress, ch
           </button>
         : <span className="gk-status-pill px-3 truncate">{tx("打开仓库以开始")}</span>}
       </div>
-      <button onClick={onSearch} disabled={!ready || project?.initialized === false}
+      <button onClick={onSearch} disabled={!home && (!ready || project?.initialized === false)}
         className="gk-status-pill gk-shell-button justify-self-end flex items-center gap-2 pl-2.5 pr-1 flex-shrink-0 cursor-pointer">
         <Search size={12} aria-hidden="true" />
-        <span className="whitespace-nowrap">{tx("搜索提交")}</span>
+        <span className="whitespace-nowrap">{home ? tx("搜索项目") : tx("搜索提交")}</span>
         <kbd className="gk-status-key flex items-center px-1.5 font-[inherit]">{IS_WINDOWS ? "Ctrl F" : "⌘ F"}</kbd>
       </button>
     </footer>
@@ -1867,8 +1879,8 @@ function CommitRow({ commit, branchContext, graphInfo, selected, highlight = fal
                         onClick={(e) => { e.stopPropagation(); onRelatedCommitClick?.(occurrence); }}
                         className="w-full flex items-center gap-2 px-2 py-1.5 text-left cursor-pointer"
                         style={{ borderTop: index > 0 ? `0.5px solid ${t.border}` : "none" }}>
-                        <span className="text-[10px] font-semibold w-7 flex-shrink-0" style={{ color: index === 0 ? t.accent2Fg : t.textMuted }}>
-                          {index === 0 ? tx("来源") : tx("遴选")}
+                        <span className="text-[10px] font-semibold w-16 flex-shrink-0" style={{ color: index === 0 ? t.accent2Fg : t.textMuted }}>
+                          {index === 0 ? tx("来源") : tx("Cherry-pick")}
                         </span>
                         <GitBranch size={10} aria-hidden="true" className="flex-shrink-0"
                           style={{ color: branchColor(commitBranchName(occurrence)) }} />
@@ -2497,7 +2509,7 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onExpa
             <span style={{ color: t.textMuted }}>{commit.stats.files} {tx("个文件")}</span>
           </div>
           <DetailMenuButton label={tx("更多提交操作")} items={[
-            ...(onCherryPick ? [{ label: tx("遴选到当前分支"), Icon: GitCommit, onClick: onCherryPick } as CtxItem] : []),
+            ...(onCherryPick ? [{ label: tx("Cherry-pick 到当前分支"), Icon: GitCommit, onClick: onCherryPick } as CtxItem] : []),
             ...(onCheckout && checkoutBranch ? [{ label: tf("检出 {0} 并同步到此提交", checkoutBranch), Icon: Download, onClick: onCheckout } as CtxItem] : []),
             ...((onCherryPick || (onCheckout && checkoutBranch)) ? [{ sep: true } as CtxItem] : []),
             { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(commit.fullHash).catch(() => toast.error(tx("无法复制到剪贴板"))); } },
@@ -2777,17 +2789,18 @@ function StashDetail({ stash, files, selectedFile, onFileSelect, onExpand, onApp
 
 // ─── WorkingFileRow ───────────────────────────────────────────────────────────
 
-function WorkingFileRow({ file, selected, onSelect, onStage, onUnstage, onDiscard }: {
+function WorkingFileRow({ file, selected, disabled, onSelect, onStage, onUnstage, onDiscard }: {
   file: WorkingFile; selected: boolean; onSelect: () => void;
+  disabled?: boolean;
   onStage?: () => void; onUnstage?: () => void; onDiscard?: () => void;
 }) {
   const t = useTheme();
   const [hovered, setHovered] = useState(false);
-  const statusColor = { modified: t.amber, added: t.green, deleted: t.red, untracked: t.textMuted }[file.status];
-  const statusLabel = { modified: "M", added: "A", deleted: "D", untracked: "?" }[file.status];
+  const statusColor = { modified: t.amber, added: t.green, deleted: t.red, untracked: t.textMuted, renamed: t.amber, conflicted: t.red }[file.status];
+  const statusLabel = { modified: "M", added: "A", deleted: "D", untracked: "?", renamed: "R", conflicted: "!" }[file.status];
   const parts = file.path.split("/"), name = parts.pop()!;
   return (
-    <div className="flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors"
+    <div className="group flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors"
       style={{ margin: "1px 6px", width: "calc(100% - 12px)",
         background: selected ? t.rowSelected : hovered ? t.rowHover : "transparent",
         borderRadius: R - 2 }}
@@ -2800,11 +2813,14 @@ function WorkingFileRow({ file, selected, onSelect, onStage, onUnstage, onDiscar
       <div className="flex flex-col min-w-0 flex-1">
         <span className="text-xs truncate" style={{ color: selected ? t.accentFg : t.textSec }}>{name}</span>
         {parts.length > 0 && <span className="text-[12px] truncate" style={{ color: t.textFaint }}>{parts.join("/")}</span>}
+        {file.hasStaged && file.hasUnstaged && <span className="text-[11px] truncate" style={{ color: t.amber }}>
+          {file.staged ? tx("还有未暂存改动") : tx("部分改动已暂存")}
+        </span>}
       </div>
-      {hovered && (
-        <div className="flex items-center gap-1 flex-shrink-0">
+      {(
+        <div className="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
           {onDiscard && (
-            <button onClick={(e) => { e.stopPropagation(); onDiscard(); }}
+            <button disabled={disabled} onClick={(e) => { e.stopPropagation(); onDiscard(); }}
               className="flex items-center justify-center w-5 h-5 transition-colors"
               title={file.status === "untracked" ? tx("删除此未跟踪文件") : tx("丢弃此文件的更改")}
               style={{ background: t.inputBg, color: t.textMuted, borderRadius: 6 }}
@@ -2814,7 +2830,7 @@ function WorkingFileRow({ file, selected, onSelect, onStage, onUnstage, onDiscar
             </button>
           )}
           {onStage && (
-            <button onClick={(e) => { e.stopPropagation(); onStage(); }}
+            <button disabled={disabled} title={tx("暂存此文件")} aria-label={tx("暂存此文件")} onClick={(e) => { e.stopPropagation(); onStage(); }}
               className="flex items-center justify-center w-5 h-5 transition-colors"
               style={{ background: t.greenBg, color: t.green, borderRadius: 6 }}
               onMouseEnter={(e) => (e.currentTarget.style.background = t.green + "30")}
@@ -2823,7 +2839,7 @@ function WorkingFileRow({ file, selected, onSelect, onStage, onUnstage, onDiscar
             </button>
           )}
           {onUnstage && (
-            <button onClick={(e) => { e.stopPropagation(); onUnstage(); }}
+            <button disabled={disabled} title={tx("取消暂存此文件")} aria-label={tx("取消暂存此文件")} onClick={(e) => { e.stopPropagation(); onUnstage(); }}
               className="flex items-center justify-center w-5 h-5 transition-colors"
               style={{ background: t.redBg, color: t.red, borderRadius: 6 }}
               onMouseEnter={(e) => (e.currentTarget.style.background = t.red + "25")}
@@ -2839,13 +2855,15 @@ function WorkingFileRow({ file, selected, onSelect, onStage, onUnstage, onDiscar
 
 // ─── ChangesPanel ─────────────────────────────────────────────────────────────
 
-function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFilesChange,
+function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStage, onUnstage, busy, operationActive,
   identities, defaultIdentityId, projectKey, onCommit, onDiscard, onDiscardAll }: {
   files: WorkingFile[]; selectedFile: WorkingFile | null;
   onFileSelect: (f: WorkingFile | null) => void;
-  currentBranch: string; onFilesChange: (files: WorkingFile[]) => void;
+  currentBranch: string; busy: boolean;
+  operationActive: boolean;
+  onStage: (files: string[]) => Promise<void>; onUnstage: (files: string[]) => Promise<void>;
   identities: Identity[]; defaultIdentityId: string; projectKey: string;
-  onCommit: (message: string, files: string[], identity: Identity | null) => Promise<void>;
+  onCommit: (message: string, files: WorkingFile[], identity: Identity | null) => Promise<void>;
   onDiscard: (file: string) => void; onDiscardAll: () => void;
 }) {
   const t = useTheme();
@@ -2877,19 +2895,20 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFile
 
   const staged   = files.filter((f) => f.staged);
   const unstaged = files.filter((f) => !f.staged);
-  const stageFile   = (path: string) => onFilesChange(files.map((f) => f.path === path ? { ...f, staged: true  } : f));
-  const unstageFile = (path: string) => onFilesChange(files.map((f) => f.path === path ? { ...f, staged: false } : f));
-  const stageAll   = () => onFilesChange(files.map((f) => ({ ...f, staged: true  })));
-  const unstageAll = () => onFilesChange(files.map((f) => ({ ...f, staged: false })));
+  const locked = busy || committing;
+  const stageAll = () => { void onStage(unstaged.map((file) => file.path)); };
+  const unstageAll = () => { void onUnstage(staged.map((file) => file.path)); };
+  const isSelected = (file: WorkingFile) => !!selectedFile && workingFileKey(selectedFile) === workingFileKey(file);
   const handleCommit = async () => {
-    if (!commitMsg.trim() || staged.length === 0 || committing) return;
+    if (!commitMsg.trim() || staged.length === 0 || locked || operationActive) return;
+    const submittedDraft = commitMsg;
     setCommitting(true);
     try {
-      await onCommit(commitMsg.trim(), staged.map((f) => f.path), identity);
-      saveCommitDraft(projectKey, "");
-      setCommitMsg(""); onFileSelect(null);
+      await onCommit(commitMsg.trim(), staged, identity);
+      if (loadCommitDraft(projectKey) === submittedDraft) saveCommitDraft(projectKey, "");
+      setCommitMsg((current) => current === submittedDraft ? "" : current);
     } catch (e) {
-      toast.error(tf("提交失败：{0}", e));
+      toast.error(tf("提交失败：{0}", e instanceof Error ? e.message : e));
     } finally {
       setCommitting(false);
     }
@@ -2903,7 +2922,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFile
         {label} <span style={{ color: t.textFaint }}>({count})</span>
       </span>
       {onReset && (
-        <button onClick={onReset}
+        <button disabled={locked} onClick={onReset}
           className="text-[12px] px-2 py-0.5 transition-colors cursor-pointer flex-shrink-0"
           title={tx("丢弃工作区的所有更改（reset --hard + clean）")}
           style={{ color: t.red, background: t.redBg, borderRadius: R - 4,
@@ -2914,7 +2933,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFile
         </button>
       )}
       {count > 0 && (
-        <button onClick={onAction}
+        <button disabled={locked} onClick={onAction}
           className="text-[12px] px-2 py-0.5 transition-colors cursor-pointer flex-shrink-0"
           style={{ color: t.textMuted, background: t.inputBg, borderRadius: R - 4,
             border: `0.5px solid ${t.inputBorder}` }}
@@ -2936,33 +2955,39 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFile
           {staged.length === 0
             ? <div className="px-4 py-3 text-[12px]" style={{ color: t.textFaint }}>{tx("暂无已暂存的文件")}</div>
             : staged.map((f) => (
-              <WorkingFileRow key={f.path} file={f}
-                selected={selectedFile?.path === f.path}
-                onSelect={() => onFileSelect(selectedFile?.path === f.path ? null : f)}
-                onUnstage={() => unstageFile(f.path)}
-                onDiscard={() => onDiscard(f.path)} />
+              <WorkingFileRow key={workingFileKey(f)} file={f} disabled={locked}
+                selected={isSelected(f)}
+                onSelect={() => onFileSelect(isSelected(f) ? null : f)}
+                onUnstage={() => { void onUnstage([f.path]); }} />
             ))}
         </div>
       </div>
 
       <div className="flex-1 flex flex-col overflow-hidden" style={{ borderTop: `0.5px solid ${t.border}` }}>
         <SectionHdr label={tx("未暂存")} count={unstaged.length} action={tx("全部暂存")} onAction={stageAll}
-          onReset={files.length > 0 ? onDiscardAll : undefined} />
+          onReset={!operationActive && files.length > 0 ? onDiscardAll : undefined} />
         <div className="overflow-y-auto flex-1 py-1">
           {unstaged.length === 0
-            ? <div className="px-4 py-3 text-[12px]" style={{ color: t.textFaint }}>{tx("所有文件已暂存")}</div>
+            ? <div className="px-4 py-3 text-[12px]" style={{ color: t.textFaint }}>{files.length ? tx("所有文件已暂存") : tx("工作区没有改动")}</div>
             : unstaged.map((f) => (
-              <WorkingFileRow key={f.path} file={f}
-                selected={selectedFile?.path === f.path}
-                onSelect={() => onFileSelect(selectedFile?.path === f.path ? null : f)}
-                onStage={() => stageFile(f.path)}
-                onDiscard={() => onDiscard(f.path)} />
+              <WorkingFileRow key={workingFileKey(f)} file={f} disabled={locked}
+                selected={isSelected(f)}
+                onSelect={() => onFileSelect(isSelected(f) ? null : f)}
+                onStage={() => { void onStage([f.path]); }}
+                onDiscard={operationActive || (f.hasStaged && staged.some((row) => row.path === f.path && (row.status === "added" || row.status === "renamed"))) ? undefined : () => onDiscard(f.path)} />
             ))}
         </div>
       </div>
 
       {/* Commit area */}
       <div className="flex-shrink-0 p-3" style={{ borderTop: `0.5px solid ${t.border}` }}>
+        {operationActive ? <p className="text-xs leading-5" style={{ color: t.textSec }}>
+          {tx("仓库有未完成的操作。解决冲突并暂存后，通过上方操作栏继续；普通提交草稿会保留。")}
+        </p> : <>
+        <div className="text-[11px] mb-2 leading-5" style={{ color: t.textMuted }} aria-live="polite">
+          <div>{tf("本次提交 {0} 个文件", staged.length)}</div>
+          {unstaged.length > 0 && <div>{tf("{0} 个文件的未暂存改动会保留", unstaged.length)}</div>}
+        </div>
         <textarea value={commitMsg} onChange={(e) => updateCommitMsg(e.target.value)}
           placeholder={tx("提交信息（必填）")} rows={3}
           className="w-full resize-none text-xs p-2.5 outline-none transition-all"
@@ -2992,16 +3017,16 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFile
           )}
         </div>
 
-        <button {...press(handleCommit)} disabled={!commitMsg.trim() || staged.length === 0 || committing}
+        <button {...press(handleCommit)} disabled={!commitMsg.trim() || staged.length === 0 || locked}
           className="w-full mt-2 py-2 text-xs font-semibold transition-all duration-150 cursor-pointer"
           style={{
-            background: !commitMsg.trim() || staged.length === 0 || committing ? t.inputBg : t.accent,
-            color:      !commitMsg.trim() || staged.length === 0 || committing ? t.textFaint : "#fff",
+            background: !commitMsg.trim() || staged.length === 0 || locked ? t.inputBg : t.accent,
+            color:      !commitMsg.trim() || staged.length === 0 || locked ? t.textFaint : "#fff",
             borderRadius: R, border: `0.5px solid ${t.inputBorder}`,
-            boxShadow: commitMsg.trim() && staged.length > 0 && !committing ? `0 4px 16px ${t.accent}44` : "none",
-            cursor: !commitMsg.trim() || staged.length === 0 || committing ? "not-allowed" : "pointer",
+            boxShadow: commitMsg.trim() && staged.length > 0 && !locked ? `0 4px 16px ${t.accent}44` : "none",
+            cursor: !commitMsg.trim() || staged.length === 0 || locked ? "not-allowed" : "pointer",
           }}
-          onMouseEnter={(e) => { if (commitMsg.trim() && staged.length > 0 && !committing) e.currentTarget.style.opacity = "0.88"; }}
+          onMouseEnter={(e) => { if (commitMsg.trim() && staged.length > 0 && !locked) e.currentTarget.style.opacity = "0.88"; }}
           onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}>
           <span className="flex items-center justify-center gap-1.5">
             <GitCommit size={11} className={committing ? "animate-spin" : undefined} />
@@ -3014,6 +3039,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onFile
             )}
           </span>
         </button>
+        </>}
       </div>
     </div>
   );
@@ -3034,14 +3060,15 @@ const DIFF_RENDER_CAP = 2000;
 
 function WorkingFileDiff({ file, repoPath }: { file: WorkingFile; repoPath: string }) {
   const t = useTheme();
-  const statusColor = { modified: t.amber, added: t.green, deleted: t.red, untracked: t.textMuted }[file.status];
-  const statusLabel = { modified: tx("已修改"), added: tx("新文件"), deleted: tx("已删除"), untracked: tx("未追踪") }[file.status];
+  const statusColor = { modified: t.amber, added: t.green, deleted: t.red, untracked: t.textMuted, renamed: t.amber, conflicted: t.red }[file.status];
+  const statusLabel = { modified: tx("已修改"), added: tx("新文件"), deleted: tx("已删除"), untracked: tx("未追踪"), renamed: tx("已重命名"), conflicted: tx("存在冲突") }[file.status];
 
   const notice =
     file.previewKind === "binary"    ? tx("二进制文件,无法预览")
     : file.previewKind === "too_large" ? tf("文件过大（{0}）,已跳过预览", formatBytes(file.previewSize))
     : file.previewKind === "empty"     ? tx("空文件")
     : file.previewKind === "missing"   ? tx("文件已不存在")
+    : file.status === "renamed" && file.diff !== undefined && !file.diff.includes("@@") ? tx("文件已重命名，内容没有变化")
     : null;
 
   const changeRows = useMemo(() => file.diff ? parseDiffRows(file.diff.split("\n")) : [], [file.diff]);
@@ -3052,6 +3079,10 @@ function WorkingFileDiff({ file, repoPath }: { file: WorkingFile; repoPath: stri
     <CodeDiffSurface key={`${repoPath}:${file.path}:${file.staged}:${file.status}`} filePath={file.path} diff={file.diff}
       additions={file.diff ? additions : undefined} deletions={file.diff ? deletions : undefined}
       statusLabel={statusLabel} statusColor={statusColor}
+      toolbar={<div className="flex items-center justify-between gap-3 px-4 py-2 text-[12px]" style={{ color: t.textMuted, borderBottom: `0.5px solid ${t.border}` }}>
+        <span>{file.staged ? tx("本次提交的改动") : tx("尚未加入提交的改动")}</span>
+        <span className="text-[11px] flex-shrink-0">{file.staged ? tx("HEAD → 暂存区") : tx("暂存区 → 工作区")}</span>
+      </div>}
       loading={!!repoPath && file.diff === undefined && file.previewKind === undefined && !file.diffError}
       diffError={file.diffError}
       diffNotice={notice} diffTruncated={file.previewTruncated}
@@ -3065,24 +3096,6 @@ function WorkingFileDiff({ file, repoPath }: { file: WorkingFile; repoPath: stri
 // falling back to the very first file if none look "readable".
 function firstReadableFile(files: CommitFile[]): CommitFile | null {
   return files.find((f) => f.additions + f.deletions > 0) ?? files[0] ?? null;
-}
-
-// Same set of working files (including staging state)? Used to skip no-op refreshes.
-function sameWorking(a: WorkingFile[], b: WorkingFile[]): boolean {
-  if (a.length !== b.length) return false;
-  const bm = new Map(b.map((f) => [f.path, `${f.status}:${f.staged ? 1 : 0}`]));
-  return a.every((f) => bm.get(f.path) === `${f.status}:${f.staged ? 1 : 0}`);
-}
-
-function mergeWorkingPaths(previous: WorkingFile[], paths: string[], fresh: WorkingFile[]): WorkingFile[] {
-  const covers = (file: string, changed: string) => file === changed || file.startsWith(`${changed}/`);
-  const merged = new Map(
-    previous
-      .filter((file) => !paths.some((changed) => covers(file.path, changed)))
-      .map((file) => [file.path, file]),
-  );
-  for (const file of fresh) merged.set(file.path, file);
-  return [...merged.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
 const REAL_CACHE_LIMIT = 2;
@@ -3140,16 +3153,18 @@ function loadProjects(): Project[] {
       }));
   } catch { return []; }
 }
-function saveProjects(projs: Project[]): void {
+function saveProjects(serialized: string): void {
   try {
-    localStorage.setItem("gitkit.projects",
-      JSON.stringify(projs.map((p) => ({ id: p.id, path: p.path, name: p.name, branch: p.branch, color: p.color, initialized: p.initialized }))));
+    localStorage.setItem("gitkit.projects", serialized);
   } catch { /* ignore */ }
 }
 function loadActiveProjectId(): string {
   const projs = loadProjects();
   const stored = localStorage.getItem("gitkit.activeProjectId") ?? "";
   return projs.some((p) => p.id === stored) ? stored : (projs[0]?.id ?? "");
+}
+function loadWorkspaceView(): "home" | "repository" {
+  return localStorage.getItem("gitkit.workspaceView") === "home" || loadProjects().length === 0 ? "home" : "repository";
 }
 function loadThemeMode(): ThemeMode {
   const s = localStorage.getItem("gitkit.themeMode");
@@ -4161,6 +4176,183 @@ function TagDialog({ path, currentBranch, busy, onCancel, onConfirm }: {
   );
 }
 
+function LocalMergeDialog({ path, branch, sources, dirty, onCancel, onConfirm, onChanges, onStash }: {
+  path: string; branch: string; sources: string[]; dirty: boolean;
+  onCancel: () => void; onConfirm: (preview: LocalMergePreview) => Promise<void>;
+  onChanges: () => void; onStash: () => void;
+}) {
+  const t = useTheme();
+  const [source, setSource] = useState(sources[0] ?? "");
+  const [preview, setPreview] = useState<LocalMergePreview | null>(null);
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [merging, setMerging] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const selectRef = useRef<HTMLSelectElement>(null);
+  useEffect(() => { selectRef.current?.focus(); }, []);
+  useEffect(() => {
+    if (!sources.includes(source)) setSource(sources[0] ?? "");
+  }, [sources, source]);
+  useEffect(() => {
+    let cancelled = false;
+    setPreview(null); setError("");
+    if (!source || dirty) { setChecking(false); return; }
+    setChecking(true);
+    const timer = window.setTimeout(() => {
+      localMergePreview(path, source).then((result) => {
+        if (cancelled) return;
+        if (result.branch !== branch) setError(tx("当前分支已变化，请关闭并重新发起合并。"));
+        else setPreview(result);
+      }).catch((e) => { if (!cancelled) setError(String(e)); })
+        .finally(() => { if (!cancelled) setChecking(false); });
+    }, 200);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [path, branch, source, dirty, retry]);
+  const close = () => { if (!merging) onCancel(); };
+  const submit = async () => {
+    if (!preview || preview.source !== source || preview.branch !== branch || checking || merging || dirty || preview.kind === "up-to-date") return;
+    setMerging(true); setError("");
+    try { await onConfirm(preview); }
+    catch (e) { setPreview(null); setError(String(e)); }
+    finally { setMerging(false); }
+  };
+  const recoveryButtonStyle = {
+    color: t.textSec, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 2,
+    "--gk-shell-hover": t.rowHover,
+  } as React.CSSProperties;
+  return <Modal title={tx("合并分支")} Icon={GitMerge} width={540} onClose={close}
+    footer={<ModalFooter onCancel={close} onConfirm={submit}
+      confirmLabel={preview?.conflicts.length ? tx("合并并处理冲突") : tx("确认合并")}
+      disabled={!preview || preview.source !== source || preview.branch !== branch || dirty || checking || preview.kind === "up-to-date"} busy={merging} />}>
+    <Field label={tx("来源分支")}>
+      <select ref={selectRef} value={source} disabled={merging} onChange={(e) => setSource(e.target.value)}
+        className="text-xs px-2.5 py-2 cursor-pointer outline-none w-full" style={dlgCtl(t)}>
+        {sources.length ? sources.map((name) => <option key={name} value={name}>{name}</option>) : <option value="">{tx("没有可合并的分支")}</option>}
+      </select>
+    </Field>
+    <div className="flex items-center gap-2 text-xs min-w-0" style={{ color: t.textSec }}>
+      <GitBranch size={14} className="flex-shrink-0" />
+      <span className="truncate" title={source}>{source || tx("选择来源分支")}</span>
+      <ArrowRight size={14} className="flex-shrink-0" />
+      <strong className="truncate" title={branch} style={{ color: t.text }}>{branch}</strong>
+    </div>
+    <p className="text-xs leading-5" style={{ color: t.textSec }}>{tx("代码会合入当前分支。可以快进时直接前进，否则创建合并提交。")}</p>
+    {dirty && <div role="alert" className="text-xs leading-5 space-y-2" style={{ color: t.amber }}>
+      <p>{tx("当前有未提交改动，请先提交或储藏后再合并。")}</p>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" disabled={merging} {...(merging ? {} : press(onChanges))}
+          className="gk-shell-button inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-medium cursor-pointer"
+          style={recoveryButtonStyle}>
+          <Eye size={14} aria-hidden="true" />{tx("查看改动")}
+        </button>
+        <button type="button" disabled={merging} {...(merging ? {} : press(onStash))}
+          className="gk-shell-button inline-flex items-center justify-center gap-1.5 px-3.5 py-2 text-xs font-medium cursor-pointer"
+          style={recoveryButtonStyle}>
+          <Layers size={14} aria-hidden="true" />{tx("储藏改动…")}
+        </button>
+      </div>
+    </div>}
+    {checking && <div role="status" className="flex items-center gap-2 text-xs" style={{ color: t.textSec }}><RefreshCw size={13} className="animate-spin" />{tx("正在预览合并…")}</div>}
+    {error && <div role="alert" className="text-xs leading-5 space-y-2" style={{ color: t.red }}>
+      <p className="whitespace-pre-wrap break-words">{translateNativeMessage(error)}</p>
+      <button type="button" disabled={merging} onClick={() => setRetry((n) => n + 1)} className="font-medium underline underline-offset-2 cursor-pointer">{tx("重新检查")}</button>
+    </div>}
+    {preview && <div className="text-xs leading-5 space-y-2" aria-live="polite">
+      <p style={{ color: preview.conflicts.length ? t.amber : t.green }}>
+        {preview.kind === "up-to-date" ? tx("来源分支的提交已包含在当前分支中，无需合并。")
+          : preview.conflicts.length ? tf("预计有 {0} 个冲突文件，合并后需要解决并暂存。", preview.conflicts.length)
+          : preview.kind === "fast-forward" ? tx("可以快进合并，不会新增合并提交。") : tx("未发现冲突，将创建合并提交。")}
+      </p>
+      {preview.files.length > 0 && <div style={{ color: t.textSec }}>
+        <p className="mb-1 font-medium">{tf("合并将影响 {0} 个文件", preview.files.length)}</p>
+        <div className="max-h-40 overflow-auto rounded-lg px-3 py-2" style={{ background: t.inputBg }}>
+          {preview.files.map((file) => <div key={file} className="font-mono text-[11px] break-all" style={{ color: preview.conflicts.includes(file) ? t.red : t.textSec }}>{file}</div>)}
+        </div>
+      </div>}
+    </div>}
+  </Modal>;
+}
+
+type RecoverableOperationKind = "merge" | "cherry-pick";
+
+function OperationContinueDialog({ path, kind, identities, defaultIdentityId, onCancel, onConfirm }: {
+  path: string; kind: RecoverableOperationKind; identities: Identity[]; defaultIdentityId: string;
+  onCancel: () => void; onConfirm: (operation: RepositoryOperation, message: string, identity: Identity | null) => Promise<void>;
+}) {
+  const t = useTheme();
+  const isCherryPick = kind === "cherry-pick";
+  const [operation, setOperation] = useState<RepositoryOperation | null>(null);
+  const [message, setMessage] = useState("");
+  const draftLoaded = useRef(false);
+  const [identityId, setIdentityId] = useState(() => resolveIdentityId(path, identities, defaultIdentityId));
+  const [error, setError] = useState("");
+  const [checking, setChecking] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const messageRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setChecking(true); setOperation(null); setError("");
+    loadRepoOperation(path).then((result) => {
+      if (cancelled) return;
+      if (result?.kind !== kind) { setError(tx("当前操作已结束或类型已变化，请关闭后刷新。")); return; }
+      setOperation(result);
+      if (isCherryPick || !draftLoaded.current) { setMessage(result.message); draftLoaded.current = true; }
+      requestAnimationFrame(() => messageRef.current?.focus());
+    }).catch((e) => { if (!cancelled) setError(String(e)); })
+      .finally(() => { if (!cancelled) setChecking(false); });
+    return () => { cancelled = true; };
+  }, [path, kind, isCherryPick, retry]);
+  const close = () => { if (!busy) onCancel(); };
+  const submit = async () => {
+    if (!operation?.canContinue || (!isCherryPick && !message.trim()) || busy || checking) return;
+    setBusy(true); setError("");
+    try { await onConfirm(operation, message.trim(), identities.find((i) => i.id === identityId) ?? null); }
+    catch (e) { setOperation(null); setError(String(e)); }
+    finally { setBusy(false); }
+  };
+  return <Modal title={isCherryPick ? tx("继续 Cherry-pick") : tx("继续合并")} Icon={isCherryPick ? GitCommit : GitMerge} width={540} onClose={close}
+    footer={<ModalFooter onCancel={close} onConfirm={submit} confirmLabel={isCherryPick ? tx("确认继续 Cherry-pick") : tx("完成合并提交")}
+      disabled={!operation?.canContinue || (!isCherryPick && !message.trim()) || checking} busy={busy} />}>
+    {checking && <p role="status" className="text-xs" style={{ color: t.textSec }}>{tx("正在检查 Git 操作状态…")}</p>}
+    {error && <div role="alert" className="text-xs leading-5 space-y-2" style={{ color: t.red }}>
+      <p className="whitespace-pre-wrap break-words">{translateNativeMessage(error)}</p>
+      <button type="button" disabled={busy} onClick={() => setRetry((n) => n + 1)} className="underline underline-offset-2 cursor-pointer">{tx("重新检查")}</button>
+    </div>}
+    {operation && <>
+      <p className="text-xs leading-5" style={{ color: operation.conflicts.length ? t.amber : t.textSec }}>
+        {operation.conflicts.length ? tf("还有 {0} 个冲突文件，请解决并暂存后重新检查。", operation.conflicts.length)
+          : operation.continueBlockedReason ? translateNativeMessage(operation.continueBlockedReason)
+          : isCherryPick && !operation.stagedFiles.length ? tx("没有可提交的暂存改动，请检查解决结果或中止 Cherry-pick。")
+          : isCherryPick && !operation.message.trim() ? tx("原提交说明为空，请在终端明确完成该提交，或中止 Cherry-pick。")
+          : isCherryPick ? tf("将在 {0} 继续 Cherry-pick，提交当前暂存区的 {1} 个文件。", operation.branch, operation.stagedFiles.length)
+          : tf("将在 {0} 完成合并，提交当前暂存区的 {1} 个文件。", operation.branch, operation.stagedFiles.length)}
+      </p>
+      {operation.conflicts.length > 0 && <button type="button" disabled={busy || checking} onClick={() => setRetry((n) => n + 1)}
+        className="self-start text-xs underline underline-offset-2 cursor-pointer" style={{ color: t.textSec }}>{tx("重新检查")}</button>}
+      <div className="max-h-36 overflow-auto rounded-lg px-3 py-2 text-[11px] font-mono" style={{ background: t.inputBg, color: t.textSec }}>
+        {(operation.conflicts.length ? operation.conflicts : operation.stagedFiles).map((file) => <div key={file} className="break-all">{file}</div>)}
+        {!operation.conflicts.length && !operation.stagedFiles.length && <span className="font-sans">{isCherryPick
+          ? tx("当前没有可提交的暂存改动。请检查解决结果，或中止本次 Cherry-pick；GitKit 不会自动跳过提交。")
+          : tx("暂存内容与当前 HEAD 相同，仍可完成合并提交。")}</span>}
+      </div>
+      {operation.unstagedFiles.length > 0 && <p className="text-xs" style={{ color: t.textSec }}>{tf("{0} 个文件的未暂存改动会保留", operation.unstagedFiles.length)}</p>}
+    </>}
+    <Field label={isCherryPick ? tx("原提交信息") : tx("合并提交信息")}>
+      <textarea ref={messageRef} value={message} disabled={busy} readOnly={isCherryPick} rows={4} aria-label={isCherryPick ? tx("原提交信息") : tx("合并提交信息")} onChange={(e) => setMessage(e.target.value)}
+        className="text-xs px-2.5 py-2 resize-none outline-none w-full" style={dlgCtl(t)} />
+      {isCherryPick && <p className="text-[11px] leading-4" style={{ color: t.textSec }}>{tx("保留原提交作者和说明，所选身份仅用作提交者。后续提交若有冲突，将再次暂停。")}</p>}
+    </Field>
+    <Field label={tx("提交者")}>
+      <select value={identityId} disabled={busy} aria-label={tx("提交者")} onChange={(e) => { setIdentityId(e.target.value); saveProjectIdentity(path, e.target.value); }}
+        className="text-xs px-2.5 py-2 outline-none w-full" style={dlgCtl(t)}>
+        {identities.map((identity) => <option key={identity.id} value={identity.id}>{identity.name} · {identity.email}</option>)}
+        <option value="">{tx("仓库默认身份")}</option>
+      </select>
+    </Field>
+  </Modal>;
+}
+
 // ─── CherryPickDialog ────────────────────────────────────────────────────────
 
 function CherryPickDialog({ commit, branches, currentBranch, onCancel, onConfirm }: {
@@ -4170,15 +4362,15 @@ function CherryPickDialog({ commit, branches, currentBranch, onCancel, onConfirm
   const t = useTheme();
   const [target, setTarget] = useState(currentBranch || branches[0]?.name || "");
   return (
-    <Modal title={tx("遴选 (cherry-pick)")} Icon={GitCommit} onClose={onCancel} width={480}
-      footer={<ModalFooter onCancel={onCancel} onConfirm={() => onConfirm(target)} confirmLabel={tx("遴选")} disabled={!target} />}>
-      <Field label={tx("要遴选的提交")}>
+    <Modal title={tx("Cherry-pick")} Icon={GitCommit} onClose={onCancel} width={480}
+      footer={<ModalFooter onCancel={onCancel} onConfirm={() => onConfirm(target)} confirmLabel={tx("Cherry-pick")} disabled={!target} />}>
+      <Field label={tx("要 Cherry-pick 的提交")}>
         <div className="flex items-center gap-2.5 px-3 py-2.5" style={dlgCtl(t)}>
           <span className="font-mono text-[11px] flex-shrink-0" style={{ color: t.textFaint }}>{commit.hash}</span>
           <span className="text-xs truncate" style={{ color: t.text }}>{commit.message}</span>
         </div>
       </Field>
-      <Field label={tx("遴选到分支")}>
+      <Field label={tx("Cherry-pick 到分支")}>
         <select value={target} onChange={(e) => setTarget(e.target.value)}
           className="text-xs px-2.5 py-2 cursor-pointer outline-none w-full" style={dlgCtl(t)}>
           {branches.map((b) => (
@@ -4212,11 +4404,11 @@ function CherryPickConflictDialog({ commit, target, files, onCancel, onContinue 
       .catch(() => {});
     return () => { alive = false; };
   }, []);
-  const [beforeTarget, afterTarget] = tf("将 {0} 遴选到 {1} 会在 {2} 个文件产生冲突：",
+  const [beforeTarget, afterTarget] = tf("将 {0} Cherry-pick 到 {1} 会在 {2} 个文件产生冲突：",
     commit.hash, "{target}", files.length).split("{target}");
 
   return (
-    <Modal title={tx("遴选存在冲突")} Icon={AlertTriangle} width={480} onClose={onCancel}
+    <Modal title={tx("Cherry-pick 存在冲突")} Icon={AlertTriangle} width={480} onClose={onCancel}
       footer={
         <div className="flex flex-col gap-2.5 w-full">
           <div className="flex items-center justify-end gap-2">
@@ -4225,7 +4417,7 @@ function CherryPickConflictDialog({ commit, target, files, onCancel, onContinue 
               style={{ color: t.textMuted, borderRadius: R - 2, border: `0.5px solid ${t.inputBorder}` }}>{tx("取消")}</button>
             <button {...press(() => onContinue(useKal && kalReady))}
               className="px-3.5 py-2 text-xs font-semibold cursor-pointer"
-              style={{ background: t.accent, color: "#fff", borderRadius: R - 2 }}>{tx("继续遴选")}</button>
+              style={{ background: t.accent, color: "#fff", borderRadius: R - 2 }}>{tx("继续 Cherry-pick")}</button>
           </div>
           <label className="flex items-center gap-2 self-end select-none"
             style={{ cursor: kalReady ? "pointer" : "not-allowed", opacity: kalReady ? 1 : 0.5 }}>
@@ -4252,7 +4444,7 @@ function CherryPickConflictDialog({ commit, target, files, onCancel, onContinue 
         ))}
       </div>
       <span className="text-[11px]" style={{ color: t.textFaint }}>
-        {tx("继续后仓库会进入冲突解决状态。勾选 Kaleidoscope 会自动打开它逐个解决,解决完成后自动完成遴选;否则请解决冲突后执行 git cherry-pick --continue。")}
+        {tx("继续后仓库会进入冲突解决状态。可使用 Kaleidoscope 或编辑器解决并暂存，再通过悬浮操作栏检查内容并继续 Cherry-pick，也可以中止。")}
       </span>
     </Modal>
   );
@@ -5421,7 +5613,7 @@ function DependencySettings() {
   const meta: Record<string, { label: string; hint: string }> = {
     git: { label: "Git", hint: tx("核心依赖。macOS 装 Xcode Command Line Tools 或 Homebrew 即可获得。") },
     "git-lfs": { label: "Git LFS", hint: tx("许多仓库用它管理大文件。未安装时 checkout/push 的 LFS 钩子会报错。安装：brew install git-lfs && git lfs install") },
-    ksdiff: { label: "Kaleidoscope", hint: tx("可选。遴选/合并冲突时用它图形化解决。安装 Kaleidoscope.app 后，在其菜单执行「Integrations → Install ksdiff」即可。") },
+    ksdiff: { label: "Kaleidoscope", hint: tx("可选。Cherry-pick/合并冲突时用它图形化解决。安装 Kaleidoscope.app 后，在其菜单执行「Integrations → Install ksdiff」即可。") },
   };
 
   return (
@@ -5711,6 +5903,7 @@ interface UpdateRow {
   error?: string;                                   // the check itself failed
   state: "idle" | "pulling" | "done" | "failed";
   detail?: string;                                  // what the pull did / why it didn't
+  overview?: boolean;                              // live homepage finding, outside the saved report
 }
 /** Branches a plain fast-forward can bring in — diverged ones need a real merge. */
 const ffable = (r: UpdateRow) => r.behind.filter((b) => b.ahead === 0 && !(b.current && r.dirty));
@@ -5922,11 +6115,17 @@ export default function App() {
   // ── project state (restored from last session) ──
   const [projects, setProjects] = useState<Project[]>(loadProjects);
   const [activeProjectId, setActiveProjectId] = useState<string>(loadActiveProjectId);
+  const [workspaceView, setWorkspaceView] = useState<"home" | "repository">(loadWorkspaceView);
   const [projectSidebarOpen, setProjectSidebarOpen] = useState(true);
-  const activeProject = projects.find((p) => p.id === activeProjectId) ?? projects[0];
+  const selectedProject = projects.find((p) => p.id === activeProjectId) ?? projects[0];
+  const activeProject = workspaceView === "repository" ? selectedProject : undefined;
   const isReal = !!activeProject;
-  useEffect(() => { saveProjects(projects); }, [projects]);
+  const persistedProjects = useMemo(() => JSON.stringify(projects.map((p) => ({
+    id: p.id, path: p.path, name: p.name, branch: p.branch, color: p.color, initialized: p.initialized,
+  }))), [projects]);
+  useEffect(() => { saveProjects(persistedProjects); }, [persistedProjects]);
   useEffect(() => { localStorage.setItem("gitkit.activeProjectId", activeProjectId); }, [activeProjectId]);
+  useEffect(() => { localStorage.setItem("gitkit.workspaceView", workspaceView); }, [workspaceView]);
 
   const [selectedCommit, setSelectedCommit]   = useState<Commit | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -5949,6 +6148,8 @@ export default function App() {
   const [collapsedFolders, setCollapsedFolders] = useState<string[]>([]);
   const [selectedWorkingFile, setSelectedWorkingFile] = useState<WorkingFile | null>(null);
   const workingDiffRequestRef = useRef(0);
+  const selectedWorkingRef = useRef(selectedWorkingFile);
+  selectedWorkingRef.current = selectedWorkingFile;
   // Stash under inspection (with its loaded files) + the file whose diff is shown.
   const [selectedStash, setSelectedStash] = useState<(Stash & { files: CommitFile[] }) | null>(null);
   const [selectedStashFile, setSelectedStashFile] = useState<CommitFile | null>(null);
@@ -5959,12 +6160,13 @@ export default function App() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
         if (document.querySelector('[role="dialog"]')) return;
         e.preventDefault();
+        if (workspaceView === "home") { document.getElementById("overview-search")?.focus(); return; }
         if (activeProject?.initialized !== false) setSearchOpen(!!activeProject);
       }
     };
     window.addEventListener("keydown", focusSearch);
     return () => window.removeEventListener("keydown", focusSearch);
-  }, [activeProject]);
+  }, [activeProject, workspaceView]);
 
   // Right-click menu. Native (webview) menu is suppressed everywhere except text
   // fields; only elements that call openCtx get an actual menu.
@@ -5985,11 +6187,19 @@ export default function App() {
 
   // ── real-repo data (loaded from the Rust git backend, cached per repo path) ──
   const [realData, setRealData] = useState<RealData | null>(null);
+  const [overviewIntent, setOverviewIntent] = useState<{ id: string; path: string; target: OverviewTarget } | null>(null);
+  const overviewActionRef = useRef(0);
   const [loadError, setLoadError] = useState<{ path: string; msg: string } | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
   const [checkoutTarget, setCheckoutTarget] = useState<{ branch: string; dirty: boolean } | null>(null);
-  const [cherryTarget, setCherryTarget] = useState<Commit | null>(null);
-  const [cherryConflict, setCherryConflict] = useState<{ commit: Commit; target: string; files: string[] } | null>(null);
+  const [cherryTarget, setCherryTarget] = useState<{ path: string; commit: Commit } | null>(null);
+  const [cherryConflict, setCherryConflict] = useState<{ path: string; commit: Commit; target: string; files: string[] } | null>(null);
+  const cherryPreflightRequest = useRef(0);
+  const [mergeOpen, setMergeOpen] = useState(false);
+  const [operationContinueRequest, setOperationContinueRequest] = useState<{ path: string; kind: RecoverableOperationKind } | null>(null);
+  const [repoOperation, setRepoOperation] = useState<{ path: string; value: RepositoryOperation | null; error: string } | null>(null);
+  const [operationRetry, setOperationRetry] = useState(0);
+  const [mergeToolReady, setMergeToolReady] = useState(false);
   const [createBranchOpen, setCreateBranchOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<Branch | null>(null);
   // `worktree` set → the branch is held by a linked worktree; confirming also
@@ -6036,6 +6246,8 @@ export default function App() {
   const gitBusyRef = useRef(gitBusy);
   gitBusyRef.current = gitBusy;
   const [busyLabel, setBusyLabel] = useState<string | null>(null); // generic long-running operation
+  const workingOperationRef = useRef(false);
+  const workingMutationEpoch = useRef(new Map<string, number>());
   // The operation lock and its visual lifetime are deliberately separate. A
   // result stays readable for at least two seconds, and an engaged capsule waits
   // for the pointer to leave before starting its exit animation.
@@ -6052,7 +6264,8 @@ export default function App() {
   const realCache = useRef<Map<string, RealData>>(new Map());
   // Working-tree state is intentionally separate from the heavy history cache:
   // it can paint as soon as `git status` finishes, without waiting for the graph.
-  const [workingSnapshot, setWorkingSnapshot] = useState<{ path: string; files: WorkingFile[] } | null>(null);
+  const [workingSnapshot, setWorkingSnapshot] = useState<{ path: string; files: WorkingFile[]; changedPaths?: string[] } | null>(null);
+  const workingPreviewContext = useRef<{ path?: string; visible: boolean }>({ visible: false });
   const workingCache = useRef<Map<string, WorkingFile[]>>(new Map());
   const watchedPaths = useRef<string[]>([]); // LRU order: warm repo, active repo
   const warmWatchTimer = useRef<number | null>(null);
@@ -6189,7 +6402,8 @@ export default function App() {
     const onMouseDown = (e: MouseEvent) => {
       if (detailPanelRef.current?.contains(e.target as Node)) return;
       if ((e.target as Element | null)?.closest?.(".gk-expanded-diff-overlay")) return;
-      if ((e.target as Element | null)?.closest?.(".gk-operation-capsule")) return;
+      if ((e.target as Element | null)?.closest?.(".gk-operation-capsule, .gk-repo-operation")) return;
+      if ((e.target as Element | null)?.closest?.(".gk-project-sidebar")) return;
       e.preventDefault();
       e.stopPropagation();
       closeDetail();
@@ -6220,7 +6434,7 @@ export default function App() {
   const activeWorking = workingSnapshot && workingSnapshot.path === activeProject?.path
     ? workingSnapshot.files
     : view?.working ?? [];
-  const changesCount = activeWorking.length;
+  const changesCount = workingFileCount(activeWorking);
   const remoteNames = useMemo(() => remotes.map((r) => r.name), [remotes]);
 
   // ── persist per-repo UI state (hidden/pinned branches, collapsed folders) ──
@@ -6497,6 +6711,7 @@ export default function App() {
 
   const selectWorkingFile = async (file: WorkingFile | null) => {
     const requestId = ++workingDiffRequestRef.current;
+    const repoPath = activeProject?.path;
     setSelectedWorkingFile(file ? { ...file, diffError: false } : null);
     // Load once: skip if a diff or a preview verdict is already attached.
     if (file && file.diff === undefined && file.previewKind === undefined && isReal && activeProject) {
@@ -6504,16 +6719,16 @@ export default function App() {
         if (file.status === "untracked") {
           // git diff shows nothing for untracked files — read the file directly.
           const p = await filePreview(activeProject.path, file.path);
-          setSelectedWorkingFile((current) => requestId === workingDiffRequestRef.current && current?.path === file.path && current.staged === file.staged
+          setSelectedWorkingFile((current) => activePathRef.current === repoPath && requestId === workingDiffRequestRef.current && current?.path === file.path && current.staged === file.staged
             ? { ...current, diff: p.diff, previewKind: p.kind,
               previewTruncated: p.truncated, previewSize: p.size } : current);
         } else {
-          const diff = await workingFileDiff(activeProject.path, file.path, file.staged);
-          setSelectedWorkingFile((current) => requestId === workingDiffRequestRef.current && current?.path === file.path && current.staged === file.staged
+          const diff = await workingFileDiff(activeProject.path, file.path, file.staged, file.originalPath);
+          setSelectedWorkingFile((current) => activePathRef.current === repoPath && requestId === workingDiffRequestRef.current && current?.path === file.path && current.staged === file.staged
             ? { ...current, diff } : current);
         }
       } catch {
-        setSelectedWorkingFile((current) => requestId === workingDiffRequestRef.current && current?.path === file.path && current.staged === file.staged
+        setSelectedWorkingFile((current) => activePathRef.current === repoPath && requestId === workingDiffRequestRef.current && current?.path === file.path && current.staged === file.staged
           ? { ...current, diffError: true } : current);
       }
     }
@@ -6529,12 +6744,62 @@ export default function App() {
   // the cache entry so they miss and re-fetch (and apply urgently, in place).
   const path = activeProject?.path;
 
+  // Read paused operations from Git itself on switch, status change and resume.
+  // Late responses never replace the selected repository's operation state.
+  useEffect(() => {
+    let cancelled = false;
+    if (!path || !gitAvailable) { setRepoOperation(null); return; }
+    loadRepoOperation(path).then((value) => {
+      if (!cancelled) setRepoOperation({ path, value, error: "" });
+    }).catch((e) => {
+      if (!cancelled) setRepoOperation({ path, value: null, error: String(e) });
+    });
+    return () => { cancelled = true; };
+  }, [path, gitAvailable, workingSnapshot, reloadTick, operationRetry]);
+  const activeRepoOperation = repoOperation && repoOperation.path === path ? repoOperation.value : null;
+  const recoverableOperation = activeRepoOperation?.kind === "merge" || activeRepoOperation?.kind === "cherry-pick";
+  const operationKnown = !gitAvailable || (!!repoOperation && repoOperation.path === path && !repoOperation.error);
+  const canChangeBranchState = () => {
+    if (!operationKnown || activeRepoOperation) {
+      toast.warning(tx("请先完成或中止当前 Git 操作，再切换分支或储藏改动。"));
+      return false;
+    }
+    return true;
+  };
+  useEffect(() => {
+    setMergeOpen(false); setOperationContinueRequest(null);
+    setCherryTarget(null); setCherryConflict(null); cherryPreflightRequest.current++;
+  }, [path]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!recoverableOperation) { setMergeToolReady(false); return; }
+    // Recheck after settings closes so installing ksdiff takes effect in the
+    // paused operation without requiring a repository switch or app restart.
+    if (settingsOpen) return;
+    checkDeps().then((deps) => { if (!cancelled) setMergeToolReady(!!deps.find((d) => d.name === "ksdiff")?.found); })
+      .catch(() => { if (!cancelled) setMergeToolReady(false); });
+    return () => { cancelled = true; };
+  }, [path, recoverableOperation, settingsOpen]);
+
+  // Every watcher snapshot can carry new file contents even when XY is unchanged.
+  // Keep the selected source, discard its old preview, and guard late responses.
+  useEffect(() => {
+    const entering = workingPreviewContext.current.path !== path || !workingPreviewContext.current.visible;
+    workingPreviewContext.current = { path, visible: viewChanges };
+    const selected = selectedWorkingRef.current;
+    if (!selected || !viewChanges || !workingSnapshot || workingSnapshot.path !== path) return;
+    if (!entering && !shouldRefreshWorkingFile(selected, workingSnapshot.changedPaths)) return;
+    const fresh = workingSnapshot.files.find((file) => workingFileKey(file) === workingFileKey(selected));
+    void selectWorkingFile(fresh ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workingSnapshot, path, viewChanges]);
+
   // ── resource-bounded working-tree monitor ────────────────────────────────
   // Native notifications are the primary signal. We keep at most the active
   // repo plus one warm MRU repo, coalesce bursts, and never run periodic status
   // polls while the app is idle.
-  const applyWorkingStatusRef = useRef<(repoPath: string, files: WorkingFile[]) => void>(() => {});
-  applyWorkingStatusRef.current = (repoPath, files) => {
+  const applyWorkingStatusRef = useRef<(repoPath: string, files: WorkingFile[], changedPaths?: string[]) => void>(() => {});
+  applyWorkingStatusRef.current = (repoPath, files, changedPaths) => {
     workingCache.current.delete(repoPath);
     workingCache.current.set(repoPath, files);
     while (workingCache.current.size > WATCHED_REPO_LIMIT) {
@@ -6543,13 +6808,13 @@ export default function App() {
       workingCache.current.delete(oldest);
     }
 
-    if (activePathRef.current === repoPath) setWorkingSnapshot({ path: repoPath, files });
+    if (activePathRef.current === repoPath) setWorkingSnapshot({ path: repoPath, files, changedPaths });
     setProjects((prev) => {
       let changed = false;
       const next = prev.map((project) => {
-        if (project.path !== repoPath || project.changes === files.length) return project;
+        if (project.path !== repoPath || project.changes === workingFileCount(files)) return project;
         changed = true;
-        return { ...project, changes: files.length };
+        return { ...project, changes: workingFileCount(files) };
       });
       return changed ? next : prev;
     });
@@ -6592,15 +6857,27 @@ export default function App() {
     const full = job.full || changedPaths.length === 0;
     job.full = false;
     job.paths.clear();
-    const request = full ? loadStatus(repoPath) : loadStatusPaths(repoPath, changedPaths);
+    const epoch = workingMutationEpoch.current.get(repoPath) ?? 0;
+    const request = loadWorkingStatus(repoPath, full ? null : changedPaths);
     const task = request
-      .then((partial) => {
+      .then((snapshot) => {
+        if (epoch !== (workingMutationEpoch.current.get(repoPath) ?? 0)) {
+          return workingCache.current.get(repoPath) ?? [];
+        }
         const previous = workingCache.current.get(repoPath)
           ?? realCache.current.get(repoPath)?.working
           ?? [];
-        const files = full ? partial : mergeWorkingPaths(previous, changedPaths, partial);
+        // Native returns a full result when its index/ref cache is invalidated,
+        // even when the event requested a path that is now clean.
+        const authoritative = full || snapshot.full;
+        const files = authoritative ? snapshot.files : mergeWorkingPaths(previous, changedPaths, snapshot.files);
+        if (epoch !== (workingMutationEpoch.current.get(repoPath) ?? 0)) {
+          return workingCache.current.get(repoPath) ?? [];
+        }
         if (watchedPaths.current.includes(repoPath) || activePathRef.current === repoPath) {
-          applyWorkingStatusRef.current(repoPath, files);
+          const affected = authoritative ? undefined : [...changedPaths, ...snapshot.files.flatMap((file) =>
+            file.originalPath ? [file.path, file.originalPath] : [file.path])];
+          applyWorkingStatusRef.current(repoPath, files, affected);
         }
         return files;
       })
@@ -6707,6 +6984,7 @@ export default function App() {
   // exactly one follow-up reconciliation.
   useEffect(() => {
     if (!path || !gitAvailable) {
+      if (!path) for (const watched of [...watchedPaths.current]) dropWatcherRef.current(watched);
       if (path && watchedPaths.current.includes(path)) dropWatcherRef.current(path);
       return;
     }
@@ -6881,6 +7159,7 @@ export default function App() {
 
   const doCreateBranch = async (name: string, base: string, mode: DirtyMode = "carry") => {
     if (!activeProject) return;
+    if (!canChangeBranchState()) return;
     setCreateBranchOpen(false);
     const p = activeProject.path;
     try {
@@ -6942,6 +7221,7 @@ export default function App() {
   // Open the stash dialog (optional title). Guard here so the button feedback
   // still happens even though the actual stash runs from the dialog.
   const requestStash = () => {
+    if (!canChangeBranchState()) return;
     if (!activeProject || gitBusy || busyLabel) return;
     if (changesCount === 0) { toast(tx("没有可储藏的更改")); return; }
     setStashDialogOpen(true);
@@ -6961,6 +7241,7 @@ export default function App() {
     finally { setStashBusy(false); }
   };
   const doStashApply = async (index: number) => {
+    if (!canChangeBranchState()) return;
     if (!activeProject || gitBusy || busyLabel) return;
     const p = activeProject.path;
     const tid = toast.loading(tx("正在应用储藏…"));
@@ -7296,6 +7577,23 @@ export default function App() {
   const [checkSnapshot, setCheckSnapshot] = useState<CheckSnapshot | null>(null);
   const checkProgress = checkSnapshot?.progress ?? null;
   const checkBusy = checkProgress !== null;
+  const overview = useProjectOverview(projects, workspaceView === "home", reloadTick, checkSnapshot?.result ?? null);
+  const attentionCount = overviewAttentionCount(projects, overview.entries);
+  useEffect(() => {
+    if (workspaceView !== "home" || overview.refreshing) return;
+    setProjects((previous) => {
+      let changed = false;
+      const next = previous.map((project) => {
+        const entry = overview.entries[project.id];
+        if (!entry?.summary || entry.checking || entry.error) return project;
+        const { initialized, currentBranch, changedFiles } = entry.summary;
+        if (project.initialized === initialized && project.branch === currentBranch && project.changes === changedFiles) return project;
+        changed = true;
+        return { ...project, initialized, branch: currentBranch, changes: changedFiles };
+      });
+      return changed ? next : previous;
+    });
+  }, [workspaceView, overview.entries, overview.refreshing]);
   const [pullBusy, setPullBusy] = useState(false);
   const [updateRows, setUpdateRows] = useState<UpdateRow[] | null>(null);
   const [checkFocused, setCheckFocused] = useState(false);
@@ -7404,6 +7702,10 @@ export default function App() {
   };
   useEffect(() => {
     const result = checkSnapshot?.result ?? null;
+    if (workspaceView === "home") {
+      if (result) presentedCheckRef.current = result.id;
+      return;
+    }
     if (!result || presentedCheckRef.current === result.id || updateRows || pullBusy || gitBusy || busyLabel) return;
     // Re-evaluate after any dialog closes, without stacking automatic dialogs.
     const dialogs = document.querySelectorAll('[role="dialog"]');
@@ -7449,10 +7751,10 @@ export default function App() {
       applyCheckSnapshot.current(snapshot);
       const latest = snapshot.result;
       const current = new Map((latest?.rows ?? []).map((r) => [r.id, r]));
-      if (latest?.id === resultId) {
+      if (latest && resultId !== undefined && latest.id === resultId) {
         setUpdateRows((prev) => prev?.map((r) => {
           const live = current.get(r.id);
-          if (!ids.includes(r.id)) return r;
+          if (!ids.includes(r.id) || r.overview) return r;
           const next = { ...r, behind: live?.behind ?? [], dirty: live?.dirty ?? r.dirty,
             currentBranch: live?.currentBranch ?? r.currentBranch,
             error: live ? live.error ?? undefined : r.error };
@@ -7465,18 +7767,76 @@ export default function App() {
     } catch (error) {
       toast.error(tf("读取检查状态失败：{0}", error));
     }
+    // Homepage rows need their own current refs. Absence from a saved check
+    // report does not mean an independently discovered update was resolved.
+    await Promise.all(updateRows.filter((row) => row.overview && ids.includes(row.id)).map(async (row) => {
+      try {
+        const summary = await loadProjectOverview(row.path);
+        setUpdateRows((previous) => previous?.map((currentRow) => currentRow.id === row.id && currentRow.path === row.path
+          ? { ...currentRow, behind: summary.behindBranches, dirty: summary.changedFiles > 0,
+            currentBranch: summary.currentBranch,
+            ...(synced.has(row.id) && !summary.behindBranches.length
+              ? { state: "done" as const, detail: tx("所有项目都已是最新") } : {}) }
+          : currentRow) ?? null);
+      } catch (error) {
+        setUpdateRows((previous) => previous?.map((currentRow) => currentRow.id === row.id && currentRow.path === row.path
+          ? { ...currentRow, state: "failed" as const, detail: String(error) } : currentRow) ?? null);
+      }
+    }));
     setPullBusy(false);
     if (touchedActive) pendingJumpLatest.current = true;
     setReloadTick((n) => n + 1);
   };
 
-  // Commit staged files with the chosen identity (falls back to repo/global config).
-  const doCommit = async (message: string, files: string[], identity: Identity | null) => {
-    if (!activeProject || gitBusy || busyLabel) return;
-    await gitCommit(activeProject.path, message, files, identity?.name, identity?.email);
-    realCache.current.delete(activeProject.path);
-    setReloadTick((n) => n + 1);
-    toast.success(tf("已提交 {0} 个文件", files.length));
+  // Index mutations share the UI operation guard and reconcile native status.
+  const doStage = async (files: string[], staged: boolean) => {
+    if (!activeProject || gitBusy || busyLabel || workingOperationRef.current) return;
+    const repoPath = activeProject.path;
+    workingOperationRef.current = true;
+    workingMutationEpoch.current.set(repoPath, (workingMutationEpoch.current.get(repoPath) ?? 0) + 1);
+    setBusyLabel(staged ? tx("正在暂存…") : tx("正在取消暂存…"));
+    try {
+      const fresh = await (staged ? stageFiles(repoPath, files) : unstageFiles(repoPath, files));
+      applyWorkingStatusRef.current(repoPath, fresh);
+    } catch (error) {
+      toast.error(staged ? tf("暂存失败：{0}", error) : tf("取消暂存失败：{0}", error));
+    } finally {
+      workingMutationEpoch.current.set(repoPath, (workingMutationEpoch.current.get(repoPath) ?? 0) + 1);
+      scheduleWorkingStatusRef.current(repoPath, true);
+      workingOperationRef.current = false;
+      setBusyLabel(null);
+    }
+  };
+
+  // Commit the reviewed index with the chosen identity (or repository config).
+  const doCommit = async (message: string, files: WorkingFile[], identity: Identity | null) => {
+    if (!activeProject || gitBusy || busyLabel || workingOperationRef.current) throw new Error(tx("请等待当前 Git 操作完成"));
+    const repoPath = activeProject.path;
+    const revision = files[0]?.revision;
+    if (!revision || files.some((file) => file.revision !== revision)) {
+      scheduleWorkingStatusRef.current(repoPath, true);
+      throw new Error(tx("暂存区已变化，请检查刷新后的改动再提交"));
+    }
+    workingOperationRef.current = true;
+    workingMutationEpoch.current.set(repoPath, (workingMutationEpoch.current.get(repoPath) ?? 0) + 1);
+    setBusyLabel(tx("提交中…"));
+    try {
+      const live = await openRepo(repoPath);
+      if (live.current_branch !== currentBranch) {
+        realCache.current.delete(repoPath);
+        setReloadTick((n) => n + 1);
+        throw new Error(tx("当前分支已变化，请检查刷新后的改动再提交"));
+      }
+      await gitCommit(repoPath, message, revision, identity?.name, identity?.email);
+      realCache.current.delete(repoPath);
+      setReloadTick((n) => n + 1);
+      toast.success(tf("已提交 {0} 个文件", workingFileCount(files)));
+    } finally {
+      workingMutationEpoch.current.set(repoPath, (workingMutationEpoch.current.get(repoPath) ?? 0) + 1);
+      scheduleWorkingStatusRef.current(repoPath, true);
+      workingOperationRef.current = false;
+      setBusyLabel(null);
+    }
   };
 
   // The local branch a commit can be "checked out & synced" to — the local
@@ -7491,6 +7851,7 @@ export default function App() {
   };
   const doCheckoutSync = async (commit: Commit) => {
     if (!activeProject || gitBusy || busyLabel) return;
+    if (!canChangeBranchState()) return;
     const branch = syncTargetOf(commit);
     if (!branch) { toast(tx("此提交没有可同步的本地分支")); return; }
     const tid = toast.loading(tf("正在检出并同步 {0}…", branch));
@@ -7514,6 +7875,7 @@ export default function App() {
   //  • already in sync → nothing.
   const doSyncBranch = async (branchName: string) => {
     if (!activeProject || gitBusy || busyLabel) return;
+    if (!canChangeBranchState()) return;
     const local = branches.find((x) => x.name === branchName);
     if (local && (!local.remote || local.behind <= 0)) { toast(tf("{0} 已与远端同步", branchName)); return; }
     const tid = toast.loading(tf("正在检出并同步 {0}…", branchName));
@@ -7588,6 +7950,7 @@ export default function App() {
   // The actual switch (from the dialog when dirty, or directly when clean).
   const performCheckout = async (branch: string, stash: boolean) => {
     if (!activeProject || gitBusy || busyLabel) return;
+    if (!canChangeBranchState()) return;
     const p = activeProject.path;
     const projectId = activeProject.id;
     setCheckoutTarget(null);
@@ -7627,6 +7990,7 @@ export default function App() {
   const requestCheckout = async (branch: string) => {
     if (!isReal || !activeProject) { toast(tx("仅真实仓库支持切换分支")); return; }
     if (gitBusy || busyLabel) return;
+    if (!canChangeBranchState()) return;
     if (branch === currentBranch) return;
     // git refuses to check out a branch that another worktree already holds.
     const wt = branches.find((b) => b.name === branch)?.worktree;
@@ -7648,6 +8012,7 @@ export default function App() {
   const requestSyncRemote = async (remoteName: string, leaf: string) => {
     if (!isReal || !activeProject) { toast(tx("仅真实仓库支持此操作")); return; }
     if (gitBusy || busyLabel) return;
+    if (!canChangeBranchState()) return;
     if (branches.some((b) => b.name === leaf)) { requestCheckout(leaf); return; }
     const tid = toast.loading(tf("正在将 {0}/{1} 同步到本地…", remoteName, leaf));
     try {
@@ -7748,39 +8113,143 @@ export default function App() {
     }
   };
 
-  const requestCherryPick = (commit: Commit) => setCherryTarget(commit);
+  const openOperationChanges = () => {
+    setSelectedStash(null); setSelectedStashFile(null); setSelectedCommit(null);
+    setViewChanges(true); openDetail();
+    const conflict = activeWorking.find((file) => file.status === "conflicted");
+    void selectWorkingFile(conflict ?? null);
+  };
+  const mergeSources = [...new Set([
+    ...branches.filter((branch) => !branch.current).map((branch) => branch.name),
+    ...remotes.flatMap((remote) => remote.branches.map((branch) => `${remote.name}/${branch}`)),
+  ])];
+  const runRepoMutation = async (repoPath: string, label: string, action: () => Promise<void>) => {
+    if (gitBusy || busyLabel || workingOperationRef.current) throw new Error(tx("请等待当前 Git 操作完成"));
+    workingOperationRef.current = true;
+    workingMutationEpoch.current.set(repoPath, (workingMutationEpoch.current.get(repoPath) ?? 0) + 1);
+    setBusyLabel(label);
+    try { await action(); }
+    finally {
+      workingMutationEpoch.current.set(repoPath, (workingMutationEpoch.current.get(repoPath) ?? 0) + 1);
+      realCache.current.delete(repoPath);
+      if (activePathRef.current === repoPath) {
+        setReloadTick((n) => n + 1);
+        setOperationRetry((n) => n + 1);
+      }
+      scheduleWorkingStatusRef.current(repoPath, true);
+      overview.refresh();
+      workingOperationRef.current = false;
+      setBusyLabel(null);
+    }
+  };
+  const doLocalMerge = async (preview: LocalMergePreview) => {
+    if (!activeProject) return;
+    const repoPath = activeProject.path;
+    const identityId = resolveIdentityId(repoPath, identities, defaultIdentityId);
+    const identity = identities.find((item) => item.id === identityId);
+    await runRepoMutation(repoPath, tx("正在合并…"), async () => {
+      const result = await mergeLocal(repoPath, preview, identity?.name, identity?.email);
+      if (activePathRef.current === repoPath) {
+        setMergeOpen(false);
+        if (result.status === "conflict") openOperationChanges();
+      }
+      if (result.status === "conflict") toast.warning(tf("合并遇到冲突：{0} 个文件待解决", result.operation?.conflicts.length ?? 0));
+      else toast.success(result.status === "up-to-date" ? tx("当前分支已包含这些提交") : tf("已将 {0} 合并到 {1}", preview.source, preview.branch));
+    });
+  };
+  const doContinueOperation = async (operation: RepositoryOperation, message: string, identity: Identity | null) => {
+    const request = operationContinueRequest;
+    if (!request || operation.kind !== request.kind) return;
+    const repoPath = request.path, isCherryPick = request.kind === "cherry-pick";
+    await runRepoMutation(repoPath, isCherryPick ? tx("正在继续 Cherry-pick…") : tx("正在完成合并…"), async () => {
+      const remaining = isCherryPick
+        ? await continueCherryPick(repoPath, operation.revision, identity?.name, identity?.email)
+        : await continueMerge(repoPath, operation.revision, message, identity?.name, identity?.email);
+      setOperationContinueRequest((current) => current === request ? null : current);
+      if (isCherryPick && remaining) {
+        if (activePathRef.current === repoPath) {
+          setRepoOperation({ path: repoPath, value: remaining, error: "" });
+          openOperationChanges();
+        }
+        toast.warning(tf("后续提交遇到冲突：{0} 个文件待解决", remaining.conflicts.length));
+      } else {
+        toast.success(isCherryPick ? tf("已完成 {0} 的 Cherry-pick", operation.branch) : tf("已完成 {0} 的合并", operation.branch));
+      }
+    });
+  };
+  const requestAbortOperation = async () => {
+    if (!path || !recoverableOperation || !activeRepoOperation?.canAbort || busyLabel || gitBusy || workingOperationRef.current) return;
+    const repoPath = path, kind = activeRepoOperation.kind;
+    try {
+      const operation = await loadRepoOperation(repoPath);
+      if (operation?.kind !== kind || !operation.canAbort || activePathRef.current !== repoPath) {
+        setOperationRetry((n) => n + 1); return;
+      }
+      const isCherryPick = kind === "cherry-pick";
+      setConfirmState({
+        title: isCherryPick ? tx("中止 Cherry-pick") : tx("中止合并"),
+        confirmLabel: isCherryPick ? tx("确认中止 Cherry-pick") : tx("确认中止合并"), danger: true,
+        message: isCherryPick
+          ? tf("将中止 {0} 的本次 Cherry-pick 序列，返回开始 Cherry-pick 前的状态，并撤销冲突解决期间对已跟踪文件的改动。请先另行保存需要保留的编辑。", operation.branch)
+            + "\n\n" + tx("中止失败时会保留当前状态并显示原因。")
+          : tf("将中止 {0} 的当前合并，撤销本次合并及冲突解决期间对已跟踪文件的改动。请先另行保存需要保留的编辑。", operation.branch)
+            + "\n\n" + tx("如果合并由其他工具发起，合并前未提交改动的恢复取决于 Git。中止失败时会保留当前状态并显示原因。"),
+        onConfirm: () => runRepoMutation(repoPath, isCherryPick ? tx("正在中止 Cherry-pick…") : tx("正在中止合并…"), async () => {
+          if (isCherryPick) await abortCherryPick(repoPath, operation.revision);
+          else await abortMerge(repoPath, operation.revision);
+          toast.success(isCherryPick ? tf("已中止 {0} 的 Cherry-pick", operation.branch) : tf("已中止 {0} 的合并", operation.branch));
+        }),
+      });
+    } catch (e) { toast.error(tf("检查 Git 操作状态失败：{0}", e)); }
+  };
+  const runConflictTool = async () => {
+    if (!path || !recoverableOperation || !activeRepoOperation) return;
+    const repoPath = path, revision = activeRepoOperation.revision, isCherryPick = activeRepoOperation.kind === "cherry-pick";
+    try {
+      await runRepoMutation(repoPath, tx("正在处理冲突…"), () => mergeTool(repoPath, revision));
+      toast.success(isCherryPick ? tx("冲突工具已关闭，请检查暂存内容后继续 Cherry-pick。") : tx("冲突工具已关闭，请检查暂存内容后继续合并。"));
+    } catch (e) { toast.error(tf("打开冲突工具失败：{0}", e)); }
+  };
+
+  const requestCherryPick = (commit: Commit) => {
+    if (activeProject && canChangeBranchState()) setCherryTarget({ path: activeProject.path, commit });
+  };
   // Cherry-pick entry from the ActionBar: needs a commit open in the detail view.
   const requestCherryPickActive = () => {
     if (detailOpen && !viewChanges && selectedCommit) requestCherryPick(selectedCommit);
-    else toast(tx("请先选中要 cherry-pick 的提交"));
+    else toast(tx("请先选中要 Cherry-pick 的提交"));
   };
   // Preflight first: predict conflicts without mutating the repo. Clean → apply
   // straight away; conflict → open the confirm dialog and let the user decide.
   const doCherryPick = async (target: string) => {
-    if (!cherryTarget || !activeProject) return;
-    const c = cherryTarget;
+    if (!cherryTarget || activePathRef.current !== cherryTarget.path) return;
+    const { path: repoPath, commit: c } = cherryTarget;
+    const request = ++cherryPreflightRequest.current;
     setCherryTarget(null);
     try {
-      const conflicts = await cherryPickPreflight(activeProject.path, c.fullHash, target);
-      if (conflicts.length === 0) { await runCherryPick(c, target, false); return; }
-      setCherryConflict({ commit: c, target, files: conflicts });
-    } catch (e) { toast.error(tf("遴选预检失败：{0}", e)); }
+      const conflicts = await cherryPickPreflight(repoPath, c.fullHash, target);
+      if (request !== cherryPreflightRequest.current || activePathRef.current !== repoPath) return;
+      if (conflicts.length === 0) { await runCherryPick(repoPath, c, target, false); return; }
+      setCherryConflict({ path: repoPath, commit: c, target, files: conflicts });
+    } catch (e) {
+      if (request === cherryPreflightRequest.current && activePathRef.current === repoPath) toast.error(tf("Cherry-pick 预检失败：{0}", e));
+    }
   };
   // Actually run the cherry-pick (optionally routing conflicts to Kaleidoscope)
   // and reflect whatever state it lands in.
-  const runCherryPick = async (c: Commit, target: string, useKaleidoscope: boolean) => {
-    if (!activeProject) return;
+  const runCherryPick = async (repoPath: string, c: Commit, target: string, useKaleidoscope: boolean) => {
     try {
-      const res = await cherryPick(activeProject.path, c.fullHash, target, useKaleidoscope);
-      realCache.current.delete(activeProject.path);
-      if (target && target !== currentBranch) { setCurrentBranch(target); pendingViewReset.current = true; }
-      setReloadTick((n) => n + 1);
-      if (res.status === "conflict") {
-        toast.warning(tf("遴选遇到冲突：{0} 个文件待解决,解决后执行 git cherry-pick --continue", res.conflicts.length));
-      } else {
-        toast.success(tf("已遴选 {0} 到 {1}", c.hash, target));
-      }
-    } catch (e) { toast.error(tf("遴选失败：{0}", e)); }
+      await runRepoMutation(repoPath, tx("正在 Cherry-pick…"), async () => {
+        const res = await cherryPick(repoPath, c.fullHash, target, useKaleidoscope);
+        if (activePathRef.current === repoPath) {
+          if (target && target !== currentBranch) { setCurrentBranch(target); pendingViewReset.current = res.status === "clean"; }
+          if (res.status !== "clean") openOperationChanges();
+        }
+        if (res.status === "conflict") toast.warning(tf("Cherry-pick 遇到冲突：{0} 个文件待解决", res.conflicts.length));
+        else if (res.status === "resolved") toast.warning(tx("冲突已解决并暂存，请检查内容后继续 Cherry-pick。"));
+        else toast.success(tf("已 Cherry-pick {0} 到 {1}", c.hash, target));
+      });
+    } catch (e) { toast.error(tf("Cherry-pick 失败：{0}", e)); }
   };
 
   // Create merge/pull request.
@@ -7825,8 +8294,79 @@ export default function App() {
   };
 
   const handleSelectProject = (id: string) => {
+    overviewActionRef.current++;
+    setOverviewIntent(null);
     setActiveProjectId(id);
+    setWorkspaceView("repository");
   };
+
+  const handleShowHome = () => {
+    overviewActionRef.current++;
+    setOverviewIntent(null);
+    setSearchOpen(false);
+    setDiffExpanded(false);
+    setDetailOpen(false);
+    setDetailClosing(false);
+    commitDiffRequestRef.current++;
+    workingDiffRequestRef.current++;
+    setWorkspaceView("home");
+  };
+
+  const handleOverviewOpen = async (project: Project, target: OverviewTarget) => {
+    if (target === "updates" && (pullBusy || openingCheckRef.current)) return;
+    const request = ++overviewActionRef.current;
+    if (target === "settings") { setSettingsSection("github"); setSettingsOpen(true); return; }
+    if (target === "updates") {
+      openingCheckRef.current = true;
+      try {
+        // Re-read tracking refs and dirty state before offering the existing
+        // explicit fast-forward flow; overview snapshots may have aged.
+        const summary = await loadProjectOverview(project.path);
+        if (request !== overviewActionRef.current) return;
+        const remoteError = overview.entries[project.id]?.remoteError;
+        const error = remoteError ?? (summary.operation ? tx("请先完成或中止当前 Git 操作，再同步分支。") : undefined);
+        if (!summary.behindBranches.length && !error) { overview.refresh(); toast(tx("没有可快进的分支")); return; }
+        setUpdateRows([{ id: project.id, name: project.name, path: project.path,
+          currentBranch: summary.currentBranch, behind: summary.behindBranches,
+          dirty: summary.changedFiles > 0, error, state: "idle", overview: true }]);
+      } catch (error) { if (request === overviewActionRef.current) toast.error(tf("读取检查状态失败：{0}", error)); }
+      finally { openingCheckRef.current = false; }
+      return;
+    }
+    setSearchOpen(false);
+    setDiffExpanded(false);
+    setDetailOpen(false);
+    setDetailClosing(false);
+    realCache.current.delete(project.path);
+    setLoadError(null);
+    setRealData(null);
+    setOverviewIntent(target === "repository" ? null : { id: project.id, path: project.path, target });
+    setActiveProjectId(project.id);
+    setWorkspaceView("repository");
+    setReloadTick((n) => n + 1);
+  };
+  const overviewOpenRef = useRef(handleOverviewOpen);
+  overviewOpenRef.current = handleOverviewOpen;
+  const openOverviewProject = useMemo(() => (project: Project, target: OverviewTarget) => {
+    void overviewOpenRef.current(project, target);
+  }, []);
+
+  useEffect(() => {
+    if (!overviewIntent || workspaceView !== "repository" || activeProject?.id !== overviewIntent.id
+      || activeProject.path !== overviewIntent.path) return;
+    if (loadError?.path === overviewIntent.path) { setOverviewIntent(null); return; }
+    if (!dataReady || switching) return;
+    setOverviewIntent(null);
+    if (overviewIntent.target === "changes" || overviewIntent.target === "conflicts") openOperationChanges();
+    else if (overviewIntent.target === "history") {
+      setViewChanges(false);
+      setSelectedStash(null);
+      setSelectedStashFile(null);
+      updateHiddenBranches((previous) => previous.filter((branch) => branch !== currentBranch));
+      setFocusBranch(currentBranch === "HEAD" ? null : currentBranch);
+      setDetailOpen(false);
+    }
+  }, [overviewIntent, workspaceView, activeProject?.id, activeProject?.path, realData, loadError, switching]);
 
   const handlePinProject = (project: Project) => {
     if (projects[0]?.id === project.id) {
@@ -7868,6 +8408,8 @@ export default function App() {
   };
 
   const handleCloseProject = (id: string) => {
+    overviewActionRef.current++;
+    setOverviewIntent((intent) => intent?.id === id ? null : intent);
     setProjects((prev) => {
       const remaining = prev.filter((p) => p.id !== id);
       if (id === activeProjectId && remaining.length > 0) {
@@ -7883,6 +8425,9 @@ export default function App() {
   // Switches to it if already open; otherwise adds a new tab. Returns the info.
   const openRepoAsProject = async (repoPath: string): Promise<RepoInfo> => {
     const info = await openRepo(repoPath);
+    overviewActionRef.current++;
+    setOverviewIntent(null);
+    setWorkspaceView("repository");
     const existing = projects.find((p) => p.path === info.path);
     if (existing) {
       realCache.current.delete(info.path);
@@ -7946,27 +8491,111 @@ export default function App() {
           <TitleBar themeMode={themeMode} onThemeCycle={cycleTheme}
             onOpenSettings={() => { setSettingsSection("identity"); setSettingsOpen(true); }} />
 
-          <ActionBar project={activeProject} branch={dataReady ? currentBranch : activeProject?.branch ?? ""}
-            canMerge={dataReady && hasHead && !switching}
-            sidebarOpen={projectSidebarOpen} onToggleSidebar={() => setProjectSidebarOpen((open) => !open)}
-            onCreateBranch={dataReady && hasHead && !switching ? () => setCreateBranchOpen(true) : undefined}
+          <div className="gk-action-bar gk-toolbar-shell flex items-center gap-1.5 px-3 flex-shrink-0 select-none"
+            style={{ borderBottom: `0.5px solid ${theme.border}`, background: workspaceView === "home" ? theme.bgPanel : theme.bg,
+              color: theme.textSec, "--gk-shell-hover": theme.rowHover } as React.CSSProperties}>
+            <button type="button" onClick={() => setProjectSidebarOpen((open) => !open)}
+              className="gk-shell-button flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer"
+              aria-label={projectSidebarOpen ? tx("收起项目栏") : tx("展开项目栏")}
+              title={projectSidebarOpen ? tx("收起项目栏") : tx("展开项目栏")}
+              aria-expanded={projectSidebarOpen} aria-controls="project-sidebar">
+              <PanelLeft size={17} aria-hidden="true" />
+            </button>
+            <div key={workspaceView} className="gk-toolbar-content" data-view={workspaceView}>
+            {workspaceView === "home" ? <div className="flex items-center gap-3 h-full flex-1 min-w-0">
+            <span className="px-2 text-xs font-semibold" style={{ color: theme.textSec }}><ToolbarText>{tx("工作台")}</ToolbarText></span>
+            <span className="ml-auto text-[11px]" style={{ color: theme.textMuted }}><ToolbarText order={1}>{tx("所有项目，一处查看")}</ToolbarText></span>
+          </div> : <ActionBar project={activeProject} branch={dataReady ? currentBranch : activeProject?.branch ?? ""}
+            canMerge={dataReady && hasHead && !switching && operationKnown && !activeRepoOperation}
+            onMerge={() => {
+              if (path) realCache.current.delete(path);
+              setReloadTick((n) => n + 1);
+              setMergeOpen(true);
+            }}
+            onCreateBranch={dataReady && hasHead && !switching && operationKnown && !activeRepoOperation ? () => setCreateBranchOpen(true) : undefined}
             onFetch={gitAvailable && dataReady && !switching && remotes.length > 0 ? () => runGitAction("fetch") : undefined}
-            onPull={hasHead && dataReady && !switching && remotes.length > 0 ? () => runGitAction("pull") : undefined}
+            onPull={hasHead && dataReady && !switching && operationKnown && !activeRepoOperation && remotes.length > 0 ? () => runGitAction("pull") : undefined}
             onPush={activeProject && dataReady && !switching ? () => runGitAction("push") : undefined}
-            onUndoCommit={activeProject && dataReady && !switching && branches.some((b) => b.current && (!b.remote || b.ahead > 0))
+            onUndoCommit={activeProject && dataReady && !switching && operationKnown && !activeRepoOperation && branches.some((b) => b.current && (!b.remote || b.ahead > 0))
               ? requestUndoCommit : undefined}
             onForcePush={hasHead && dataReady && !switching && remotes.length > 0 ? requestForcePush : undefined}
             onCreateTag={hasHead && dataReady && !switching ? () => setTagDialogOpen(true) : undefined}
-            onCherryPick={hasHead && dataReady && !switching ? requestCherryPickActive : undefined}
-            onStash={hasHead && dataReady && !switching ? requestStash : undefined}
+            onCherryPick={hasHead && dataReady && !switching && operationKnown && !activeRepoOperation ? requestCherryPickActive : undefined}
+            onStash={hasHead && dataReady && !switching && operationKnown && !activeRepoOperation ? requestStash : undefined}
             onCreatePR={hasHead && dataReady && !switching && remotes.length > 0 ? requestCreatePR : undefined}
             pushCount={branches.find((b) => b.current)?.ahead ?? 0}
-            busy={gitBusy ?? (busyLabel || forcePushRequest || undoChecking || createRepoBusy ? "other" : null)} />
+            busy={gitBusy ?? (busyLabel || forcePushRequest || undoChecking || createRepoBusy ? "other" : null)} />}
+            </div>
+          </div>
 
           <div className="gk-workspace flex-1 min-h-0 overflow-hidden" data-projects-open={projectSidebarOpen}>
+            {(activeRepoOperation || (repoOperation && repoOperation.path === path && repoOperation.error)) && (
+              <div className="gk-repo-operation-layer" style={{
+                "--gk-repo-text": theme.text, "--gk-repo-muted": theme.textMuted,
+                "--gk-repo-hover": theme.rowHover, "--gk-repo-accent": theme.accentFg,
+                "--gk-repo-accent-bg": theme.accentBg, "--gk-repo-danger": theme.red,
+                "--gk-repo-danger-bg": theme.redBg,
+              } as React.CSSProperties}>
+                {activeRepoOperation && path && <div role="status" className="gk-repo-operation"
+                  style={{ background: theme.dialogBg, color: theme.text, boxShadow: theme.shadowEl }}>
+                  <div className="flex items-start gap-2 min-w-0">
+                    <AlertTriangle size={14} aria-hidden="true" className="flex-shrink-0 mt-0.5" style={{ color: theme.amber }} />
+                    <div className="min-w-0 flex-1 text-xs leading-[18px]">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <strong className="font-semibold truncate">{activeRepoOperation.kind === "merge" ? tx("合并尚未完成")
+                          : activeRepoOperation.kind === "cherry-pick" ? tx("Cherry-pick 尚未完成") : tf("仓库有未完成的 {0} 操作", activeRepoOperation.kind)}</strong>
+                        <span className="truncate" title={activeRepoOperation.branch} style={{ color: theme.textMuted }}>{activeRepoOperation.branch}</span>
+                      </div>
+                      <p className="mt-0.5" style={{ color: theme.textSec }}>{activeRepoOperation.conflicts.length
+                        ? tf("{0} 个文件待解决。编辑后暂存，确认内容再继续。", activeRepoOperation.conflicts.length)
+                        : activeRepoOperation.continueBlockedReason ? translateNativeMessage(activeRepoOperation.continueBlockedReason)
+                        : activeRepoOperation.kind === "merge" ? tx("冲突已全部暂存，可以检查并完成合并。")
+                        : activeRepoOperation.kind === "cherry-pick" ? !activeRepoOperation.stagedFiles.length
+                          ? tx("没有可提交的暂存改动，请检查解决结果或中止 Cherry-pick。")
+                          : !activeRepoOperation.message.trim() ? tx("原提交说明为空，请在终端明确完成该提交，或中止 Cherry-pick。")
+                          : tx("冲突已全部暂存，可以检查并继续 Cherry-pick。")
+                        : tx("请在终端完成或中止此操作，GitKit 会自动更新状态。")}</p>
+                    </div>
+                  </div>
+                  <div className="gk-repo-operation-actions">
+                    <button type="button" onClick={openOperationChanges} className="gk-repo-operation-button">
+                      <Eye size={14} aria-hidden="true" />{activeRepoOperation.conflicts.length ? tx("查看冲突") : tx("查看改动")}
+                    </button>
+                    {recoverableOperation && <>
+                      {activeRepoOperation.conflicts.length > 0 && <button type="button" onClick={() => { void runConflictTool(); }}
+                        disabled={!mergeToolReady || !!busyLabel || !!gitBusy}
+                        title={mergeToolReady ? tx("使用 Kaleidoscope 处理冲突") : tx("未检测到 Kaleidoscope，请在编辑器中解决冲突后暂存")}
+                        className="gk-repo-operation-button">
+                        <ExternalLink size={14} aria-hidden="true" />{tx("冲突工具")}
+                      </button>}
+                      <button type="button" onClick={() => setOperationContinueRequest({ path, kind: activeRepoOperation.kind === "cherry-pick" ? "cherry-pick" : "merge" })}
+                        disabled={!activeRepoOperation.canContinue || !!busyLabel || !!gitBusy}
+                        className="gk-repo-operation-button gk-repo-operation-primary">
+                        {activeRepoOperation.kind === "cherry-pick" ? <GitCommit size={14} aria-hidden="true" /> : <GitMerge size={14} aria-hidden="true" />}
+                        {activeRepoOperation.kind === "cherry-pick" ? tx("继续 Cherry-pick…") : tx("继续合并…")}
+                      </button>
+                      <button type="button" onClick={() => { void requestAbortOperation(); }} disabled={!activeRepoOperation.canAbort || !!busyLabel || !!gitBusy}
+                        className="gk-repo-operation-button gk-repo-operation-danger">
+                        <X size={14} aria-hidden="true" />{activeRepoOperation.kind === "cherry-pick" ? tx("中止 Cherry-pick…") : tx("中止合并…")}
+                      </button>
+                    </>}
+                    <button type="button" onClick={() => { void revealInFileManager(path).catch((e) => toast.error(tf("打开失败：{0}", e))); }}
+                      aria-label={tx("打开项目目录")} title={tx("打开项目目录")} className="gk-repo-operation-button gk-repo-operation-folder">
+                      <FolderOpen size={14} aria-hidden="true" />
+                    </button>
+                  </div>
+                </div>}
+                {repoOperation && repoOperation.path === path && repoOperation.error && <div role="alert" className="gk-repo-operation flex items-center gap-3 text-xs"
+                  style={{ background: theme.dialogBg, color: theme.red, boxShadow: theme.shadowEl }}>
+                  <span className="flex-1 whitespace-pre-wrap break-words">{tf("无法读取仓库操作状态：{0}", translateNativeMessage(repoOperation.error))}</span>
+                  <button type="button" onClick={() => setOperationRetry((n) => n + 1)} className="gk-repo-operation-button">{tx("重试")}</button>
+                </div>}
+              </div>
+            )}
             <div className="gk-project-disclosure min-w-0 min-h-0 overflow-hidden" aria-hidden={!projectSidebarOpen}
               ref={(element) => { if (element) element.inert = !projectSidebarOpen; }}>
               <ProjectSidebar open={projectSidebarOpen} projects={projects} activeId={activeProject?.id ?? ""}
+                homeActive={workspaceView === "home"} attentionCount={attentionCount} onHome={handleShowHome}
                 onSelect={handleSelectProject} onClose={handleCloseProject}
                 onContextMenu={(event, project) => openCtx(event, [
                   { label: tx("置顶"), Icon: Pin, onClick: () => handlePinProject(project) },
@@ -7982,7 +8611,14 @@ export default function App() {
                 ])}
                 onAdd={handleOpenNew} onClone={() => setCloneOpen(true)} />
             </div>
-          {!activeProject ? (
+          {workspaceView === "home" ? <ProjectOverview theme={theme} projects={projects} entries={overview.entries}
+            refreshing={overview.refreshing} remoteBusy={checkBusy} remoteDisabled={!!gitBusy || !!busyLabel || pullBusy}
+            remoteCheckedAt={checkSnapshot?.result?.completedAt ?? null}
+            remoteProgress={checkProgress ? checkProgress.paused ? tx("等待休眠恢复后补查")
+              : tf("已检查 {0} / {1} · 正在检查 {2}", checkProgress.current, checkProgress.total, checkProgress.project) : null}
+            onRefresh={overview.refresh} onCheckRemote={() => { void runUpdateCheck(); }}
+            onOpen={openOverviewProject}
+            onAdd={handleOpenNew} onClone={() => setCloneOpen(true)} /> : !activeProject ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-4" style={{ background: theme.bg }}>
               <FolderOpen size={40} style={{ color: theme.textFaint, opacity: 0.4 }} />
               <div className="flex flex-col items-center gap-1">
@@ -8220,7 +8856,7 @@ export default function App() {
                             ]
                           : [
                               { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(commit.fullHash).catch(() => {}); } },
-                              ...(isReal ? [{ label: tx("遴选到当前分支"), Icon: GitCommit, onClick: () => requestCherryPick(commit) } as CtxItem] : []),
+                              ...(isReal ? [{ label: tx("Cherry-pick 到当前分支"), Icon: GitCommit, onClick: () => requestCherryPick(commit) } as CtxItem] : []),
                             ])} />
                     ))}
                     </GlideList>
@@ -8283,18 +8919,19 @@ export default function App() {
                   className="flex-1 flex overflow-hidden gk-detail-in">
                   {viewChanges ? (
                     <>
-                      <ChangesPanel files={activeWorking} selectedFile={selectedWorkingFile}
+                      <ChangesPanel key={path} files={activeWorking} selectedFile={selectedWorkingFile}
                         onFileSelect={selectWorkingFile}
                         currentBranch={currentBranch}
                         identities={identities} defaultIdentityId={defaultIdentityId}
                         projectKey={path ?? ""}
                         onCommit={doCommit}
+                        operationActive={!operationKnown || !!activeRepoOperation}
+                        busy={!!gitBusy || !!busyLabel || confirmBusy}
+                        onStage={(files) => doStage(files, true)}
+                        onUnstage={(files) => doStage(files, false)}
                         onDiscard={doDiscardFile}
                         onDiscardAll={doDiscardAll}
-                        onFilesChange={(f) => {
-                          if (path) applyWorkingStatusRef.current(path, f);
-                          setSelectedWorkingFile(null);
-                        }} />
+                        />
                       {selectedWorkingFile ? (
                         <WorkingFileDiff file={selectedWorkingFile} repoPath={isReal ? path ?? "" : ""} />
                       ) : (
@@ -8348,11 +8985,12 @@ export default function App() {
           )}
           </div>
           <StatusBar project={activeProject} branch={branches.find((b) => b.current)} changes={changesCount}
+            home={workspaceView === "home" ? { projects: projects.length, attention: attentionCount, refreshing: overview.refreshing } : undefined}
             ready={dataReady} errored={errored}
             checkProgress={checkProgress} checkResult={checkSnapshot?.result ?? null}
             onShowCheckResult={() => { if (!pullBusy && checkSnapshot?.result) void openCheckResult(checkSnapshot.result); }}
             onShowChanges={() => { setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
-            onSearch={() => setSearchOpen(true)} />
+            onSearch={() => { if (workspaceView === "home") document.getElementById("overview-search")?.focus(); else setSearchOpen(true); }} />
         </div>
 
         {diffExpanded && detailOpen && !viewChanges && !fileTrace && (
@@ -8488,18 +9126,32 @@ export default function App() {
           </Modal>
         )}
 
-        {cherryTarget && (
-          <CherryPickDialog commit={cherryTarget} branches={branches} currentBranch={currentBranch}
+        {mergeOpen && activeProject && (
+          <LocalMergeDialog key={activeProject.path} path={activeProject.path} branch={currentBranch}
+            sources={mergeSources} dirty={activeWorking.length > 0}
+            onCancel={() => setMergeOpen(false)} onConfirm={doLocalMerge}
+            onChanges={() => { setMergeOpen(false); openOperationChanges(); }}
+            onStash={() => { setMergeOpen(false); requestStash(); }} />
+        )}
+
+        {operationContinueRequest && path === operationContinueRequest.path && (
+          <OperationContinueDialog key={`${operationContinueRequest.path}:${operationContinueRequest.kind}`}
+            path={operationContinueRequest.path} kind={operationContinueRequest.kind} identities={identities} defaultIdentityId={defaultIdentityId}
+            onCancel={() => setOperationContinueRequest(null)} onConfirm={doContinueOperation} />
+        )}
+
+        {cherryTarget && path === cherryTarget.path && (
+          <CherryPickDialog commit={cherryTarget.commit} branches={branches} currentBranch={currentBranch}
             onCancel={() => setCherryTarget(null)} onConfirm={doCherryPick} />
         )}
 
-        {cherryConflict && (
+        {cherryConflict && path === cherryConflict.path && (
           <CherryPickConflictDialog commit={cherryConflict.commit} target={cherryConflict.target} files={cherryConflict.files}
             onCancel={() => setCherryConflict(null)}
             onContinue={(useKaleidoscope) => {
               const info = cherryConflict;
               setCherryConflict(null);
-              runCherryPick(info.commit, info.target, useKaleidoscope);
+              void runCherryPick(info.path, info.commit, info.target, useKaleidoscope);
             }} />
         )}
 

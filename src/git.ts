@@ -12,8 +12,14 @@ import type {
   CommitFile,
   GraphRowInfo,
   Remote,
-  WorkingFile,
 } from "./App";
+import { mapWorkingStatus } from "./workingStatus.ts";
+import type { WorkingFile, StagingStatus, WorkingStatusSnapshot } from "./workingStatus";
+import type { ProjectOverviewSummary } from "./projectOverview";
+
+export function loadProjectOverview(path: string): Promise<ProjectOverviewSummary> {
+  return invoke<ProjectOverviewSummary>("git_project_overview", { path });
+}
 
 /** Keep native errors local to the active UI language without changing payloads. */
 export async function invoke<T>(command: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
@@ -63,12 +69,6 @@ interface RBranch {
   behind: number;
   is_remote: boolean;
   worktree: string | null;
-}
-interface RStatus {
-  path: string;
-  index_status: string;
-  work_status: string;
-  staged: boolean;
 }
 interface RFileStat {
   path: string;
@@ -486,24 +486,25 @@ export async function loadHistory(path: string): Promise<Commit[]> {
 }
 
 export async function loadStatus(path: string): Promise<WorkingFile[]> {
-  const raw = await invoke<RStatus[]>("git_status", { path });
-  return mapStatus(raw);
+  return (await loadWorkingStatus(path)).files;
+}
+
+export async function loadWorkingStatus(path: string, paths: string[] | null = null): Promise<WorkingStatusSnapshot> {
+  const snapshot = await invoke<StagingStatus>("git_staging_status", { path, paths });
+  return { files: mapWorkingStatus(snapshot), revision: snapshot.revision, full: snapshot.full ?? !paths?.length };
 }
 
 /** Status only for paths collected from one native watcher burst. */
 export async function loadStatusPaths(path: string, paths: string[]): Promise<WorkingFile[]> {
-  const raw = await invoke<RStatus[]>("git_status_paths", { path, paths });
-  return mapStatus(raw);
+  return (await loadWorkingStatus(path, paths)).files;
 }
 
-function mapStatus(raw: RStatus[]): WorkingFile[] {
-  const map = (l: string): WorkingFile["status"] =>
-    l === "A" ? "added" : l === "D" ? "deleted" : l === "?" ? "untracked" : "modified";
-  return raw.map((s) => ({
-    path: s.path,
-    status: map(s.staged ? s.index_status : s.work_status),
-    staged: s.staged,
-  }));
+export async function stageFiles(path: string, files: string[]): Promise<WorkingFile[]> {
+  return mapWorkingStatus(await invoke<StagingStatus>("git_stage_files", { path, files }));
+}
+
+export async function unstageFiles(path: string, files: string[]): Promise<WorkingFile[]> {
+  return mapWorkingStatus(await invoke<StagingStatus>("git_unstage_files", { path, files }));
 }
 
 export async function loadCommitFiles(path: string, hash: string): Promise<CommitFile[]> {
@@ -598,6 +599,89 @@ export async function mergePreview(path: string, source: string, target: string)
   return await invoke<MergePreview>("git_merge_preview", { path, source, target });
 }
 
+export interface LocalMergePreview {
+  branch: string;
+  head: string;
+  source: string;
+  sourceHead: string;
+  kind: "up-to-date" | "fast-forward" | "merge";
+  conflicts: string[];
+  files: string[];
+}
+
+export interface RepositoryOperation {
+  kind: "merge" | "cherry-pick" | "revert" | "rebase";
+  branch: string;
+  head: string;
+  conflicts: string[];
+  stagedFiles: string[];
+  unstagedFiles: string[];
+  message: string;
+  /** Revision of the paused operation, index, and working tree reviewed by the UI. */
+  revision: string;
+  canContinue: boolean;
+  /** An unsupported paused mode may require a terminal decision. */
+  continueBlockedReason?: string | null;
+  canAbort: boolean;
+}
+
+export interface LocalMergeResult {
+  status: "up-to-date" | "merged" | "conflict";
+  operation: RepositoryOperation | null;
+}
+
+/** Preview merging a branch into the current branch, requiring a clean repository. */
+export async function localMergePreview(path: string, source: string): Promise<LocalMergePreview> {
+  return invoke<LocalMergePreview>("git_local_merge_preview", { path, source });
+}
+
+/** Apply the exact source and destination commits reviewed in the merge preview. */
+export async function mergeLocal(
+  path: string, preview: LocalMergePreview, name?: string, email?: string,
+): Promise<LocalMergeResult> {
+  return invoke<LocalMergeResult>("git_local_merge", {
+    path, source: preview.source, expectedBranch: preview.branch,
+    expectedHead: preview.head, expectedSourceHead: preview.sourceHead,
+    name: name ?? null, email: email ?? null,
+  });
+}
+
+/** Read Git's operation metadata, including operations started outside GitKit. */
+export async function loadRepoOperation(path: string): Promise<RepositoryOperation | null> {
+  return invoke<RepositoryOperation | null>("git_operation_state", { path });
+}
+
+export async function continueMerge(
+  path: string, expectedRevision: string, message: string, name?: string, email?: string,
+): Promise<void> {
+  await invoke("git_merge_continue", {
+    path, expectedRevision, message, name: name ?? null, email: email ?? null,
+  });
+}
+
+export async function abortMerge(path: string, expectedRevision: string): Promise<void> {
+  await invoke("git_merge_abort", { path, expectedRevision });
+}
+
+/** Continue the reviewed cherry-pick, retaining the source message and author.
+ * A remaining operation means the sequence has paused again. */
+export async function continueCherryPick(
+  path: string, expectedRevision: string, name?: string, email?: string,
+): Promise<RepositoryOperation | null> {
+  return invoke<RepositoryOperation | null>("git_cherry_pick_continue", {
+    path, expectedRevision, name: name ?? null, email: email ?? null,
+  });
+}
+
+export async function abortCherryPick(path: string, expectedRevision: string): Promise<void> {
+  await invoke("git_cherry_pick_abort", { path, expectedRevision });
+}
+
+/** Resolve paused merge/cherry-pick conflicts without automatically committing. */
+export async function mergeTool(path: string, expectedRevision: string): Promise<void> {
+  await invoke("git_merge_tool", { path, expectedRevision });
+}
+
 export interface StashEntry { index: number; message: string; branch: string; date: string }
 export async function stashList(path: string): Promise<StashEntry[]> {
   return await invoke("git_stash_list", { path });
@@ -624,8 +708,8 @@ export async function stashFileDiff(path: string, index: number, file: string): 
 }
 
 export interface CherryPickResult {
-  /** "clean" — applied cleanly; "resolved" — conflicts resolved via Kaleidoscope
-   *  and continued; "conflict" — left mid-cherry-pick with unresolved files. */
+  /** "clean" — committed; "resolved" — Kaleidoscope resolved conflicts but the
+   *  cherry-pick awaits review; "conflict" — unresolved files remain. */
   status: "clean" | "conflict" | "resolved";
   conflicts: string[];
 }
@@ -683,10 +767,10 @@ export async function checkoutSync(path: string, branch: string, hash: string): 
 }
 
 export async function commit(
-  path: string, message: string, files: string[],
+  path: string, message: string, expectedRevision: string,
   name?: string, email?: string,
 ): Promise<void> {
-  await invoke("git_commit", { path, message, files, name: name ?? null, email: email ?? null });
+  await invoke("git_commit", { path, message, expectedRevision, name: name ?? null, email: email ?? null });
 }
 
 export interface UndoCommitPreview {
@@ -923,8 +1007,8 @@ export async function filePreview(path: string, file: string): Promise<FilePrevi
   return invoke<FilePreview>("file_preview", { path, file });
 }
 
-export async function workingFileDiff(path: string, file: string, staged: boolean): Promise<string> {
-  const d = await invoke<string>("working_file_diff", { path, file, staged });
+export async function workingFileDiff(path: string, file: string, staged: boolean, originalPath?: string): Promise<string> {
+  const d = await invoke<string>("working_file_diff", { path, file, staged, originalPath: originalPath ?? null });
   return stripDiffHeader(d);
 }
 
