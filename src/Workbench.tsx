@@ -6,6 +6,9 @@ import {
   LoaderCircle, Plus, RefreshCw, Search, X,
 } from "lucide-react";
 import type { Project, ThemeColors } from "./App";
+import { ToolbarText } from "./ToolbarText";
+import { WorkspaceActivity } from "./WorkspaceActivity";
+import type { useProjectActivity } from "./useProjectActivity";
 import { getCurrentLanguage, tf, tx } from "./i18n";
 import {
   OVERVIEW_FILTERS, overviewFilterCounts, overviewState, overviewTarget, selectOverviewProjects,
@@ -18,14 +21,41 @@ interface ProjectOverviewProps {
   entries: Record<string, OverviewEntry>;
   refreshing: boolean;
   remoteBusy: boolean;
-  remoteDisabled: boolean;
   remoteCheckedAt: number | null;
   remoteProgress: string | null;
-  onRefresh: () => void;
-  onCheckRemote: () => void;
+  activity: ReturnType<typeof useProjectActivity>;
   onOpen: (project: Project, target: OverviewTarget) => void;
   onAdd: () => void;
   onClone: () => void;
+}
+
+export function WorkbenchActionBar({ theme, total, attention, reading, refreshing, remoteBusy, remoteDisabled,
+  onRefresh, onCheckRemote, onAdd }: {
+  theme: ThemeColors; total: number; attention: number; reading: boolean; refreshing: boolean;
+  remoteBusy: boolean; remoteDisabled: boolean; onRefresh: () => void; onCheckRemote: () => void; onAdd: () => void;
+}) {
+  const summary = reading ? tf("正在读取 {0} 个仓库", total) : tf("{0} 个仓库 · {1} 个需关注", total, attention);
+  return <div className="gk-workbench-toolbar" style={{
+    "--gko-text": theme.text, "--gko-secondary": theme.textSec, "--gko-border": theme.border,
+    "--gko-accent": theme.accentFg, "--gko-accent-bg": theme.accentBg,
+  } as CSSProperties}>
+    <h1 className="gk-workbench-title"><ToolbarText>{tx("工作台")}</ToolbarText></h1>
+    <span className="gk-workbench-summary" title={summary}>{summary}</span>
+    <div className="gk-workbench-actions" role="group" aria-label={tx("工作台操作")}>
+      <button className="gk-overview-button gk-shell-button" onClick={onRefresh} disabled={refreshing || !total}
+        title={tx("刷新所有项目的本地状态和提交活动")} aria-label={tx("刷新状态")}>
+        <RefreshCw size={14} className={refreshing ? "gk-overview-spin" : undefined} aria-hidden="true" />
+        <span className="gk-workbench-action-label"><ToolbarText order={1}>{refreshing ? tx("正在刷新") : tx("刷新状态")}</ToolbarText></span>
+      </button>
+      <button className="gk-overview-button gk-overview-primary" onClick={onCheckRemote} disabled={remoteBusy || remoteDisabled || !total}
+        title={tx("检查所有项目的远程更新，不受列表筛选影响")} aria-label={tx("检查远程更新")}>
+        {remoteBusy ? <LoaderCircle size={14} className="gk-overview-spin" aria-hidden="true" /> : <CloudDownload size={14} aria-hidden="true" />}
+        <span className="gk-workbench-action-label"><ToolbarText order={2}>{remoteBusy ? tx("正在检查远程") : tx("检查远程更新")}</ToolbarText></span>
+      </button>
+      <button className="gk-overview-button gk-overview-add gk-shell-button" onClick={onAdd}
+        title={tx("添加仓库")} aria-label={tx("添加仓库")}><Plus size={15} aria-hidden="true" /></button>
+    </div>
+  </div>;
 }
 
 const FILTER_LABELS: Record<OverviewFilter, string> = {
@@ -186,8 +216,8 @@ const OverviewRow = memo(function OverviewRow({ project, entry, showLocation, on
   );
 });
 
-export function ProjectOverview({ theme, projects, entries, refreshing, remoteBusy, remoteDisabled, remoteCheckedAt, remoteProgress,
-  onRefresh, onCheckRemote, onOpen, onAdd, onClone }: ProjectOverviewProps) {
+export function ProjectOverview({ theme, projects, entries, refreshing, remoteBusy, remoteCheckedAt, remoteProgress,
+  activity, onOpen, onAdd, onClone }: ProjectOverviewProps) {
   const [filter, setFilter] = useState<OverviewFilter>("attention");
   const [query, setQuery] = useState("");
   const counts = overviewFilterCounts(projects, entries);
@@ -220,34 +250,15 @@ export function ProjectOverview({ theme, projects, entries, refreshing, remoteBu
     "--gk-shell-hover": theme.rowHover,
   } as CSSProperties;
   return (
-    <main className="gk-workspace-card gk-overview" style={style} aria-label={tx("工作台")}>
-      <header className="gk-overview-header">
-        <div className="gk-overview-heading">
-          <h1>{tx("工作台")}</h1>
-          <p>{loading ? tf("正在读取 {0} 个仓库", projects.length)
-            : tf("{0} 个仓库 · {1} 个需关注", projects.length, counts.attention)}</p>
-          {projects.length > 0 && <div className="gk-overview-freshness" role="status" aria-live="polite">
+    <main className="gk-workspace-card gk-overview" data-theme={theme.isDark ? "dark" : "light"} style={style} aria-label={tx("工作台")}>
+      <div className="gk-overview-body">
+      {projects.length > 0 && <>
+          <div className="gk-overview-freshness" role="status" aria-live="polite">
             <span>{refreshing ? tx("本地状态正在更新") : localCheckedAt ? tf("本地读取于 {0}", timestamp(localCheckedAt)) : tx("本地状态尚未读取")}</span>
             <span>{remoteBusy ? remoteProgress || tx("远程检查进行中")
               : remoteCheckedAt ? tf("最近一次远程检查 {0}", timestamp(remoteCheckedAt)) : tx("尚无远程检查记录")}</span>
-          </div>}
-        </div>
-        <div className="gk-overview-actions">
-          <button className="gk-overview-button gk-shell-button" onClick={onRefresh} disabled={refreshing || !projects.length}
-            title={tx("读取本地状态与已有的上游记录")}>
-            <RefreshCw size={14} className={refreshing ? "gk-overview-spin" : undefined} aria-hidden="true" />
-            {refreshing ? tx("正在刷新") : tx("刷新状态")}
-          </button>
-          <button className="gk-overview-button gk-overview-primary" onClick={onCheckRemote} disabled={remoteBusy || remoteDisabled || !projects.length}
-            title={tx("获取远程更新后重新检查仓库状态")}>
-            {remoteBusy ? <LoaderCircle size={14} className="gk-overview-spin" aria-hidden="true" /> : <CloudDownload size={14} aria-hidden="true" />}
-            {remoteBusy ? tx("正在检查远程") : tx("检查远程更新")}
-          </button>
-          {projects.length > 0 && <button className="gk-overview-button gk-overview-add gk-shell-button" onClick={onAdd}
-            title={tx("添加仓库")} aria-label={tx("添加仓库")}><Plus size={15} aria-hidden="true" /></button>}
-        </div>
-      </header>
-      {projects.length > 0 && <>
+          </div>
+        <WorkspaceActivity projects={projects} activity={activity} onOpen={onOpen} />
         <div className="gk-overview-filterbar">
           <div className="gk-overview-filters" role="group" aria-label={tx("事项筛选")}>
             {FILTER_ORDER.map((value) => <button key={value} onClick={() => setFilter(value)} aria-pressed={filter === value}
@@ -281,6 +292,7 @@ export function ProjectOverview({ theme, projects, entries, refreshing, remoteBu
             <p>{emptyHealthy ? tx("可查看全部项目，或检查远程是否有新更新。") : query.trim() ? tx("试试项目名称、路径或当前分支。") : tx("选择其他筛选查看项目状态。")}</p>
             <button className="gk-overview-button gk-shell-button" onClick={() => { setFilter("all"); setQuery(""); }}>{tx("查看全部项目")}<ChevronRight size={13} aria-hidden="true" /></button>
           </div>}
+      </div>
       </div>
       {projects.length > 0 && <footer className="gk-overview-footer">
         <span>{tf("显示 {0} / {1} 个仓库", shown.length, projects.length)}</span>

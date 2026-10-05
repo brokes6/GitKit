@@ -179,5 +179,9 @@
   "Cherry-pick 提交说明已被外部修改，请在终端明确完成该提交，或中止 Cherry-pick": "The Cherry-pick commit message was modified externally. Explicitly complete the commit in the terminal, or abort the Cherry-pick.",
   "当前 Cherry-pick 没有可恢复的原提交，请在终端完成或中止此操作": "This Cherry-pick has no original commit to resume. Complete or abort the operation in the terminal.",
   "无法读取 Cherry-pick 签名配置": "Could not read the Cherry-pick signing configuration",
-  "无法读取 Cherry-pick 签名配置：{0}": "Could not read the Cherry-pick signing configuration: {0}"
+  "无法读取 Cherry-pick 签名配置：{0}": "Could not read the Cherry-pick signing configuration: {0}",
+  "提交活动时间范围无效": "The commit activity time range is invalid",
+  "无法读取提交活动": "Could not read commit activity",
+  "实例地址无效，请使用不含账号、密码、参数或特殊字符的 HTTP(S) 地址": "Invalid instance URL. Use an HTTP(S) address without credentials, query parameters, or special characters.",
+  "不支持的代码托管平台": "Unsupported code hosting provider"
 }

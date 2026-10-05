@@ -10,6 +10,7 @@ import { GITLAB_CAPABILITIES, tokenCapability, tokenExpiry } from "./gitlabToken
 import type { GitlabTokenInfo } from "./gitlabToken";
 import { GITHUB_CAPABILITIES, GITHUB_TOKEN_KINDS, githubCapability, githubTokenExpiry, validGithubUrl } from "./githubToken";
 import type { GithubTokenInfo } from "./githubToken";
+import { createTokenInfoCache } from "./tokenInfoCache";
 import { DAILY_CHECK_DEFAULT, nextCheckLabel, shouldPresentCheck, validCheckTime } from "./dailyCheck";
 import type { DailyCheck, CheckProgress, CheckSnapshot, CheckResult } from "./dailyCheck";
 import {
@@ -29,7 +30,7 @@ import {
   createPullRequest, branchColor, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitlabCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
-  cancelGitOp, isCancelled, syncLocal, revealInFileManager, openRepositoryRemote,
+  cancelGitOp, isCancelled, syncLocal, revealInFileManager, openRepositoryRemote, openProviderTokenSettings,
   authorColor, authorInitials, loadFileHistory, loadFileTraceDiff, loadFileBlame,
   localMergePreview, mergeLocal, loadRepoOperation, continueMerge, abortMerge, continueCherryPick, abortCherryPick, mergeTool, loadProjectOverview,
 } from "./git";
@@ -39,9 +40,10 @@ import { highlightDiffRows } from "./diffSyntax";
 import type { DiffSyntaxToken, DiffSyntaxPalette } from "./diffSyntax";
 import { workingFileKey, workingFileCount, sameWorking, mergeWorkingPaths, shouldRefreshWorkingFile } from "./workingStatus";
 import type { WorkingFile } from "./workingStatus";
-import { ProjectOverview } from "./Workbench";
+import { ProjectOverview, WorkbenchActionBar } from "./Workbench";
 import { ToolbarText } from "./ToolbarText";
 import { useProjectOverview } from "./useProjectOverview";
+import { useProjectActivity } from "./useProjectActivity";
 import { overviewAttentionCount } from "./projectOverview";
 import type { OverviewTarget } from "./projectOverview";
 export type { WorkingFile } from "./workingStatus";
@@ -4726,7 +4728,38 @@ function IdentitySettings({ identities, setIdentities, defaultId, setDefaultId }
   );
 }
 
-// GitLab integration settings and live personal access token metadata.
+// Metadata survives settings navigation for this app session; credentials are
+// part of cache identity so an edited token cannot reuse another token's grants.
+const gitlabInfoCache = createTokenInfoCache(gitlabTokenInfo);
+const githubInfoCache = createTokenInfoCache(githubTokenInfo);
+
+function TokenSettingsLink({ provider, url, tokenKind }: {
+  provider: "github" | "gitlab"; url: string; tokenKind?: GithubTokenInfo["token_kind"];
+}) {
+  const t = useTheme();
+  const [opening, setOpening] = useState(false);
+  const valid = provider === "github" ? validGithubUrl(url) : (() => {
+    try {
+      const parsed = new URL(url.trim());
+      return ["http:", "https:"].includes(parsed.protocol) && !parsed.username && !parsed.password && !parsed.search && !parsed.hash;
+    } catch { return false; }
+  })();
+  const open = async () => {
+    if (!valid || opening) return;
+    setOpening(true);
+    try { await openProviderTokenSettings(provider, url, tokenKind); }
+    catch (error) { toast.error(translateNativeMessage(String(error))); }
+    finally { setOpening(false); }
+  };
+  return <button type="button" {...press(open)} disabled={!valid || opening}
+    title={valid ? tx("在浏览器中管理或生成新的 Token") : tx("填写实例地址后打开 Token 管理页")}
+    className="gk-conn-button shrink-0 flex items-center gap-1.5 px-2 py-1.5 text-[11px] cursor-pointer disabled:opacity-40"
+    style={{ color: t.accentFg, borderRadius: R - 3 }}>
+    <ExternalLink size={12} aria-hidden="true" />{tx("管理 Token")}
+  </button>;
+}
+
+// GitLab integration settings and personal access token metadata.
 function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlaceholder, hint, test }: {
   storageKey: string; title: string; desc: string;
   urlPlaceholder: string; tokenPlaceholder: string; hint: string;
@@ -4740,22 +4773,30 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
   const [token, setToken] = useState(saved.token);
   const [showToken, setShowToken] = useState(false);
   const [status, setStatus] = useState<{ kind: "idle" | "testing" | "ok" | "err"; msg?: string }>({ kind: "idle" });
-  const [info, setInfo] = useState<GitlabTokenInfo | null>(null);
-  const [infoError, setInfoError] = useState("");
+  const [info, setInfo] = useState<GitlabTokenInfo | null>(() => gitlabInfoCache.read(saved.url, saved.token)?.info ?? null);
+  const [infoError, setInfoError] = useState(() => gitlabInfoCache.read(saved.url, saved.token)?.error ?? "");
+  const [checkedAt, setCheckedAt] = useState<number | null>(() => gitlabInfoCache.read(saved.url, saved.token)?.checkedAt ?? null);
   const [loading, setLoading] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [now, setNow] = useState(Date.now);
   const testRequest = useRef(0);
+  const handledRefresh = useRef(refresh);
 
   useEffect(() => {
     let cancelled = false;
-    setInfo(null); setInfoError(""); setLoading(false);
     if (!configured || editing) return;
+    const cached = gitlabInfoCache.read(saved.url, saved.token);
+    setInfo(cached?.info ?? null); setInfoError(cached?.error ?? ""); setCheckedAt(cached?.checkedAt ?? null);
+    const force = refresh !== handledRefresh.current;
+    handledRefresh.current = refresh;
+    if (!force && gitlabInfoCache.isFresh(saved.url, saved.token)) { setLoading(false); return; }
     setLoading(true);
-    gitlabTokenInfo(saved.url, saved.token).then(
-      data => { if (!cancelled) { setInfo(data); setNow(Date.now()); } },
-      error => { if (!cancelled) setInfoError(String(error)); },
-    ).finally(() => { if (!cancelled) setLoading(false); });
+    void gitlabInfoCache.load(saved.url, saved.token, force).then(result => {
+      if (!cancelled) {
+        setInfo(result.info); setInfoError(result.error); setCheckedAt(result.checkedAt);
+        setNow(Date.now()); setLoading(false);
+      }
+    });
     return () => { cancelled = true; };
   }, [saved, configured, editing, refresh]);
   useEffect(() => {
@@ -4773,40 +4814,51 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
   const canTest = canSave && status.kind !== "testing";
   const resetResult = () => {
     testRequest.current++;
-    setStatus({ kind: "idle" }); setInfo(null); setInfoError(""); setLoading(false);
+    setStatus({ kind: "idle" }); setInfo(null); setInfoError(""); setCheckedAt(null); setLoading(false);
   };
   const runTest = async () => {
     if (!canTest) return;
     const request = ++testRequest.current;
     setStatus({ kind: "testing" }); setInfo(null); setInfoError(""); setLoading(true);
     const [connection, metadata] = await Promise.allSettled([
-      test(url.trim(), token.trim()), gitlabTokenInfo(url.trim(), token.trim()),
+      test(url.trim(), token.trim()), gitlabInfoCache.load(url.trim(), token.trim(), true),
     ]);
     if (request !== testRequest.current) return;
     setStatus(connection.status === "fulfilled"
       ? { kind: "ok", msg: tf("已连接：{0}", connection.value) }
       : { kind: "err", msg: String(connection.reason) });
-    if (metadata.status === "fulfilled") { setInfo(metadata.value); setNow(Date.now()); }
+    if (metadata.status === "fulfilled") {
+      setInfo(metadata.value.info); setInfoError(metadata.value.error); setCheckedAt(metadata.value.checkedAt); setNow(Date.now());
+    }
     else setInfoError(String(metadata.reason));
     setLoading(false);
   };
   const beginEdit = () => { resetResult(); setUrl(saved.url); setToken(saved.token); setShowToken(false); setEditing(true); };
-  const cancelEdit = () => { resetResult(); setUrl(saved.url); setToken(saved.token); setShowToken(false); setEditing(false); };
+  const cancelEdit = () => {
+    resetResult(); setUrl(saved.url); setToken(saved.token); setShowToken(false); setEditing(false);
+    const cached = gitlabInfoCache.read(saved.url, saved.token);
+    setInfo(cached?.info ?? null); setInfoError(cached?.error ?? ""); setCheckedAt(cached?.checkedAt ?? null);
+  };
   const saveNow = () => {
     if (!canSave) return;
     const next = { url: url.trim().replace(/\/+$/, ""), token: token.trim() };
+    if (next.url !== saved.url || next.token !== saved.token) gitlabInfoCache.invalidate(saved.url, saved.token);
     saveConn(storageKey, next); setSaved(next); resetResult(); setShowToken(false); setEditing(false);
+    const cached = gitlabInfoCache.read(next.url, next.token);
+    setInfo(cached?.info ?? null); setInfoError(cached?.error ?? ""); setCheckedAt(cached?.checkedAt ?? null);
     toast.success(tx("GitLab 集成已保存"));
   };
   const removeNow = () => {
+    gitlabInfoCache.invalidate(saved.url, saved.token);
     saveConn(storageKey, { url: "", token: "" }); setSaved({ url: "", token: "" });
     setUrl(""); setToken(""); resetResult(); setShowToken(false); setEditing(false);
     toast.success(tx("已删除集成"));
   };
 
   const expiry = tokenExpiry(info, now);
+  const initialLoading = loading && !info;
   const inactive = info?.revoked || info?.active === false || expiry.expired;
-  const stateLabel = loading ? tx("查询中") : info?.revoked ? tx("已撤销") : expiry.expired ? tx("已过期") : info?.active === false ? tx("不可用") : info?.active ? tx("有效") : tx("待确认");
+  const stateLabel = info?.revoked ? tx("已撤销") : expiry.expired ? tx("已过期") : info?.active === false ? tx("不可用") : loading ? tx(info ? "更新中" : "查询中") : info?.active ? tx("有效") : tx("待确认");
   const stateColor = inactive ? t.red : info?.active ? t.green : t.textSec;
   const inputStyle = { background: t.inputBg, color: t.text, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
   const buttonStyle = { color: t.textSec, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
@@ -4814,9 +4866,9 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
     <div className="flex flex-col gap-4" aria-busy={loading}>
       <dl className="gk-token-summary grid grid-cols-3 gap-4 py-4" style={{ borderBottom: `0.5px solid ${t.border}` }}>
         {[
-          { title: tx("Token 名称"), value: info?.name || (loading ? tx("读取中…") : tx("无法确认")), color: t.text },
-          { title: tx("到期时间"), value: loading ? tx("读取中…") : tx(expiry.date), color: t.text },
-          { title: tx("剩余有效期"), value: loading ? tx("读取中…") : inactive ? stateLabel : tx(expiry.label), color: inactive ? t.red : expiry.tone === "green" ? t.green : expiry.tone === "amber" ? t.amber : t.textSec },
+          { title: tx("Token 名称"), value: info?.name || (initialLoading ? tx("读取中…") : tx("无法确认")), color: t.text },
+          { title: tx("到期时间"), value: initialLoading ? tx("读取中…") : tx(expiry.date), color: t.text },
+          { title: tx("剩余有效期"), value: initialLoading ? tx("读取中…") : inactive ? tx(expiry.expired ? "已过期" : info?.revoked ? "已撤销" : "不可用") : tx(expiry.label), color: inactive ? t.red : expiry.tone === "green" ? t.green : expiry.tone === "amber" ? t.amber : t.textSec },
         ].map(item => <div key={item.title} className="min-w-0 flex flex-col gap-1.5">
           <dt className="text-[11px]" style={{ color: t.textSec }}>{item.title}</dt>
           <dd className="text-xs font-medium break-words tabular-nums" style={{ color: item.color }}>{item.value}</dd>
@@ -4840,7 +4892,7 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
               style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 3, background: t.bgPanel }}>
               <span className="text-[11px] font-medium" style={{ color: t.text }}>{tx(capability.title)}</span>
               <span className="flex items-center gap-1 text-[10px] font-medium" style={{ color }}>
-                <Icon size={12} />{loading ? tx("查询中") : granted ? tx("已拥有") : permission === "denied" ? tx("未授权") : permission === "inactive" ? tx("令牌不可用") : tx("无法确认")}
+                <Icon size={12} />{initialLoading ? tx("查询中") : granted ? tx("已拥有") : permission === "denied" ? tx("未授权") : permission === "inactive" ? tx("令牌不可用") : tx("无法确认")}
               </span>
               <span className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>{tx(capability.detail)}</span>
             </div>;
@@ -4860,9 +4912,12 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
 
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex flex-col gap-1.5">
-        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{title}</span>
-        <span className="text-[11px] leading-relaxed" style={{ color: t.textSec }}>{desc}</span>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col gap-1.5 min-w-0">
+          <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{title}</span>
+          <span className="text-[11px] leading-relaxed" style={{ color: t.textSec }}>{desc}</span>
+        </div>
+        <TokenSettingsLink provider="gitlab" url={editing ? url : saved.url} />
       </div>
       {configured && !editing ? (
         <>
@@ -4883,6 +4938,7 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
           <div className="flex flex-col">
             <div className="flex items-center justify-between gap-3">
               <h3 className="text-xs font-semibold" style={{ color: t.text }}>{tx("令牌信息")}</h3>
+              {checkedAt && <span className="text-[10px] ml-auto" style={{ color: t.textSec }}>{tf("查询于 {0}", new Date(checkedAt).toLocaleTimeString(getCurrentLanguage() === "en" ? "en-US" : "zh-CN", { hour: "2-digit", minute: "2-digit" }))}</span>}
               <button {...press(() => setRefresh(value => value + 1))} disabled={loading}
                 className="gk-conn-button flex items-center gap-1.5 px-2 py-1 text-[11px] cursor-pointer disabled:opacity-50"
                 style={{ color: t.textSec, borderRadius: R - 3 }}><RefreshCw size={12} className={loading ? "animate-spin" : undefined} />{tx("刷新信息")}</button>
@@ -4952,6 +5008,7 @@ function GithubTokenDetails({ info, loading, error, now }: {
 }) {
   const t = useTheme();
   const expiry = githubTokenExpiry(info, now);
+  const initialLoading = loading && !info;
   return <div className="flex flex-col gap-3" aria-busy={loading}>
     <dl className="grid grid-cols-3 gap-3 py-3" style={{ borderBottom: `0.5px solid ${t.border}` }}>
       {[
@@ -4960,7 +5017,7 @@ function GithubTokenDetails({ info, loading, error, now }: {
         { title: tx("剩余有效期"), value: tx(expiry.label), color: expiry.tone === "red" ? t.red : expiry.tone === "amber" ? t.amber : expiry.tone === "green" ? t.green : t.textSec },
       ].map(item => <div key={item.title} className="min-w-0 flex flex-col gap-1.5">
         <dt className="text-[10px]" style={{ color: t.textSec }}>{item.title}</dt>
-        <dd className="text-[11px] font-medium break-words tabular-nums" style={{ color: item.color }}>{loading ? tx("读取中…") : item.value}</dd>
+        <dd className="text-[11px] font-medium break-words tabular-nums" style={{ color: item.color }}>{initialLoading ? tx("读取中…") : item.value}</dd>
       </div>)}
     </dl>
     {error && <div role="status" className="flex items-start gap-2 text-[11px] leading-relaxed" style={{ color: t.amber }}>
@@ -4983,7 +5040,7 @@ function GithubTokenDetails({ info, loading, error, now }: {
           style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 3, background: t.bgPanel }}>
           <span className="text-[11px] font-medium" style={{ color: t.text }}>{tx(capability.title)}</span>
           <span className="flex items-center gap-1 text-[10px] font-medium" style={{ color }}><Icon size={12} />
-            {loading ? tx("查询中") : permission === "granted" ? tx("已拥有") : permission === "public" ? tx("仅公开仓库") : permission === "denied" ? tx("未授权") : permission === "inactive" ? tx("令牌已过期") : tx("无法确认")}
+            {initialLoading ? tx("查询中") : permission === "granted" ? tx("已拥有") : permission === "public" ? tx("仅公开仓库") : permission === "denied" ? tx("未授权") : permission === "inactive" ? tx("令牌已过期") : tx("无法确认")}
           </span>
         </div>;
       })}
@@ -5013,13 +5070,18 @@ function GithubAccountsSettings() {
   const requestId = useRef(0);
   const [now, setNow] = useState(Date.now);
   const [refresh, setRefresh] = useState(0);
-  type Inspection = { account: GithubAccount; loading: boolean; info: GithubTokenInfo | null; error: string };
+  type Inspection = { account: GithubAccount; loading: boolean; info: GithubTokenInfo | null; error: string; checkedAt: number | null };
   const [inspections, setInspections] = useState<Record<string, Inspection>>({});
   const showForm = adding || editingId !== null;
   const selected = accounts.find(account => account.id === selectedId) ?? accounts[0];
+  const handledRefresh = useRef(refresh);
   const inspectionFor = (account: GithubAccount) => {
     const result = inspections[account.id];
-    return result?.account.url === account.url && result.account.token === account.token ? result : undefined;
+    const cached = githubInfoCache.read(account.url, account.token);
+    if (result?.account.url === account.url && result.account.token === account.token
+        && (!cached || cached.checkedAt < (result.checkedAt ?? 0)
+          || (cached.checkedAt === result.checkedAt && cached.info === result.info && cached.error === result.error))) return result;
+    return cached ? { account, loading: false, ...cached } : undefined;
   };
   const current = selected ? inspectionFor(selected) : undefined;
   const busy = accounts.some(account => !inspectionFor(account) || inspectionFor(account)?.loading);
@@ -5028,22 +5090,33 @@ function GithubAccountsSettings() {
 
   useEffect(() => { saveGithubAccounts(accounts); }, [accounts]);
   useEffect(() => {
+    if (showForm) return;
     let cancelled = false;
-    setInspections(Object.fromEntries(accounts.map(account => [account.id, { account, loading: true, info: null, error: "" }])));
+    const force = refresh !== handledRefresh.current;
+    handledRefresh.current = refresh;
+    const initial = Object.fromEntries(accounts.map(account => {
+      const cached = githubInfoCache.read(account.url, account.token);
+      return [account.id, { account, loading: force || !githubInfoCache.isFresh(account.url, account.token),
+        info: cached?.info ?? null, error: cached?.error ?? "", checkedAt: cached?.checkedAt ?? null }];
+    }));
+    setInspections(initial);
+    const pending = accounts.filter(account => initial[account.id].loading);
+    const requests = new Map<string, ReturnType<typeof githubInfoCache.load>>();
     let index = 0;
     // Bound concurrent requests; a slow or invalid account never blocks other results.
     const worker = async () => {
-      while (!cancelled && index < accounts.length) {
-        const account = accounts[index++];
-        let result: Inspection;
-        try { result = { account, loading: false, info: await githubTokenInfo(account.url, account.token), error: "" }; }
-        catch (error) { result = { account, loading: false, info: null, error: String(error) }; }
+      while (!cancelled && index < pending.length) {
+        const account = pending[index++];
+        const key = JSON.stringify([account.url.trim().replace(/\/+$/, ""), account.token.trim()]);
+        let request = requests.get(key);
+        if (!request) { request = githubInfoCache.load(account.url, account.token, force); requests.set(key, request); }
+        const result: Inspection = { account, loading: false, ...await request };
         if (!cancelled) { setInspections(previous => ({ ...previous, [account.id]: result })); setNow(Date.now()); }
       }
     };
-    void Promise.all(Array.from({ length: Math.min(3, accounts.length) }, worker));
+    void Promise.all(Array.from({ length: Math.min(3, pending.length) }, worker));
     return () => { cancelled = true; };
-  }, [accounts, refresh]);
+  }, [accounts, refresh, showForm]);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => { window.clearInterval(timer); requestId.current++; };
@@ -5056,6 +5129,8 @@ function GithubAccountsSettings() {
     if (!valid) return;
     const id = editingId ?? `gh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const next = { id, label: label.trim(), url: url.trim().replace(/\/+$/, ""), token: token.trim() };
+    const previous = accounts.find(account => account.id === editingId);
+    if (previous && (previous.url !== next.url || previous.token !== next.token)) githubInfoCache.invalidate(previous.url, previous.token);
     setAccounts(previous => editingId ? previous.map(account => account.id === editingId ? next : account) : [...previous, next]);
     setSelectedId(id); reset(); toast.success(editingId ? tx("GitHub 账号已保存") : tx("GitHub 账号已添加"));
   };
@@ -5064,6 +5139,8 @@ function GithubAccountsSettings() {
     reset(); setSelectedId(account.id); setEditingId(account.id); setLabel(account.label); setUrl(account.url); setToken(account.token);
   };
   const remove = (id: string) => {
+    const account = accounts.find(value => value.id === id);
+    if (account) githubInfoCache.invalidate(account.url, account.token);
     setAccounts(previous => previous.filter(account => account.id !== id));
     for (const [path, accountId] of Object.entries(loadPrefMap(ACCOUNT_PREFS))) {
       if (accountId === id) deletePrefMapEntry(ACCOUNT_PREFS, path);
@@ -5075,8 +5152,8 @@ function GithubAccountsSettings() {
     const request = ++requestId.current;
     setTesting(true); setDraftInfo(null); setDraftError("");
     try {
-      const info = await githubTokenInfo(url.trim(), token.trim());
-      if (request === requestId.current) { setDraftInfo(info); setNow(Date.now()); }
+      const result = await githubInfoCache.load(url.trim(), token.trim(), true);
+      if (request === requestId.current) { setDraftInfo(result.info); setDraftError(result.error); setNow(Date.now()); }
     } catch (error) { if (request === requestId.current) setDraftError(String(error)); }
     finally { if (request === requestId.current) setTesting(false); }
   };
@@ -5084,9 +5161,13 @@ function GithubAccountsSettings() {
   const buttonStyle = { color: t.textSec, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
 
   return <div className="flex flex-col gap-4">
-    <div className="flex flex-col gap-1.5">
-      <h2 className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{tx("GitHub 集成")}</h2>
-      <p className="text-[11px] leading-relaxed" style={{ color: t.textSec }}>{tx("按远程地址匹配账号；匹配到多个账号时选择使用，也可在「项目配置」中指定账号。")}</p>
+    <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-col gap-1.5 min-w-0">
+        <h2 className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{tx("GitHub 集成")}</h2>
+        <p className="text-[11px] leading-relaxed" style={{ color: t.textSec }}>{tx("按远程地址匹配账号；匹配到多个账号时选择使用，也可在「项目配置」中指定账号。")}</p>
+      </div>
+      <TokenSettingsLink provider="github" url={showForm ? url : selected?.url ?? ""}
+        tokenKind={(showForm ? draftInfo?.token_kind : current?.info?.token_kind) ?? ((showForm ? token : selected?.token)?.startsWith("github_pat_") ? "fine_grained" : "classic")} />
     </div>
     <div className="flex flex-col gap-2.5">
       <div className="flex items-center gap-2">
@@ -5104,7 +5185,7 @@ function GithubAccountsSettings() {
             const expiry = githubTokenExpiry(result?.info ?? null, now);
             const active = selected?.id === account.id;
             const loading = !result || result.loading;
-            const stateText = loading ? tx("查询中…") : result.error ? tx("连接异常") : expiry.expired ? tx("已过期") : tf("已验证 · {0}", tx(expiry.label));
+            const stateText = loading ? tx(result?.info ? "更新中" : "查询中…") : result?.error ? tx("连接异常") : expiry.expired ? tx("已过期") : tf("已验证 · {0}", tx(expiry.label));
             const color = result?.error || expiry.expired ? t.red : expiry.tone === "amber" ? t.amber : result?.info ? t.green : t.textSec;
             return <div key={account.id} className="flex items-center gap-1 px-2 py-1.5"
               style={{ border: `0.5px solid ${active ? `${t.accent}66` : t.border}`, borderRadius: R - 2, background: active ? t.accentBg : t.bgPanel }}>
@@ -5169,7 +5250,10 @@ function GithubAccountsSettings() {
     </form> : selected ? <section id="github-account-detail" aria-labelledby="github-detail-title" className="flex flex-col gap-1 pt-3" style={{ borderTop: `0.5px solid ${t.border}` }}>
       <div className="flex items-center justify-between gap-2">
         <h3 id="github-detail-title" className="text-xs font-semibold min-w-0 truncate" style={{ color: t.text }}>{tx("账号详情 ·")} {accountLabel(selected)}</h3>
-        {current?.info && <span className="text-[10px] shrink-0 px-1.5 py-0.5 rounded" style={{ background: t.inputBg, color: t.textSec }}>{tx(GITHUB_TOKEN_KINDS[current.info.token_kind])}</span>}
+        <div className="flex items-center gap-2 shrink-0">
+          {current?.checkedAt && <span className="text-[10px]" style={{ color: t.textSec }}>{tf("查询于 {0}", new Date(current.checkedAt).toLocaleTimeString(getCurrentLanguage() === "en" ? "en-US" : "zh-CN", { hour: "2-digit", minute: "2-digit" }))}</span>}
+          {current?.info && <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ background: t.inputBg, color: t.textSec }}>{tx(GITHUB_TOKEN_KINDS[current.info.token_kind])}</span>}
+        </div>
       </div>
       <GithubTokenDetails info={current?.info ?? null} loading={!current || current.loading} error={current?.error ?? ""} now={now} />
     </section> : null}
@@ -7118,7 +7202,7 @@ export default function App() {
           const data: RealData = { path, initialized: false, hasHead: false, currentBranch: "",
             branches: [], remotes: [], commits: [], graph: [], working: [], stashes: [] };
           cacheRealData(realCache.current, path, data);
-          setWorkingSnapshot({ path, files: [] });
+          applyWorkingStatusRef.current(path, []);
           setRealData(data);
           syncBranch(data);
           applyView(data);
@@ -7578,6 +7662,7 @@ export default function App() {
   const checkProgress = checkSnapshot?.progress ?? null;
   const checkBusy = checkProgress !== null;
   const overview = useProjectOverview(projects, workspaceView === "home", reloadTick, checkSnapshot?.result ?? null);
+  const activity = useProjectActivity(projects, workspaceView === "home", reloadTick, checkSnapshot?.result ?? null);
   const attentionCount = overviewAttentionCount(projects, overview.entries);
   useEffect(() => {
     if (workspaceView !== "home" || overview.refreshing) return;
@@ -8469,13 +8554,6 @@ export default function App() {
     }
   };
 
-  // Keep the tab's change-count badge in sync.
-  useEffect(() => {
-    setProjects((prev) =>
-      prev.map((p) => p.id === activeProjectId ? { ...p, changes: changesCount } : p)
-    );
-  }, [changesCount, activeProjectId]);
-
   return (
     <ThemeCtx.Provider value={theme}>
       {/* Fills the native macOS window */}
@@ -8502,10 +8580,11 @@ export default function App() {
               <PanelLeft size={17} aria-hidden="true" />
             </button>
             <div key={workspaceView} className="gk-toolbar-content" data-view={workspaceView}>
-            {workspaceView === "home" ? <div className="flex items-center gap-3 h-full flex-1 min-w-0">
-            <span className="px-2 text-xs font-semibold" style={{ color: theme.textSec }}><ToolbarText>{tx("工作台")}</ToolbarText></span>
-            <span className="ml-auto text-[11px]" style={{ color: theme.textMuted }}><ToolbarText order={1}>{tx("所有项目，一处查看")}</ToolbarText></span>
-          </div> : <ActionBar project={activeProject} branch={dataReady ? currentBranch : activeProject?.branch ?? ""}
+            {workspaceView === "home" ? <WorkbenchActionBar theme={theme} total={projects.length} attention={attentionCount}
+              reading={overview.refreshing && !projects.some((project) => overview.entries[project.id]?.summary)}
+              refreshing={overview.refreshing || activity.refreshing} remoteBusy={checkBusy} remoteDisabled={!!gitBusy || !!busyLabel || pullBusy}
+              onRefresh={() => { overview.refresh(); activity.refresh(); }} onCheckRemote={() => { void runUpdateCheck(); }} onAdd={handleOpenNew}
+            /> : <ActionBar project={activeProject} branch={dataReady ? currentBranch : activeProject?.branch ?? ""}
             canMerge={dataReady && hasHead && !switching && operationKnown && !activeRepoOperation}
             onMerge={() => {
               if (path) realCache.current.delete(path);
@@ -8612,11 +8691,10 @@ export default function App() {
                 onAdd={handleOpenNew} onClone={() => setCloneOpen(true)} />
             </div>
           {workspaceView === "home" ? <ProjectOverview theme={theme} projects={projects} entries={overview.entries}
-            refreshing={overview.refreshing} remoteBusy={checkBusy} remoteDisabled={!!gitBusy || !!busyLabel || pullBusy}
+            refreshing={overview.refreshing} remoteBusy={checkBusy} activity={activity}
             remoteCheckedAt={checkSnapshot?.result?.completedAt ?? null}
             remoteProgress={checkProgress ? checkProgress.paused ? tx("等待休眠恢复后补查")
               : tf("已检查 {0} / {1} · 正在检查 {2}", checkProgress.current, checkProgress.total, checkProgress.project) : null}
-            onRefresh={overview.refresh} onCheckRemote={() => { void runUpdateCheck(); }}
             onOpen={openOverviewProject}
             onAdd={handleOpenNew} onClone={() => setCloneOpen(true)} /> : !activeProject ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-4" style={{ background: theme.bg }}>

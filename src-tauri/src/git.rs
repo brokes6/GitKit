@@ -15,6 +15,7 @@ mod operation;
 mod snapshot_hash;
 pub mod local_merge;
 pub mod project_overview;
+pub mod project_activity;
 pub mod file_trace;
 pub use operation::CancelState;
 use operation::GitOperation;
@@ -2998,6 +2999,128 @@ fn open_in_browser(url: &str) -> Result<(), String> {
 
     #[allow(unreachable_code)]
     Err("当前系统不支持打开浏览器".into())
+}
+
+/// Construct a credential-free settings URL without sending a network request.
+fn provider_token_settings_url(provider: &str, instance: &str, token_kind: Option<&str>) -> Result<String, String> {
+    let invalid_address = || "实例地址无效，请使用不含账号、密码、参数或特殊字符的 HTTP(S) 地址".to_string();
+    let base = match provider {
+        "github" if instance.trim().is_empty() => "https://github.com",
+        "github" => instance.trim(),
+        "gitlab" if instance.trim().is_empty() => return Err("请先在设置中填写 GitLab 实例地址".into()),
+        "gitlab" => instance.trim(),
+        _ => return Err("不支持的代码托管平台".into()),
+    };
+    if instance.chars().any(char::is_control) || base.contains('\\') {
+        return Err(invalid_address());
+    }
+    let authority = base.split_once("://").map(|(_, rest)| rest.split('/').next().unwrap_or("")).unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return Err(invalid_address());
+    }
+    let mut url = reqwest::Url::parse(base).map_err(|_| invalid_address())?;
+    if !matches!(url.scheme(), "http" | "https")
+        || !base.contains("://")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid_address());
+    }
+    if provider == "github" && url.host_str() == Some("api.github.com") {
+        url = reqwest::Url::parse("https://github.com").map_err(|_| invalid_address())?;
+    }
+    // The existing Windows browser launcher uses cmd /C start. Reject shell
+    // syntax, including percent expansion, rather than forward unsafe input to it.
+    // Percent-encoded/Unicode instance paths are deliberately unsupported here.
+    if url.as_str().bytes().any(|byte| matches!(byte, b'%' | b'&' | b'|' | b'^' | b'<' | b'>' | b'"' | b'!' | b'(' | b')')) {
+        return Err(invalid_address());
+    }
+    let suffix = match provider {
+        "github" if token_kind == Some("fine_grained") => "/settings/personal-access-tokens",
+        "github" => "/settings/tokens",
+        "gitlab" => "/-/user_settings/personal_access_tokens",
+        _ => unreachable!(),
+    };
+    let base_path = url.path().trim_end_matches('/');
+    // The same Enterprise instance field accepts its REST API root for auth.
+    let web_path = if provider == "github" {
+        base_path.strip_suffix("/api/v3").unwrap_or(base_path)
+    } else {
+        base_path
+    };
+    let path = format!("{web_path}{suffix}");
+    url.set_path(&path);
+    Ok(url.into())
+}
+
+/// Open the provider's token management page; the API accepts no credential.
+#[tauri::command]
+pub async fn open_provider_token_settings(provider: String, url: String, token_kind: Option<String>) -> Result<String, String> {
+    run_blocking(move || {
+        let web_url = provider_token_settings_url(&provider, &url, token_kind.as_deref())?;
+        open_in_browser(&web_url)?;
+        Ok(web_url)
+    })
+    .await
+}
+
+#[cfg(test)]
+mod provider_token_settings_tests {
+    use super::provider_token_settings_url;
+
+    #[test]
+    fn github_default_and_token_kinds_select_the_management_page() {
+        for kind in [None, Some("classic"), Some("oauth"), Some("unknown")] {
+            assert_eq!(provider_token_settings_url("github", "", kind).unwrap(), "https://github.com/settings/tokens");
+        }
+        assert_eq!(provider_token_settings_url("github", "  ", Some("fine_grained")).unwrap(), "https://github.com/settings/personal-access-tokens");
+        assert_eq!(provider_token_settings_url("github", "https://api.github.com/", None).unwrap(), "https://github.com/settings/tokens");
+        assert_eq!(provider_token_settings_url("github", "https://api.github.com/api/v3", Some("fine_grained")).unwrap(), "https://github.com/settings/personal-access-tokens");
+    }
+
+    #[test]
+    fn enterprise_and_gitlab_preserve_instance_subpaths_and_ports() {
+        assert_eq!(provider_token_settings_url("github", " https://git.example.com:8443/enterprise/ ", None).unwrap(), "https://git.example.com:8443/enterprise/settings/tokens");
+        assert_eq!(provider_token_settings_url("github", "http://localhost:3000/enterprise", Some("fine_grained")).unwrap(), "http://localhost:3000/enterprise/settings/personal-access-tokens");
+        assert_eq!(provider_token_settings_url("github", "https://git.example.com/api/v3/", None).unwrap(), "https://git.example.com/settings/tokens");
+        assert_eq!(provider_token_settings_url("github", "https://git.example.com/enterprise/api/v3", Some("fine_grained")).unwrap(), "https://git.example.com/enterprise/settings/personal-access-tokens");
+        assert_eq!(provider_token_settings_url("gitlab", "https://gitlab.example.com/team/gitlab/", None).unwrap(), "https://gitlab.example.com/team/gitlab/-/user_settings/personal_access_tokens");
+        assert_eq!(provider_token_settings_url("gitlab", "https://gitlab.example.com/api/v3", None).unwrap(), "https://gitlab.example.com/api/v3/-/user_settings/personal_access_tokens");
+        assert_eq!(provider_token_settings_url("gitlab", "http://[::1]:3000", None).unwrap(), "http://[::1]:3000/-/user_settings/personal_access_tokens");
+    }
+
+    #[test]
+    fn invalid_inputs_are_rejected_without_echoing_them() {
+        for input in [
+            "https://user:fixture-secret@example.com", "https://fixture-secret@example.com",
+            "https://@example.com/fixture-secret", "https:///example.com/fixture-secret",
+            "https://example.com?token=fixture-secret", "https://example.com/#fixture-secret",
+            "https://", "https://bad host/fixture-secret", "https://example.com:invalid/fixture-secret",
+            "file:///fixture-secret", "ssh://example.com/fixture-secret", "example.com/fixture-secret",
+            "https://example.com/fixture-secret\n", "https://example.com\\fixture-secret",
+        ] {
+            let error = provider_token_settings_url("github", input, None).unwrap_err();
+            assert!(!error.contains("fixture-secret"));
+            assert!(!error.contains(input));
+        }
+        assert!(provider_token_settings_url("gitlab", "", None).is_err());
+        assert!(provider_token_settings_url("unsupported", "https://example.com", None).is_err());
+    }
+
+    #[test]
+    fn windows_shell_characters_and_percent_expansion_are_never_forwarded() {
+        for input in [
+            "https://example.com/a&calc", "https://example.com/a|calc", "https://example.com/a^calc",
+            "https://example.com/a<calc", "https://example.com/a>calc", "https://example.com/a\"calc",
+            "https://example.com/a!calc", "https://example.com/a(calc)", "https://example.com/%PATH%",
+            "https://example.com/a%26calc", "https://example.com/a%20b", "https://example.com/中文",
+        ] {
+            assert!(provider_token_settings_url("gitlab", input, None).is_err(), "{input}");
+        }
+    }
 }
 
 /// Convert the common Git remote forms into a credential-free repository web

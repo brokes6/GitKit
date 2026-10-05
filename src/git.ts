@@ -16,9 +16,14 @@ import type {
 import { mapWorkingStatus } from "./workingStatus.ts";
 import type { WorkingFile, StagingStatus, WorkingStatusSnapshot } from "./workingStatus";
 import type { ProjectOverviewSummary } from "./projectOverview";
+import type { ProjectActivitySummary } from "./projectActivity";
 
 export function loadProjectOverview(path: string): Promise<ProjectOverviewSummary> {
   return invoke<ProjectOverviewSummary>("git_project_overview", { path });
+}
+
+export function loadProjectActivity(path: string, fromTimestamp: number, toTimestamp: number): Promise<ProjectActivitySummary> {
+  return invoke<ProjectActivitySummary>("git_project_activity", { path, fromTimestamp, toTimestamp });
 }
 
 /** Keep native errors local to the active UI language without changing payloads. */
@@ -736,6 +741,11 @@ export async function createPullRequest(args: {
     token: args.token, source: args.source, target: args.target,
     title: args.title, description: args.description,
   });
+}
+
+/** Open a provider's token settings without forwarding the configured token. */
+export function openProviderTokenSettings(provider: "gitlab" | "github", url: string, tokenKind?: string): Promise<string> {
+  return invoke<string>("open_provider_token_settings", { provider, url, tokenKind: tokenKind ?? null });
 }
 
 export async function createBranch(

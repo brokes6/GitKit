@@ -12,7 +12,7 @@ const LOADING_ENTRY: OverviewEntry = { ...IDLE_ENTRY, checking: true };
 
 export function useProjectOverview(projects: Project[], active: boolean, revision: number, remoteResult: CheckResult | null) {
   const [stored, setStored] = useState<Record<string, StoredEntry>>({});
-  const [refreshing, setRefreshing] = useState(false);
+  const [completedScanKey, setCompletedScanKey] = useState<string | null>(null);
   const [refreshRevision, setRefreshRevision] = useState(0);
   const scannerRef = useRef<ReturnType<typeof createOverviewScanner<ScanProject>> | null>(null);
   if (!scannerRef.current) scannerRef.current = createOverviewScanner<ScanProject>(loadProjectOverview);
@@ -22,6 +22,10 @@ export function useProjectOverview(projects: Project[], active: boolean, revisio
   const cohortKey = JSON.stringify(projects.map(({ id, path }) => ({ id, path })));
   const remoteRevision = remoteResult?.id ?? 0;
   const remoteCompletedAt = remoteResult?.completedAt ?? 0;
+  const scanKey = JSON.stringify([cohortKey, revision, refreshRevision, remoteRevision, remoteCompletedAt]);
+  // Entering the workbench or invalidating a scan is pending on the first render,
+  // before the effect starts. Cached summaries must not overwrite newer badges.
+  const refreshing = active && projects.length > 0 && completedScanKey !== scanKey;
   const refresh = useCallback(() => setRefreshRevision((value) => value + 1), []);
 
   useEffect(() => {
@@ -35,7 +39,7 @@ export function useProjectOverview(projects: Project[], active: boolean, revisio
     let disposed = false;
     const cohort: ScanProject[] = JSON.parse(cohortKey);
     if (!active || !cohort.length) {
-      setRefreshing(false);
+      setCompletedScanKey(null);
       setStored((previous) => {
         let changed = Object.keys(previous).length !== cohort.length;
         const next: Record<string, StoredEntry> = {};
@@ -50,7 +54,6 @@ export function useProjectOverview(projects: Project[], active: boolean, revisio
       });
       return;
     }
-    setRefreshing(true);
     setStored((previous) => {
       let changed = Object.keys(previous).length !== cohort.length;
       const next: Record<string, StoredEntry> = {};
@@ -78,10 +81,10 @@ export function useProjectOverview(projects: Project[], active: boolean, revisio
         }
         return next;
       }),
-      onComplete: () => { if (!disposed) setRefreshing(false); },
+      onComplete: () => { if (!disposed) setCompletedScanKey(scanKey); },
     });
     return () => { disposed = true; scan.cancel(); };
-  }, [active, cohortKey, revision, refreshRevision, remoteRevision, remoteCompletedAt, scanner]);
+  }, [active, cohortKey, scanKey, scanner]);
 
   const entries = useMemo(() => {
     const remoteRows = new Map(remoteResult?.rows.map((row) => [row.id, row]) ?? []);

@@ -1,39 +1,39 @@
 import type { ProjectOverviewSummary } from "./projectOverview";
 
 interface ScanProject { id: string; path: string }
-export interface OverviewScanResult<T extends ScanProject> {
+export interface OverviewScanResult<T extends ScanProject, Summary = ProjectOverviewSummary> {
   project: T;
-  summary: ProjectOverviewSummary | null;
+  summary: Summary | null;
   error: string | null;
 }
-interface ScanObserver<T extends ScanProject> {
-  onBatch: (results: OverviewScanResult<T>[]) => void;
+interface ScanObserver<T extends ScanProject, Summary> {
+  onBatch: (results: OverviewScanResult<T, Summary>[]) => void;
   onComplete: () => void;
 }
-interface ScanRound<T extends ScanProject> {
+interface ScanRound<T extends ScanProject, Summary> {
   pending: T[];
   running: number;
-  batch: OverviewScanResult<T>[];
+  batch: OverviewScanResult<T, Summary>[];
   timer: ReturnType<typeof setTimeout> | null;
-  observer: ScanObserver<T> | null;
+  observer: ScanObserver<T, Summary> | null;
   settle: (completed: boolean) => void;
 }
 
 /** Keep native reads in the same pool even after their UI generation is cancelled. */
-export function createOverviewScanner<T extends ScanProject>(
-  load: (path: string) => Promise<ProjectOverviewSummary>,
+export function createOverviewScanner<T extends ScanProject, Summary = ProjectOverviewSummary>(
+  load: (path: string) => Promise<Summary>,
   concurrency = 3,
   batchDelay = 32,
 ) {
   const limit = Math.max(1, Math.floor(concurrency));
   const runningPaths = new Set<string>();
-  let current: ScanRound<T> | null = null;
+  let current: ScanRound<T, Summary> | null = null;
 
-  const clearTimer = (round: ScanRound<T>) => {
+  const clearTimer = (round: ScanRound<T, Summary>) => {
     if (round.timer !== null) clearTimeout(round.timer);
     round.timer = null;
   };
-  const cancel = (round: ScanRound<T>) => {
+  const cancel = (round: ScanRound<T, Summary>) => {
     if (!round.observer) return;
     clearTimer(round);
     round.pending = [];
@@ -42,14 +42,14 @@ export function createOverviewScanner<T extends ScanProject>(
     if (current === round) current = null;
     round.settle(false);
   };
-  const flush = (round: ScanRound<T>) => {
+  const flush = (round: ScanRound<T, Summary>) => {
     clearTimer(round);
     if (current !== round || !round.observer || !round.batch.length) return;
     const results = round.batch;
     round.batch = [];
     round.observer.onBatch(results);
   };
-  const complete = (round: ScanRound<T>) => {
+  const complete = (round: ScanRound<T, Summary>) => {
     if (current !== round || !round.observer || round.pending.length || round.running) return;
     flush(round);
     // An observer may have requested another generation while applying its batch.
@@ -70,7 +70,7 @@ export function createOverviewScanner<T extends ScanProject>(
       const [project] = round.pending.splice(index, 1);
       runningPaths.add(project.path);
       round.running++;
-      const finish = (summary: ProjectOverviewSummary | null, error: string | null) => {
+      const finish = (summary: Summary | null, error: string | null) => {
         runningPaths.delete(project.path);
         round.running--;
         if (current === round && round.observer) {
@@ -90,11 +90,11 @@ export function createOverviewScanner<T extends ScanProject>(
   };
 
   return {
-    start(projects: readonly T[], observer: ScanObserver<T>) {
+    start(projects: readonly T[], observer: ScanObserver<T, Summary>) {
       if (current) cancel(current);
       let settle!: (completed: boolean) => void;
       const done = new Promise<boolean>((resolve) => { settle = resolve; });
-      const round: ScanRound<T> = {
+      const round: ScanRound<T, Summary> = {
         pending: [...projects], running: 0, batch: [], timer: null, observer, settle,
       };
       current = round;
