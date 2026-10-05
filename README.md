@@ -28,37 +28,56 @@ GitKit is built with **Tauri v2, Rust, React, and TypeScript**. It uses the syst
 
 ### Repositories and history
 
-- Open or clone repositories and switch between them from the project sidebar.
-- Open **Workbench** for a multi-project overview of conflicts, unfinished Git operations, working changes, commits to push, known upstream updates, and check errors. Filter or search projects and jump into their existing workflows. Local refreshes are read-only; remote checks and confirmed synchronization remain separate actions. GitKit remembers the last page you used.
+- Open repositories or ordinary project folders, or clone repositories, and switch between projects from the sidebar. For a folder without Git, click **Push** and confirm initialization; existing files stay in place. Click Push again to connect a new remote repository.
+- Open **Workbench** for a compact project overview that defaults to projects needing attention: conflicts, unfinished Git operations, working changes, commits to push, known upstream updates, and check errors. Filter or search projects and jump into their workflows. The top controls refresh local status and activity across all projects, check remote updates, or add a project. Local refreshes are read-only; synchronization remains a separate action. GitKit remembers the last page you used.
+- View the last **12 months of local commit activity** across all added projects and authors. The calendar uses committer dates in your local time zone, includes unpushed commits, and counts the same commit ID once across clones and worktrees. Select a date to see its projects and open a project's history. Failed reads are marked as incomplete statistics. No GitHub account is required.
 - Browse a graph with local and remote branch context, tags, authors, and commit diffs. Pin, hide, or focus branches; names such as `feature/*` are grouped into folders.
+- Expand file diffs for more room, syntax highlighting, and navigation between files and changed sections.
+- Open **File history** from a commit's file diff to follow changes, including renames. Choose history up to the selected commit or the current branch's latest version, inspect each change, and switch to **Blame** to see line authorship and open its source commit.
 - Turn on **Smart Merge** to collapse eligible identical changes into one display row. Expand the row to inspect its original commits. This changes the view, never Git history.
 - Search loaded commits by message, author, branch, or hash with `⌘ F` / `Ctrl F`, arrow keys, Enter, and Esc.
 
 ### Changes and synchronization
 
-- Stage or unstage whole files in Git's real index. Preview HEAD → index and index → working tree separately; a file with both kinds of changes appears in both lists. Commits use the reviewed index and preserve later working-tree edits, including changes staged outside GitKit. A changed index or HEAD requires reviewing the refreshed state before retrying. Commit identities and drafts remain per project.
+- Stage or unstage whole files in Git's real index. Preview HEAD → index and index → working tree separately; a file with both kinds of changes appears in both lists. Commits use the reviewed index, honor partial staging made outside GitKit, and preserve unstaged and later working-tree edits. A changed index or HEAD requires reviewing the refreshed state before retrying. Commit identities and drafts remain per project.
+- Confirm **Undo** to withdraw the latest unpushed commit, keeping its file changes in the working tree and leaving them unstaged. The first commit can also be undone.
 - Watch working tree changes, including Git metadata in linked worktrees, and discard changes with confirmation.
 - Create, check out, rename, and delete branches. GitKit warns when another worktree owns a branch and offers choices when switching with uncommitted changes.
-- Merge a branch into the current branch after reviewing the direction, changed files, and predicted conflicts. Starting a merge requires a clean working tree and index. Paused merges remain visible after switching projects or reopening the app; resolve and stage conflicts, then continue with a reviewed message or abort. Kaleidoscope can help resolve conflicts when available.
+- Merge a branch into the current branch after reviewing the direction, changed files, and predicted conflicts. Starting a merge requires a clean working tree and index. Paused merges remain visible after switching projects or reopening the app; resolve and stage conflicts, then edit the merge message and continue or abort. A resolved merge can be completed even when its staged content matches HEAD. Kaleidoscope can help resolve conflicts when available.
 - Fetch, pull, and push with progress feedback; fetch and pull can be cancelled. Fetch can fast-forward safe local tracking branches and report skipped ones.
+- When local and remote history diverge, review the target and remote-only commits before a guarded **Force push**, then type the remote branch name to confirm. GitKit uses `--force-with-lease` and keeps the previous remote tip in a local recovery reference.
 - Cherry-pick with a preflight conflict check. Paused Cherry-pick operations use the same floating conflict bar, real staging, and optional Kaleidoscope workflow as merges. Review staged changes before continuing; Git preserves the original author and message. Continue or abort works after switching projects or reopening the app, including sequences started in another tool. Aborting restores the state before the entire sequence began.
 - Create and inspect stashes, and create or push tags.
 - Schedule a daily check of open repositories, optionally skipping weekends. Checks update remote-tracking information; you choose whether to synchronize. An interrupted check can resume after sleep or on the next launch.
 
 ### Accounts and desktop preferences
 
-- Configure multiple GitHub accounts and a GitLab integration, including self-hosted GitLab instances. Review token expiry and permissions when the provider supplies them.
-- Preview merge conflicts before creating a GitHub pull request or GitLab merge request. Create a GitHub repository and add a remote when a local repository has none.
+- Configure multiple GitHub accounts, including GitHub Enterprise, and a GitLab integration for self-hosted instances. Review token expiry and permissions when the provider supplies them.
+- Use **Manage tokens** to open the provider's token settings in your browser. GitHub opens the matching page for the token type and selected GitHub.com or Enterprise account; GitLab uses your configured instance.
+- Reopening account settings reuses successful token details for five minutes within the app session. Older details stay visible during a background refresh. Refresh manually to request current information; saving a new instance address or token reads its own details.
+- Preview merge conflicts before creating a GitHub pull request or GitLab merge request. When a local repository has no remote, create a GitHub or GitLab repository and connect it. If there are no commits yet, commit files locally before pushing.
 - Choose English or Simplified Chinese, six color palettes, and light, dark, or system appearance.
 - Save multiple commit identities and per-project choices without changing global Git identity settings. GitKit also remembers window geometry, respects reduced-motion preferences, checks Git / Git LFS dependencies, and supports signed in-app updates.
 
 ## Screenshots
 
-Captured from the local `npm run tauri dev` build with the GitKit repository open. The app language is available under **Settings → Language**.
+These screenshots were captured from a Tauri development window running the current source, showing GitKit and a local demo repository. The interface uses Simplified Chinese, and the Token form contains no real credentials. Change the app language under **Settings → Language**.
 
-| Working tree | Commit diff |
+| Workbench activity | GitHub token settings |
 | --- | --- |
-| ![Working tree changes and commit controls](docs/screenshots/changes-commit.jpg) | ![Commit files and code diff](docs/screenshots/commit-detail-diff.jpg) |
+| ![Workbench with compact project status and local commit activity](docs/screenshots/workbench-activity.jpg) | ![GitHub Token form with the token management page shortcut and no real credentials](docs/screenshots/settings-github-token.jpg) |
+
+| Undo a commit | Merge preview |
+| --- | --- |
+| ![Confirm undoing an unpushed commit while keeping its changes in the working tree](docs/screenshots/undo-commit.jpg) | ![Review the merge direction, affected files, and predicted conflicts](docs/screenshots/merge-preview.jpg) |
+
+| Working tree | Expanded code diff |
+| --- | --- |
+| ![Real staged and unstaged changes with a reviewed commit preview](docs/screenshots/changes-commit.jpg) | ![Expanded syntax-highlighted code diff with file and change navigation](docs/screenshots/commit-detail-diff.jpg) |
+
+**File history and Blame**
+
+![File change history and line authorship with links to source commits](docs/screenshots/file-trace-blame.jpg)
 
 | Search | Appearance |
 | --- | --- |
@@ -66,7 +85,7 @@ Captured from the local `npm run tauri dev` build with the GitKit repository ope
 
 | Branches | Tags |
 | --- | --- |
-| ![Create a new branch](docs/screenshots/new-branch.jpg) | ![Inspect and create tags](docs/screenshots/create-tag.jpg) |
+| ![Preview creating a new branch](docs/screenshots/new-branch.jpg) | ![Preview creating an annotated tag](docs/screenshots/create-tag.jpg) |
 
 | Scheduled checks | Language |
 | --- | --- |
@@ -102,8 +121,12 @@ The release workflow builds macOS universal and Windows x64 packages for `v*` ta
 
 ## Current limits
 
-- Conflict editing uses external tools; there is no built-in conflict editor. Continue and abort actions support merges and Cherry-pick. Empty staged changes or messages, externally rewritten messages, and special sequences such as `--no-commit` require an explicit decision in the terminal; supported paused sequences can still be aborted. Paused revert and rebase operations are identified but must be completed in the terminal.
-- Commit search covers the history currently loaded for the repository (up to 400 commits) and displays up to 80 matches.
+- Conflict editing uses external tools; there is no built-in conflict editor. Merge and Cherry-pick can be continued or aborted in the app. Paused revert and rebase operations are identified but must be completed in the terminal.
+- Cherry-pick with no staged changes, an empty original message, an externally rewritten message, or a special sequence such as `--no-commit` requires an explicit terminal decision. Supported paused sequences can still be aborted.
+- Undo eligibility uses known local remote-tracking history. Fetch first to update that information.
+- Blame previews the first 2,000 lines of supported text files.
+- Commit search covers the history currently loaded for the repository (up to 400 commits) and displays up to 80 matches. The activity calendar reads its own 12-month range and is independent of this limit.
+- Activity counts locally reachable history, excluding stashes and commits kept only in the reflog. Known remote history reflects your last fetch; this calendar is not a GitHub account contribution graph.
 - Provider tokens are currently stored in the local WebView's `localStorage`, rather than the system keychain. Grant only the permissions you need.
 - Background checks run while the app is running. Sleep suspends an active check; the app retries eligible checks after waking or on a later launch.
 
