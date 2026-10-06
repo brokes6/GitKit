@@ -15,11 +15,19 @@ import type {
 } from "./App";
 import { mapWorkingStatus } from "./workingStatus.ts";
 import type { WorkingFile, StagingStatus, WorkingStatusSnapshot } from "./workingStatus";
-import type { ProjectOverviewSummary } from "./projectOverview";
+import type { ProjectOverviewSummary, ProjectStatusSummary } from "./projectOverview";
 import type { ProjectActivitySummary } from "./projectActivity";
 
 export function loadProjectOverview(path: string): Promise<ProjectOverviewSummary> {
   return invoke<ProjectOverviewSummary>("git_project_overview", { path });
+}
+
+export function loadProjectStatusSummary(path: string): Promise<ProjectStatusSummary> {
+  return invoke<ProjectStatusSummary>("git_project_status_summary", { path });
+}
+
+export function configureProjectWatch(paths: string[], foreground: boolean, revision: number): Promise<{ failedPaths: string[]; revision: number }> {
+  return invoke("project_watch_configure", { paths, foreground, revision });
 }
 
 export function loadProjectActivity(path: string, fromTimestamp: number, toTimestamp: number): Promise<ProjectActivitySummary> {

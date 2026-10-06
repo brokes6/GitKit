@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   overviewState, overviewMatchesFilter, overviewFilterCounts, overviewAttentionCount,
-  overviewTarget, selectOverviewProjects,
+  overviewTarget, selectOverviewProjects, overviewEntryForScan, applyOverviewToProjects,
+  projectReadTargets, projectRemoteRowsKey,
 } from "../src/projectOverview.ts";
 import { createOverviewScanner } from "../src/overviewScanner.ts";
 
@@ -14,6 +15,186 @@ const summary = (changes = {}) => ({
 });
 const entry = (changes = {}, extra = {}) => ({ summary: summary(changes), error: null, checking: false, remoteError: null, ...extra });
 const project = (id, name = id, path = `/repos/${id}`) => ({ id, name, path });
+const badgeProject = (id, extra = {}) => ({ ...project(id), initialized: true, branch: "main", changes: 0, ...extra });
+const badgeEntry = (id, changes = {}, extra = {}) => entry(changes, { readRevision: 0, readPath: `/repos/${id}`, ...extra });
+
+const readContext = (extra = {}) => ({
+  paths: ["/repos/a", "/repos/b"], running: true, full: false, activePath: "/repos/a", revision: 1,
+  remoteRows: [], ...extra,
+});
+const remoteRow = (path, extra = {}) => ({ path, currentBranch: "main", dirty: false, behind: [], error: null, ...extra });
+
+test("lightweight status summaries update the same sidebar badges without full overview fields", () => {
+  const projects = [badgeProject("a", { changes: 9 })];
+  const status = { summary: { initialized: true, currentBranch: "feature/status", changedFiles: 0, checkedAt: 3000 },
+    error: null, checking: false, remoteError: null, readPath: "/repos/a", readRevision: 2 };
+  const next = applyOverviewToProjects(projects, { a: status }, "", new Map([["/repos/a", 2]]));
+  assert.equal(next[0].changes, 0);
+  assert.equal(next[0].branch, "feature/status");
+  assert.equal("hasHead" in status.summary, false);
+});
+
+test("initial activation and foreground resume reconcile every path regardless of cached age", () => {
+  const current = readContext();
+  assert.deepEqual(projectReadTargets(null, current), current.paths);
+  assert.deepEqual(projectReadTargets(readContext({ running: false }), current), current.paths);
+  assert.deepEqual(projectReadTargets(current, readContext({ running: false })), []);
+});
+
+test("a new native focus assertion reconciles all paths even when foreground stayed true", () => {
+  const previous = readContext({ foregroundRevision: 4 });
+  const reasserted = readContext({ foregroundRevision: 5 });
+  assert.deepEqual(projectReadTargets(previous, reasserted), reasserted.paths);
+  assert.deepEqual(projectReadTargets(reasserted, { ...reasserted }), []);
+  assert.deepEqual(projectReadTargets(readContext(), readContext({ foregroundRevision: 0 })), []);
+});
+
+test("focus revisions received in background do not read until foreground resumes", () => {
+  const previous = readContext({ running: false, foregroundRevision: 4 });
+  const stillBackground = readContext({ running: false, foregroundRevision: 5 });
+  assert.deepEqual(projectReadTargets(previous, stillBackground), []);
+  const resumed = readContext({ foregroundRevision: 5 });
+  assert.deepEqual(projectReadTargets(stillBackground, resumed), resumed.paths);
+});
+
+test("reordering or relabeling projects does not reread repositories; adding a path reads only that path", () => {
+  const previous = readContext();
+  assert.deepEqual(projectReadTargets(previous, readContext({ paths: [...previous.paths].reverse() })), []);
+  assert.deepEqual(projectReadTargets(previous, readContext({ paths: ["/repos/b", "/repos/a", "/repos/new"] })), ["/repos/new"]);
+  assert.deepEqual(projectReadTargets(previous, readContext({ paths: ["/repos/b"] })), []);
+});
+
+test("local reload targets only the current repository while a repository switch alone does not rescan", () => {
+  const previous = readContext();
+  assert.deepEqual(projectReadTargets(previous, readContext({ revision: 2, activePath: "/repos/b" })), ["/repos/b"]);
+  assert.deepEqual(projectReadTargets(previous, readContext({ activePath: "/repos/b" })), []);
+  assert.deepEqual(projectReadTargets(previous, readContext({ revision: 2, activePath: "/outside" })), []);
+});
+
+test("entering the workbench requests full overviews; leaving it reuses the just-read status", () => {
+  const light = readContext();
+  const full = readContext({ full: true });
+  assert.deepEqual(projectReadTargets(light, full), light.paths);
+  assert.deepEqual(projectReadTargets(full, light), []);
+});
+
+test("remote results invalidate only changed repository rows and ignore result bookkeeping", () => {
+  const a = remoteRow("/repos/a");
+  const b = remoteRow("/repos/b");
+  const previous = readContext({ remoteRows: [a, b] });
+  assert.deepEqual(projectReadTargets(previous, readContext({ remoteRows: [b, { ...a, id: "new", name: "renamed" }] })), []);
+  assert.deepEqual(projectReadTargets(previous, readContext({ remoteRows: [a, { ...b, dirty: true }] })), ["/repos/b"]);
+  assert.deepEqual(projectReadTargets(previous, readContext({ remoteRows: [a] })), ["/repos/b"]);
+  assert.deepEqual(projectReadTargets(previous, readContext({ remoteRows: [a, b, remoteRow("/outside", { error: "failed" })] })), []);
+  assert.equal(projectRemoteRowsKey([a, b]), projectRemoteRowsKey([b, a]));
+});
+
+test("changed remote branches and errors refresh their own path and coalesce with a local reload", () => {
+  const previous = readContext({ remoteRows: [remoteRow("/repos/a"), remoteRow("/repos/b")] });
+  const current = readContext({ revision: 2, remoteRows: [
+    remoteRow("/repos/a", { currentBranch: "feature" }),
+    remoteRow("/repos/b", { error: "network" }),
+  ] });
+  assert.deepEqual(projectReadTargets(previous, current), ["/repos/a", "/repos/b"]);
+});
+
+test("ready overview entries update sidebar counts while another project is still checking", () => {
+  const projects = [badgeProject("ready"), badgeProject("pending", { changes: 2 })];
+  const next = applyOverviewToProjects(projects, {
+    ready: badgeEntry("ready", { changedFiles: 4 }),
+    pending: badgeEntry("pending", { changedFiles: 0 }, { checking: true }),
+  }, "", new Map());
+  assert.equal(next[0].changes, 4);
+  assert.equal(next[1], projects[1]);
+  assert.equal(projects[0].changes, 0);
+});
+
+test("old generation cache is pending on the invalidation render and cannot overwrite badges", () => {
+  const projects = [badgeProject("cached", { changes: 6 })];
+  const cached = badgeEntry("cached", { changedFiles: 1 });
+  const invalidated = overviewEntryForScan(cached, "old-scan", "new-scan", true);
+  assert.equal(invalidated.checking, true);
+  assert.equal(invalidated.summary, cached.summary);
+  assert.equal(cached.checking, false);
+  assert.equal(applyOverviewToProjects(projects, { cached: invalidated }, "", new Map()), projects);
+  const published = overviewEntryForScan(cached, "new-scan", "new-scan", true);
+  assert.equal(published, cached);
+  assert.equal(applyOverviewToProjects(projects, { cached: published }, "", new Map())[0].changes, 1);
+});
+
+test("reactivation makes retained cache pending even when the requested scan key is reused", () => {
+  const retained = badgeEntry("retained", { changedFiles: 5 }, { checking: true });
+  const inactive = overviewEntryForScan(retained, null, "scan", false);
+  assert.equal(inactive.checking, false);
+  const active = overviewEntryForScan(inactive, null, "scan", true);
+  assert.equal(active.checking, true);
+  assert.equal(active.summary, retained.summary);
+});
+
+test("the active repository keeps its live branch and count instead of a delayed overview", () => {
+  const projects = [badgeProject("active", { branch: "feature/live", changes: 8 }), badgeProject("other")];
+  const next = applyOverviewToProjects(projects, {
+    active: badgeEntry("active", { initialized: false, currentBranch: "old", changedFiles: 1 }),
+    other: badgeEntry("other", { changedFiles: 3 }),
+  }, projects[0].path, new Map());
+  assert.equal(next[0], projects[0]);
+  assert.equal(next[1].changes, 3);
+});
+
+test("a warm repository live revision rejects an overview completed after a newer watcher update", () => {
+  const revisions = new Map([["/repos/warm", 4]]);
+  const readRevision = revisions.get("/repos/warm");
+  const projects = [badgeProject("warm", { branch: "live", changes: 7 })];
+  // A read's end timestamp can be newer although its status was read before the live update.
+  revisions.set("/repos/warm", 5);
+  const delayed = badgeEntry("warm", { currentBranch: "old", changedFiles: 1, checkedAt: 99999 }, { readRevision });
+  assert.equal(applyOverviewToProjects(projects, { warm: delayed }, "", revisions), projects);
+  const fresh = badgeEntry("warm", { currentBranch: "live", changedFiles: 2 }, { readRevision: 5 });
+  assert.equal(applyOverviewToProjects(projects, { warm: fresh }, "", revisions)[0].changes, 2);
+});
+
+test("failed, missing and unstamped summaries preserve the last known project state", () => {
+  const projects = [badgeProject("known", { changes: 9, branch: "remembered" })];
+  const values = [
+    badgeEntry("known", { changedFiles: 0 }, { error: "cannot read repository" }),
+    badgeEntry("known", {}, { summary: null }),
+    badgeEntry("known", { changedFiles: 0 }, { readRevision: undefined }),
+    badgeEntry("known", { changedFiles: 0 }, { readPath: undefined }),
+  ];
+  for (const value of values) assert.equal(applyOverviewToProjects(projects, { known: value }, "", new Map()), projects);
+});
+
+test("an authoritative zero clears a badge and summary fields preserve unrelated project data", () => {
+  const projects = [badgeProject("clean", { changes: 4, branch: "old", initialized: false, color: "coral", pinned: true }), badgeProject("unrelated")];
+  const next = applyOverviewToProjects(projects, { clean: badgeEntry("clean", { changedFiles: 0, currentBranch: "main" }) }, "", new Map());
+  assert.notEqual(next, projects);
+  assert.deepEqual(next[0], { ...projects[0], changes: 0, branch: "main", initialized: true });
+  assert.equal(next[0].color, "coral");
+  assert.equal(next[0].pinned, true);
+  assert.equal(next[1], projects[1]);
+});
+
+test("unchanged overview updates preserve both the array and every project identity", () => {
+  const projects = [badgeProject("same"), badgeProject("unrelated")];
+  const next = applyOverviewToProjects(projects, { same: badgeEntry("same") }, "", new Map());
+  assert.equal(next, projects);
+  assert.equal(next[0], projects[0]);
+  assert.equal(next[1], projects[1]);
+});
+
+test("a remote check error does not invalidate a successful local file count", () => {
+  const projects = [badgeProject("local")];
+  const next = applyOverviewToProjects(projects, { local: badgeEntry("local", { changedFiles: 2 }, { remoteError: "token expired" }) }, "", new Map());
+  assert.equal(next[0].changes, 2);
+});
+
+test("replacing a project path cannot apply a queued summary with the same project id", () => {
+  const oldEntry = badgeEntry("reused", { currentBranch: "old", changedFiles: 12 });
+  const projects = [badgeProject("reused", { path: "/repos/replacement", branch: "new", changes: 3 })];
+  assert.equal(applyOverviewToProjects(projects, { reused: oldEntry }, "", new Map()), projects);
+  const currentEntry = badgeEntry("reused", { currentBranch: "new", changedFiles: 1 }, { readPath: projects[0].path });
+  assert.equal(applyOverviewToProjects(projects, { reused: currentEntry }, "", new Map())[0].changes, 1);
+});
 
 test("tracking a local branch does not create a pending remote push", () => {
   const local = entry({ upstream: "main", upstreamRemote: false, hasRemotes: false, ahead: 2 });

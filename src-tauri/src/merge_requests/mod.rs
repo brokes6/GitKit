@@ -1,0 +1,1887 @@
+//! One native MR inbox scheduler. It never fetches or changes the local repository.
+pub mod api;
+
+use api::{ApiError, Detail, DiffVersion, Discussion, MergeResult, Project, Summary, User};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tauri::{Emitter, Manager};
+use tokio::sync::{Mutex as AsyncMutex, Notify};
+
+const EVENT: &str = "merge-request-state";
+const COOLDOWN: i64 = 15_000;
+const BACKGROUND: i64 = 300_000;
+const MAX_BACKOFF: i64 = 900_000;
+const MAX_PROJECTS: usize = 16;
+const MAX_ROWS: usize = 5_000;
+const MAX_DETAILS: usize = 8;
+const MAX_DIFFS: usize = 4;
+const MAX_DIFF_BYTES: usize = 24 * 1024 * 1024;
+const MAX_SEEN_PROJECTS: usize = 64;
+const CACHE_BUDGET: usize = 64 * 1024 * 1024;
+const SUMMARY_BUDGET: usize = 16 * 1024 * 1024;
+const DETAIL_BUDGET: usize = 40 * 1024 * 1024;
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Config {
+    account_key: String,
+    repo_path: String,
+    url: String,
+    token: String,
+    remote: String,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Visibility {
+    list_open: bool,
+    detail_iid: Option<u64>,
+    online: bool,
+}
+
+#[derive(Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Snapshot {
+    revision: u64,
+    epoch: u64,
+    context_key: Option<String>,
+    repo_path: Option<String>,
+    user: Option<User>,
+    project: Option<Project>,
+    items: Vec<Summary>,
+    total: usize,
+    new_count: usize,
+    unseen_iids: Vec<u64>,
+    last_checked_at: Option<i64>,
+    refreshing: bool,
+    stale: bool,
+    error: Option<ApiError>,
+    persistence_error: Option<String>,
+    selected_detail: Option<Detail>,
+}
+
+#[derive(Clone)]
+struct Active {
+    config: api::Config,
+    account_key: String,
+    repo_path: String,
+    key: String,
+    instance: String,
+    fingerprint: String,
+    identity_verified: bool,
+}
+
+#[derive(Clone)]
+struct Cached<T> {
+    value: T,
+    at: i64,
+}
+
+#[derive(Default)]
+struct Cache {
+    fingerprint: String,
+    user: Option<User>,
+    project: Option<Project>,
+    items: Vec<Summary>,
+    seen_key: Option<String>,
+    checked_at: Option<i64>,
+    used_at: i64,
+    error: Option<ApiError>,
+    stale: bool,
+    details: HashMap<u64, Cached<Detail>>,
+    diffs: HashMap<(u64, u64), Cached<DiffVersion>>,
+    discussions: HashMap<u64, Cached<Vec<Discussion>>>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+struct SeenEntry {
+    initialized: bool,
+    viewed: HashSet<u64>,
+    used_at: i64,
+}
+
+#[derive(Default, Deserialize, Serialize)]
+struct SeenStore {
+    projects: HashMap<String, SeenEntry>,
+}
+
+struct Inner {
+    epoch: u64,
+    revision: u64,
+    active: Option<Active>,
+    caches: HashMap<String, Cache>,
+    seen: SeenStore,
+    file: PathBuf,
+    persistence_error: Option<String>,
+    visibility: Visibility,
+    foreground: bool,
+    sleeping: bool,
+    resume_after: i64,
+    retry_after: i64,
+    failures: u32,
+    detail_failures: u32,
+    detail_retry_after: i64,
+    stopped: bool,
+    account_stops: HashSet<String>,
+    project_stops: HashSet<String>,
+    next_list: i64,
+    next_detail: i64,
+    list_running: Option<u64>,
+    write_generation: u64,
+    data_revision: u64,
+    last_emitted: Option<UiStamp>,
+}
+
+#[derive(Clone, PartialEq)]
+struct UiStamp {
+    epoch: u64,
+    key: Option<String>,
+    repo_path: Option<String>,
+    data_revision: u64,
+    selected_iid: Option<u64>,
+    refreshing: bool,
+    stale: bool,
+    error: Option<ApiError>,
+    persistence_error: Option<String>,
+}
+
+struct Service {
+    inner: Mutex<Inner>,
+    changed: Notify,
+    list_gate: AsyncMutex<()>,
+    detail_gate: AsyncMutex<()>,
+    diff_gate: AsyncMutex<()>,
+    discussion_gate: AsyncMutex<()>,
+    mutation_gate: AsyncMutex<()>,
+}
+
+#[derive(Clone)]
+pub struct MrState(Arc<Service>);
+
+#[derive(Clone)]
+struct Context {
+    epoch: u64,
+    generation: u64,
+    key: String,
+    config: api::Config,
+    project_id: Option<u64>,
+}
+
+fn now() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+fn error(kind: &str, message: &str) -> ApiError {
+    ApiError {
+        kind: kind.into(),
+        message: message.into(),
+        retry_after: None,
+    }
+}
+fn digest(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+fn context_key(account: &str, canonical: &str) -> String {
+    digest(&format!("{}:{}:{}", account.len(), account, canonical))
+}
+fn seen_key(active: &Active, user: u64, project: u64) -> String {
+    digest(&format!(
+        "{}:{}:{}",
+        context_key(&active.account_key, &active.instance),
+        user,
+        project
+    ))
+}
+fn account_stop_key(active: &Active) -> String {
+    digest(&format!(
+        "{}:{}:{}",
+        active.account_key, active.instance, active.fingerprint
+    ))
+}
+fn project_stop_key(active: &Active) -> String {
+    digest(&format!("{}:{}", active.key, active.fingerprint))
+}
+
+fn reconcile_seen(entry: &mut SeenEntry, current: &HashSet<u64>, at: i64) -> bool {
+    let before = entry.viewed.clone();
+    let initialized = entry.initialized;
+    if !entry.initialized {
+        entry.viewed = current.clone();
+        entry.initialized = true;
+    } else {
+        entry.viewed.retain(|iid| current.contains(iid));
+    }
+    entry.used_at = at;
+    !initialized || before != entry.viewed
+}
+
+fn interval(foreground: bool, list: bool, detail: bool, ci_running: bool) -> i64 {
+    if !foreground {
+        BACKGROUND
+    } else if detail && ci_running {
+        15_000
+    } else if list || detail {
+        30_000
+    } else {
+        60_000
+    }
+}
+
+fn backoff(failures: u32, retry_after: Option<u64>) -> i64 {
+    let exponential = COOLDOWN.saturating_mul(1_i64 << failures.saturating_sub(1).min(6));
+    exponential.min(MAX_BACKOFF).max(retry_after.map_or(0, |s| {
+        i64::try_from(s)
+            .unwrap_or(i64::MAX / 1000)
+            .saturating_mul(1000)
+    }))
+}
+
+fn ci_running(detail: Option<&Detail>) -> bool {
+    matches!(
+        detail.and_then(|d| d.pipeline_status.as_deref()),
+        Some("created" | "waiting_for_resource" | "preparing" | "pending" | "running")
+    )
+}
+
+fn user_bytes(user: &User) -> usize {
+    std::mem::size_of::<User>() + user.name.len() + user.username.len()
+}
+fn refs_bytes(refs: &api::DiffRefs) -> usize {
+    refs.base_sha.len() + refs.start_sha.len() + refs.head_sha.len()
+}
+fn summary_bytes(row: &Summary) -> usize {
+    std::mem::size_of::<Summary>()
+        + row.title.len()
+        + row.state.len()
+        + row.description.as_ref().map_or(0, String::len)
+        + row.source_branch.len()
+        + row.target_branch.len()
+        + user_bytes(&row.author)
+        + row
+            .roles
+            .iter()
+            .map(|role| std::mem::size_of::<String>() + role.len())
+            .sum::<usize>()
+        + row.updated_at.len()
+        + row.sha.as_ref().map_or(0, String::len)
+        + row.detailed_merge_status.as_ref().map_or(0, String::len)
+        + row.web_url.len()
+        + row.pipeline_status.as_ref().map_or(0, String::len)
+}
+fn validate_summaries(rows: &[Summary], budget: usize) -> Result<(), ApiError> {
+    if rows.len() > MAX_ROWS || rows.iter().map(summary_bytes).sum::<usize>() > budget {
+        Err(error(
+            "invalid_response",
+            "完整合并请求摘要超过本地缓存上限，保留上次完整列表，请在 GitLab 查看",
+        ))
+    } else {
+        Ok(())
+    }
+}
+fn detail_bytes(detail: &Detail) -> usize {
+    std::mem::size_of::<Detail>()
+        + summary_bytes(&detail.summary)
+        + detail.description.len()
+        + detail
+            .approvals
+            .approved_by
+            .iter()
+            .map(user_bytes)
+            .sum::<usize>()
+        + detail
+            .blocked_reasons
+            .iter()
+            .map(|reason| reason.len() + std::mem::size_of::<String>())
+            .sum::<usize>()
+        + detail.diff_refs.as_ref().map_or(0, refs_bytes)
+        + detail
+            .diff_versions
+            .iter()
+            .map(|version| {
+                std::mem::size_of::<api::DiffVersionInfo>()
+                    + version.created_at.len()
+                    + version.state.len()
+                    + version.real_size.as_ref().map_or(0, String::len)
+                    + refs_bytes(&version.refs)
+            })
+            .sum::<usize>()
+        + detail.squash_policy.len()
+        + detail.pipeline_status.as_ref().map_or(0, String::len)
+}
+fn diff_bytes(diff: &DiffVersion) -> usize {
+    std::mem::size_of::<DiffVersion>()
+        + refs_bytes(&diff.refs)
+        + diff.created_at.len()
+        + diff.state.len()
+        + diff.real_size.as_ref().map_or(0, String::len)
+        + diff
+            .files
+            .iter()
+            .map(|file| {
+                std::mem::size_of::<api::DiffFile>()
+                    + file.old_path.len()
+                    + file.new_path.len()
+                    + file.old_mode.len()
+                    + file.new_mode.len()
+                    + file.diff.len()
+            })
+            .sum::<usize>()
+}
+fn discussion_bytes(discussions: &[Discussion]) -> usize {
+    discussions
+        .iter()
+        .map(|discussion| {
+            std::mem::size_of::<Discussion>()
+                + discussion.id.len()
+                + discussion
+                    .notes
+                    .iter()
+                    .map(|note| {
+                        std::mem::size_of::<api::Note>()
+                            + note.body.len()
+                            + user_bytes(&note.author)
+                            + note.created_at.len()
+                            + note.updated_at.len()
+                    })
+                    .sum::<usize>()
+        })
+        .sum()
+}
+fn cache_bytes(cache: &Cache) -> usize {
+    std::mem::size_of::<Cache>()
+        + cache.fingerprint.len()
+        + cache.seen_key.as_ref().map_or(0, String::len)
+        + cache.user.as_ref().map_or(0, user_bytes)
+        + cache.project.as_ref().map_or(0, |project| {
+            std::mem::size_of::<Project>()
+                + project.name.len()
+                + project.path_with_namespace.len()
+                + project.web_url.len()
+        })
+        + cache.items.iter().map(summary_bytes).sum::<usize>()
+        + cache
+            .details
+            .values()
+            .map(|cached| detail_bytes(&cached.value))
+            .sum::<usize>()
+        + cache
+            .diffs
+            .values()
+            .map(|cached| diff_bytes(&cached.value))
+            .sum::<usize>()
+        + cache
+            .discussions
+            .values()
+            .map(|cached| discussion_bytes(&cached.value))
+            .sum::<usize>()
+}
+
+enum Payload {
+    Detail(u64),
+    Diff((u64, u64)),
+    Discussions(u64),
+}
+
+async fn read_deadline<T>(
+    future: impl std::future::Future<Output = Result<T, ApiError>>,
+) -> Result<T, ApiError> {
+    tokio::time::timeout(Duration::from_secs(90), future)
+        .await
+        .map_err(|_| error("timeout", "GitLab 完整读取超时，保留上次完整结果"))?
+}
+
+fn trim_diffs(cache: &mut HashMap<(u64, u64), Cached<DiffVersion>>) {
+    retain_recent(cache, MAX_DIFFS);
+    while cache
+        .values()
+        .map(|cached| {
+            cached
+                .value
+                .files
+                .iter()
+                .map(|file| file.diff.len() + file.old_path.len() + file.new_path.len())
+                .sum::<usize>()
+        })
+        .sum::<usize>()
+        > MAX_DIFF_BYTES
+    {
+        if let Some(key) = cache
+            .iter()
+            .min_by_key(|(_, value)| value.at)
+            .map(|(key, _)| *key)
+        {
+            cache.remove(&key);
+        } else {
+            break;
+        }
+    }
+}
+
+fn retain_recent<K: Eq + std::hash::Hash + Clone, T>(map: &mut HashMap<K, Cached<T>>, cap: usize) {
+    while map.len() > cap {
+        if let Some(key) = map
+            .iter()
+            .min_by_key(|(_, value)| value.at)
+            .map(|(key, _)| key.clone())
+        {
+            map.remove(&key);
+        }
+    }
+}
+
+impl Inner {
+    fn cache(&self) -> Option<&Cache> {
+        self.active.as_ref().and_then(|a| self.caches.get(&a.key))
+    }
+    fn snapshot(&self) -> Snapshot {
+        let cache = self.cache();
+        let items = cache.map_or_else(Vec::new, |c| c.items.clone());
+        let viewed = cache
+            .and_then(|c| c.seen_key.as_ref())
+            .and_then(|key| self.seen.projects.get(key));
+        let unseen_iids: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                viewed.is_some_and(|entry| entry.initialized && !entry.viewed.contains(&item.iid))
+            })
+            .map(|item| item.iid)
+            .collect();
+        Snapshot {
+            revision: self.revision,
+            epoch: self.epoch,
+            context_key: self.active.as_ref().map(|a| a.key.clone()),
+            repo_path: self.active.as_ref().map(|a| a.repo_path.clone()),
+            user: cache.and_then(|c| c.user.clone()),
+            project: cache.and_then(|c| c.project.clone()),
+            total: items.len(),
+            new_count: unseen_iids.len(),
+            items,
+            unseen_iids,
+            last_checked_at: cache.and_then(|c| c.checked_at),
+            refreshing: self.list_running == Some(self.epoch),
+            stale: cache.is_some_and(|c| c.stale),
+            error: cache.and_then(|c| c.error.clone()),
+            persistence_error: self.persistence_error.clone(),
+            selected_detail: self.visibility.detail_iid.and_then(|iid| {
+                cache
+                    .and_then(|c| c.details.get(&iid))
+                    .map(|d| d.value.clone())
+            }),
+        }
+    }
+    fn publish(&mut self, app: &tauri::AppHandle) {
+        let cache = self.cache();
+        let stamp = UiStamp {
+            epoch: self.epoch,
+            key: self.active.as_ref().map(|active| active.key.clone()),
+            repo_path: self.active.as_ref().map(|active| active.repo_path.clone()),
+            data_revision: self.data_revision,
+            selected_iid: self.visibility.detail_iid,
+            refreshing: self.list_running == Some(self.epoch),
+            stale: cache.is_some_and(|cache| cache.stale),
+            error: cache.and_then(|cache| cache.error.clone()),
+            persistence_error: self.persistence_error.clone(),
+        };
+        // Keep only a small comparison stamp, not a second retained copy of every row/detail.
+        if self.last_emitted.as_ref() == Some(&stamp) {
+            return;
+        }
+        self.revision += 1;
+        self.last_emitted = Some(stamp);
+        let _ = app.emit(EVENT, self.snapshot());
+    }
+    fn context(&self, epoch: u64, allow_paused: bool) -> Result<Context, ApiError> {
+        if epoch != self.epoch {
+            return Err(error("stale", "仓库或账号已切换，请重新打开合并请求"));
+        }
+        let active = self
+            .active
+            .as_ref()
+            .ok_or_else(|| error("invalid_config", "尚未配置 GitLab 合并请求"))?;
+        if !allow_paused
+            && (self.stopped
+                || self.sleeping
+                || !self.visibility.online
+                || now() < self.resume_after
+                || now() < self.retry_after)
+        {
+            return Err(self
+                .cache()
+                .and_then(|c| c.error.clone())
+                .unwrap_or_else(|| error("blocked", "合并请求检查暂时暂停")));
+        }
+        Ok(Context {
+            epoch,
+            generation: self.write_generation,
+            key: active.key.clone(),
+            config: active.config.clone(),
+            project_id: self.cache().and_then(|c| c.project.as_ref()).map(|p| p.id),
+        })
+    }
+    fn accepts(&self, context: &Context) -> bool {
+        self.epoch == context.epoch
+            && self.write_generation == context.generation
+            && self.active.as_ref().is_some_and(|a| a.key == context.key)
+    }
+    fn save_seen(&mut self) {
+        while self.seen.projects.len() > MAX_SEEN_PROJECTS {
+            let key = self
+                .seen
+                .projects
+                .iter()
+                .min_by_key(|(_, entry)| entry.used_at)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = key {
+                self.seen.projects.remove(&key);
+            }
+        }
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            if let Some(parent) = self.file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let temporary = self.file.with_extension("json.tmp");
+            std::fs::write(&temporary, serde_json::to_vec(&self.seen)?)?;
+            std::fs::rename(temporary, &self.file)?;
+            Ok(())
+        })();
+        self.persistence_error = result.err().map(|e| e.to_string());
+    }
+    fn mark_viewed(&mut self, iid: u64) -> bool {
+        if !self
+            .cache()
+            .is_some_and(|cache| cache.items.iter().any(|item| item.iid == iid))
+        {
+            return false;
+        }
+        let key = self.cache().and_then(|cache| cache.seen_key.clone());
+        if let Some(entry) = key.and_then(|key| self.seen.projects.get_mut(&key)) {
+            if entry.viewed.insert(iid) {
+                self.data_revision += 1;
+                entry.used_at = now();
+                self.save_seen();
+                return true;
+            }
+        }
+        false
+    }
+    fn failure(&mut self, context: &Context, failure: ApiError) {
+        if !self.accepts(context) {
+            return;
+        }
+        self.failures = self.failures.saturating_add(1);
+        self.retry_after = self
+            .retry_after
+            .max(now().saturating_add(backoff(self.failures, failure.retry_after)));
+        self.stopped = matches!(failure.kind.as_str(), "unauthorized" | "forbidden");
+        if let Some(active) = &self.active {
+            if failure.kind == "unauthorized" {
+                self.account_stops.insert(account_stop_key(active));
+            }
+            if failure.kind == "forbidden" {
+                self.project_stops.insert(project_stop_key(active));
+            }
+        }
+        self.next_list = self.retry_after;
+        self.next_detail = self.retry_after.max(self.detail_retry_after);
+        if let Some(cache) = self.caches.get_mut(&context.key) {
+            cache.error = Some(failure);
+            cache.stale = true;
+        }
+        if self.stopped {
+            self.write_generation += 1;
+        }
+    }
+    fn acknowledge_list_success(&mut self, key: &str, at: i64) {
+        // Another request may have received Retry-After while this list was in flight.
+        if self.retry_after > at {
+            return;
+        }
+        self.failures = 0;
+        self.retry_after = 0;
+        if self.detail_retry_after <= at {
+            if let Some(cache) = self.caches.get_mut(key) {
+                cache.stale = false;
+                cache.error = None;
+            }
+        }
+    }
+    fn retained_bytes(&self) -> usize {
+        self.caches
+            .iter()
+            .map(|(key, cache)| key.len() + cache_bytes(cache))
+            .sum::<usize>()
+            + self
+                .seen
+                .projects
+                .iter()
+                .map(|(key, entry)| {
+                    key.len() + std::mem::size_of::<SeenEntry>() + entry.viewed.len() * 16
+                })
+                .sum::<usize>()
+    }
+    fn trim_budget(&mut self, budget: usize) {
+        while self.retained_bytes() > budget {
+            let inactive = self
+                .caches
+                .iter()
+                .filter(|(key, _)| {
+                    self.active
+                        .as_ref()
+                        .is_none_or(|active| **key != active.key)
+                })
+                .min_by_key(|(_, cache)| cache.used_at)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = inactive {
+                self.caches.remove(&key);
+                continue;
+            }
+            let selected = self.visibility.detail_iid;
+            let Some(key) = self.active.as_ref().map(|active| active.key.clone()) else {
+                break;
+            };
+            let Some(cache) = self.caches.get_mut(&key) else {
+                break;
+            };
+            let candidate = cache
+                .details
+                .iter()
+                .filter(|(iid, _)| Some(**iid) != selected)
+                .map(|(iid, cached)| (cached.at, Payload::Detail(*iid)))
+                .chain(
+                    cache
+                        .diffs
+                        .iter()
+                        .map(|(id, cached)| (cached.at, Payload::Diff(*id))),
+                )
+                .chain(
+                    cache
+                        .discussions
+                        .iter()
+                        .map(|(iid, cached)| (cached.at, Payload::Discussions(*iid))),
+                )
+                .min_by_key(|(at, _)| *at);
+            match candidate {
+                Some((_, Payload::Detail(iid))) => {
+                    cache.details.remove(&iid);
+                }
+                Some((_, Payload::Diff(id))) => {
+                    cache.diffs.remove(&id);
+                }
+                Some((_, Payload::Discussions(iid))) => {
+                    cache.discussions.remove(&iid);
+                }
+                None => {
+                    if selected.is_some_and(|iid| cache.details.remove(&iid).is_some()) {
+                        self.data_revision += 1;
+                    } else {
+                        break;
+                    } // Complete active summaries are never truncated.
+                }
+            }
+        }
+    }
+    fn trim_projects(&mut self) {
+        while self.caches.len() > MAX_PROJECTS {
+            let key = self
+                .caches
+                .iter()
+                .filter(|(key, _)| self.active.as_ref().is_none_or(|a| **key != a.key))
+                .min_by_key(|(_, cache)| cache.used_at)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = key {
+                self.caches.remove(&key);
+            } else {
+                break;
+            }
+        }
+    }
+    fn replan(&mut self, immediate: bool) {
+        let at = now();
+        let last = self.cache().and_then(|c| c.checked_at).unwrap_or(0);
+        let detail = self
+            .visibility
+            .detail_iid
+            .and_then(|iid| self.cache().and_then(|c| c.details.get(&iid)));
+        let detail_at = detail.map_or(0, |d| d.at);
+        let delay = interval(
+            self.foreground,
+            self.visibility.list_open,
+            self.visibility.detail_iid.is_some(),
+            ci_running(detail.map(|d| &d.value)),
+        );
+        self.next_list = if immediate && self.foreground {
+            at.max(last.saturating_add(COOLDOWN))
+        } else {
+            at.max(last.saturating_add(if self.foreground {
+                if self.visibility.list_open || self.visibility.detail_iid.is_some() {
+                    30_000
+                } else {
+                    60_000
+                }
+            } else {
+                BACKGROUND
+            }))
+        };
+        self.next_detail = (if immediate && self.foreground {
+            at.max(detail_at.saturating_add(COOLDOWN))
+        } else {
+            at.max(detail_at.saturating_add(delay))
+        })
+        .max(self.detail_retry_after);
+    }
+}
+
+impl Service {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+fn foreground(app: &tauri::AppHandle) -> bool {
+    app.get_webview_window("main").is_some_and(|window| {
+        window.is_focused().unwrap_or(false)
+            && window.is_visible().unwrap_or(false)
+            && !window.is_minimized().unwrap_or(true)
+    })
+}
+
+pub fn setup(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let file = app.path().app_data_dir()?.join("merge-request-seen.json");
+    let (seen, persistence_error) = match std::fs::read(&file) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(seen) => (seen, None),
+            Err(e) => (SeenStore::default(), Some(e.to_string())),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (SeenStore::default(), None),
+        Err(e) => (SeenStore::default(), Some(e.to_string())),
+    };
+    let service = Arc::new(Service {
+        inner: Mutex::new(Inner {
+            epoch: 0,
+            revision: 0,
+            active: None,
+            caches: HashMap::new(),
+            seen,
+            file,
+            persistence_error,
+            visibility: Visibility {
+                online: true,
+                ..Visibility::default()
+            },
+            foreground: foreground(app),
+            sleeping: false,
+            resume_after: 0,
+            retry_after: 0,
+            failures: 0,
+            detail_failures: 0,
+            detail_retry_after: 0,
+            stopped: false,
+            account_stops: HashSet::new(),
+            project_stops: HashSet::new(),
+            next_list: now(),
+            next_detail: now(),
+            list_running: None,
+            write_generation: 0,
+            data_revision: 0,
+            last_emitted: None,
+        }),
+        changed: Notify::new(),
+        list_gate: AsyncMutex::new(()),
+        detail_gate: AsyncMutex::new(()),
+        diff_gate: AsyncMutex::new(()),
+        discussion_gate: AsyncMutex::new(()),
+        mutation_gate: AsyncMutex::new(()),
+    });
+    app.manage(MrState(service.clone()));
+    if let Some(window) = app.get_webview_window("main") {
+        let service = service.clone();
+        window.on_window_event(move |_| {
+            service.changed.notify_one();
+        });
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        scheduler(app, service).await;
+    });
+    Ok(())
+}
+
+pub fn power_changed(app: &tauri::AppHandle, sleeping: bool) {
+    if let Some(state) = app.try_state::<MrState>() {
+        let mut inner = state.0.lock();
+        inner.write_generation += 1;
+        inner.sleeping = sleeping;
+        inner.resume_after = now().saturating_add(COOLDOWN);
+        inner.next_list = inner.resume_after;
+        inner.next_detail = inner.resume_after;
+        drop(inner);
+        state.0.changed.notify_one();
+    }
+}
+
+async fn scheduler(app: tauri::AppHandle, service: Arc<Service>) {
+    loop {
+        let notified = service.changed.notified();
+        let foreground = foreground(&app);
+        let plan = {
+            let mut inner = service.lock();
+            if inner.foreground != foreground {
+                inner.foreground = foreground;
+                inner.replan(foreground);
+            }
+            if inner.active.is_none() || inner.stopped || inner.sleeping || !inner.visibility.online
+            {
+                None
+            } else {
+                let next = if inner.visibility.detail_iid.is_some() {
+                    inner.next_list.min(inner.next_detail)
+                } else {
+                    inner.next_list
+                };
+                Some((
+                    next.max(inner.resume_after).max(inner.retry_after),
+                    inner.epoch,
+                    inner.next_list <= now(),
+                    inner
+                        .visibility
+                        .detail_iid
+                        .filter(|_| inner.next_detail <= now()),
+                ))
+            }
+        };
+        match plan {
+            None => notified.await,
+            Some((due, epoch, list_due, detail_iid)) if due <= now() => {
+                if list_due {
+                    let _ = refresh_list(&app, &service, epoch, false, false).await;
+                }
+                if let Some(iid) = detail_iid {
+                    let _ = load_detail(&app, &service, iid, epoch, true, false).await;
+                }
+                // A skipped/cached request or an uninitialized project cannot spin the scheduler.
+                let mut inner = service.lock();
+                if inner.epoch == epoch {
+                    if list_due && inner.next_list <= now() {
+                        inner.next_list = now().saturating_add(COOLDOWN);
+                    }
+                    if detail_iid.is_some() && inner.next_detail <= now() {
+                        inner.next_detail = now().saturating_add(COOLDOWN);
+                    }
+                }
+            }
+            Some((due, _, _, _)) => {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis((due - now()).max(1) as u64),
+                    notified,
+                )
+                .await;
+            }
+        }
+    }
+}
+
+async fn refresh_list(
+    app: &tauri::AppHandle,
+    service: &Arc<Service>,
+    epoch: u64,
+    force: bool,
+    visible_progress: bool,
+) -> Result<Snapshot, ApiError> {
+    let requested_at = now();
+    let _gate = service.list_gate.lock().await;
+    let context = {
+        let mut inner = service.lock();
+        let context = inner.context(epoch, false)?;
+        let checked = inner.cache().and_then(|c| c.checked_at);
+        // Calls waiting on the same flight consume its completed snapshot.
+        if checked.is_some_and(|at| at >= requested_at || (!force && now() - at < COOLDOWN)) {
+            return Ok(inner.snapshot());
+        }
+        inner.list_running = Some(epoch);
+        if visible_progress || checked.is_none() {
+            inner.publish(app);
+        }
+        context
+    };
+    let identity = {
+        let inner = service.lock();
+        if inner.accepts(&context) && inner.active.as_ref().is_some_and(|a| a.identity_verified) {
+            inner
+                .cache()
+                .and_then(|cache| cache.user.clone().zip(cache.project.clone()))
+        } else {
+            None
+        }
+    };
+    let result = match identity {
+        Some((user, project)) => {
+            read_deadline(api::list_resolved(&context.config, &user, &project)).await
+        }
+        None => read_deadline(api::list(&context.config)).await,
+    }
+    .and_then(|list| {
+        validate_summaries(&list.items, SUMMARY_BUDGET)?;
+        Ok(list)
+    });
+    let mut inner = service.lock();
+    if inner.list_running == Some(epoch) {
+        inner.list_running = None;
+    }
+    if !inner.accepts(&context) {
+        inner.publish(app);
+        service.changed.notify_one();
+        return Err(error("stale", "检查结果所属仓库或账号已改变"));
+    }
+    let mut failure = None;
+    match result {
+        Ok(list) => {
+            let at = now();
+            let key = seen_key(
+                inner.active.as_ref().expect("checked active context"),
+                list.user.id,
+                list.project.id,
+            );
+            let current: HashSet<_> = list.items.iter().map(|item| item.iid).collect();
+            let entry = inner.seen.projects.entry(key.clone()).or_default();
+            let persist = reconcile_seen(entry, &current, at);
+            let changed = inner.cache().is_none_or(|cache| {
+                cache.user.as_ref() != Some(&list.user)
+                    || cache.project.as_ref() != Some(&list.project)
+                    || cache.items != list.items
+                    || cache.seen_key.as_ref() != Some(&key)
+            });
+            if changed {
+                inner.data_revision += 1;
+            }
+            let cache = inner
+                .caches
+                .get_mut(&context.key)
+                .expect("configured cache");
+            cache.user = Some(list.user);
+            cache.project = Some(list.project);
+            cache.items = list.items;
+            cache.seen_key = Some(key);
+            cache.checked_at = Some(at);
+            cache.used_at = at;
+            inner.acknowledge_list_success(&context.key, at);
+            if let Some(active) = inner.active.as_mut() {
+                active.identity_verified = true;
+            }
+            if persist {
+                inner.save_seen();
+            }
+            inner.trim_budget(CACHE_BUDGET);
+            inner.next_list = at.saturating_add(if !inner.foreground {
+                BACKGROUND
+            } else if inner.visibility.list_open || inner.visibility.detail_iid.is_some() {
+                30_000
+            } else {
+                60_000
+            });
+        }
+        Err(e) => {
+            failure = Some(e.clone());
+            inner.failure(&context, e);
+        }
+    }
+    inner.publish(app);
+    let snapshot = inner.snapshot();
+    drop(inner);
+    service.changed.notify_one();
+    failure.map_or(Ok(snapshot), Err)
+}
+
+fn project(context: &Context) -> Result<u64, ApiError> {
+    context
+        .project_id
+        .ok_or_else(|| error("blocked", "等待首次完整合并请求检查完成"))
+}
+
+async fn load_detail(
+    app: &tauri::AppHandle,
+    service: &Arc<Service>,
+    iid: u64,
+    epoch: u64,
+    force: bool,
+    mark_seen: bool,
+) -> Result<Detail, ApiError> {
+    let requested_at = now();
+    let _gate = service.detail_gate.lock().await;
+    let context = {
+        let mut inner = service.lock();
+        let context = inner.context(epoch, false)?;
+        if let Some(cached) = inner.cache().and_then(|c| c.details.get(&iid)) {
+            if cached.at >= requested_at || (!force && now() - cached.at < COOLDOWN) {
+                let result = cached.value.clone();
+                if mark_seen {
+                    inner.mark_viewed(iid);
+                    inner.publish(app);
+                }
+                return Ok(result);
+            }
+        }
+        context
+    };
+    let known = if mark_seen {
+        None
+    } else {
+        service
+            .lock()
+            .cache()
+            .and_then(|cache| cache.details.get(&iid))
+            .map(|cached| cached.value.clone())
+    };
+    let result = match known {
+        Some(known) => {
+            read_deadline(api::detail_status(
+                &context.config,
+                project(&context)?,
+                iid,
+                &known,
+            ))
+            .await
+        }
+        None => read_deadline(api::detail(&context.config, project(&context)?, iid)).await,
+    }
+    .and_then(|detail| {
+        if detail_bytes(&detail) > DETAIL_BUDGET {
+            Err(error(
+                "invalid_response",
+                "完整详情超过本地缓存预算，请在 GitLab 查看",
+            ))
+        } else {
+            Ok(detail)
+        }
+    });
+    let mut inner = service.lock();
+    if !inner.accepts(&context) {
+        return Err(error("stale", "详情所属仓库或账号已改变"));
+    }
+    match result {
+        Ok(detail) => {
+            let at = now();
+            let selected = inner.visibility.detail_iid;
+            let cache = inner
+                .caches
+                .get_mut(&context.key)
+                .expect("configured cache");
+            let changed = update_summary(cache, detail.summary.clone())
+                || (selected == Some(iid)
+                    && cache
+                        .details
+                        .get(&iid)
+                        .is_none_or(|cached| cached.value != detail));
+            cache.details.insert(
+                iid,
+                Cached {
+                    value: detail.clone(),
+                    at,
+                },
+            );
+            retain_recent(&mut cache.details, MAX_DETAILS);
+            if changed {
+                inner.data_revision += 1;
+            }
+            if mark_seen {
+                inner.mark_viewed(iid);
+            }
+            inner.detail_failures = 0;
+            inner.detail_retry_after = 0;
+            inner.next_detail = at.saturating_add(interval(
+                inner.foreground,
+                inner.visibility.list_open,
+                inner.visibility.detail_iid.is_some(),
+                ci_running(Some(&detail)),
+            ));
+            inner.trim_budget(CACHE_BUDGET);
+            inner.publish(app);
+            drop(inner);
+            service.changed.notify_one();
+            Ok(detail)
+        }
+        Err(e) => {
+            inner.detail_failures = inner.detail_failures.saturating_add(1);
+            inner.detail_retry_after = inner
+                .detail_retry_after
+                .max(now().saturating_add(backoff(inner.detail_failures, e.retry_after)));
+            inner.failure(&context, e.clone());
+            inner.publish(app);
+            drop(inner);
+            service.changed.notify_one();
+            Err(e)
+        }
+    }
+}
+
+fn update_summary(cache: &mut Cache, mut summary: Summary) -> bool {
+    // Descriptions belong to the on-demand detail, never the lightweight inbox rows.
+    summary.description = None;
+    if let Some(index) = cache.items.iter().position(|row| row.iid == summary.iid) {
+        if cache.items[index] == summary {
+            return false;
+        }
+        if summary.state == "opened" && !summary.roles.is_empty() {
+            cache.items[index] = summary;
+        } else {
+            cache.items.remove(index);
+        }
+        return true;
+    }
+    false
+}
+
+#[tauri::command]
+pub fn mr_snapshot(state: tauri::State<'_, MrState>) -> Snapshot {
+    state.0.lock().snapshot()
+}
+
+#[tauri::command]
+pub fn mr_configure(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    config: Option<Config>,
+) -> Result<Snapshot, ApiError> {
+    let active = match config {
+        Some(config) => {
+            let api_config = api::Config {
+                url: config.url,
+                token: config.token,
+                remote: config.remote,
+            };
+            let canonical = match api::validate_config(&api_config) {
+                Ok(canonical) => canonical,
+                Err(failure) => {
+                    let mut inner = state.0.lock();
+                    inner.epoch += 1;
+                    inner.write_generation += 1;
+                    inner.active = None;
+                    inner.visibility.detail_iid = None;
+                    inner.visibility.list_open = false;
+                    inner.publish(&app);
+                    drop(inner);
+                    state.0.changed.notify_one();
+                    return Err(failure);
+                }
+            };
+            let key = context_key(&config.account_key, &canonical);
+            let instance = canonical
+                .rsplit_once('|')
+                .map(|(instance, _)| instance)
+                .unwrap_or(&canonical)
+                .to_string();
+            let fingerprint = digest(&api_config.token);
+            Some(Active {
+                config: api_config,
+                account_key: config.account_key,
+                repo_path: config.repo_path,
+                key,
+                instance,
+                fingerprint,
+                identity_verified: false,
+            })
+        }
+        None => None,
+    };
+    let mut inner = state.0.lock();
+    let same = match (&inner.active, &active) {
+        (Some(old), Some(new)) => {
+            old.key == new.key && old.fingerprint == new.fingerprint && old.config == new.config
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    if same {
+        if let (Some(old), Some(mut active)) = (&inner.active, active) {
+            active.identity_verified = old.identity_verified;
+            inner.active = Some(active);
+        }
+        inner.publish(&app);
+        return Ok(inner.snapshot());
+    }
+    inner.epoch += 1;
+    inner.write_generation += 1;
+    inner.active = active;
+    inner.visibility.detail_iid = None;
+    inner.visibility.list_open = false;
+    inner.retry_after = 0;
+    inner.failures = 0;
+    inner.detail_failures = 0;
+    inner.detail_retry_after = 0;
+    inner.stopped = false;
+    if let Some(active) = inner.active.clone() {
+        let cache = inner.caches.entry(active.key.clone()).or_default();
+        // A replacement token must prove its provider identity before showing old data.
+        if cache.fingerprint != active.fingerprint {
+            *cache = Cache::default();
+        }
+        cache.fingerprint = active.fingerprint.clone();
+        cache.used_at = now();
+        inner.stopped = inner.account_stops.contains(&account_stop_key(&active))
+            || inner.project_stops.contains(&project_stop_key(&active));
+        if inner.stopped {
+            let kind = if inner.account_stops.contains(&account_stop_key(&active)) {
+                "unauthorized"
+            } else {
+                "forbidden"
+            };
+            if let Some(cache) = inner.caches.get_mut(&active.key) {
+                cache.error = Some(error(
+                    kind,
+                    if kind == "unauthorized" {
+                        "该 GitLab 账号认证已失效，请更新凭据"
+                    } else {
+                        "当前 GitLab 项目权限不足，请检查访问权限"
+                    },
+                ));
+                cache.stale = true;
+            }
+        }
+    }
+    // Project summaries survive switching; large on-demand payloads do not accumulate across repositories.
+    let active_key = inner.active.as_ref().map(|a| a.key.clone());
+    for (key, cache) in &mut inner.caches {
+        if Some(key) != active_key.as_ref() {
+            cache.details.clear();
+            cache.diffs.clear();
+            cache.discussions.clear();
+        }
+    }
+    inner.trim_projects();
+    inner.trim_budget(CACHE_BUDGET);
+    inner.replan(true);
+    inner.publish(&app);
+    let snapshot = inner.snapshot();
+    drop(inner);
+    state.0.changed.notify_one();
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn mr_visibility(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    visibility: Visibility,
+) -> Snapshot {
+    let mut inner = state.0.lock();
+    let wake = !inner.visibility.online && visibility.online;
+    let opened = (!inner.visibility.list_open && visibility.list_open)
+        || (visibility.detail_iid.is_some()
+            && inner.visibility.detail_iid != visibility.detail_iid);
+    inner.visibility = visibility;
+    if wake {
+        inner.resume_after = now().saturating_add(COOLDOWN);
+    }
+    inner.replan(opened || wake);
+    inner.publish(&app);
+    let snapshot = inner.snapshot();
+    drop(inner);
+    state.0.changed.notify_one();
+    snapshot
+}
+
+#[tauri::command]
+pub async fn mr_refresh(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    force: Option<bool>,
+) -> Result<Snapshot, ApiError> {
+    let service = state.0.clone();
+    let epoch = service.lock().epoch;
+    refresh_list(&app, &service, epoch, force.unwrap_or(false), true).await
+}
+
+#[tauri::command]
+pub fn mr_mark_viewed(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    iid: u64,
+    epoch: u64,
+) -> Result<Snapshot, ApiError> {
+    let mut inner = state.0.lock();
+    inner.context(epoch, true)?;
+    if !inner.cache().is_some_and(|cache| {
+        cache.items.iter().any(|row| row.iid == iid) || cache.details.contains_key(&iid)
+    }) {
+        return Err(error("not_found", "此合并请求不在当前列表"));
+    }
+    inner.mark_viewed(iid);
+    inner.publish(&app);
+    Ok(inner.snapshot())
+}
+
+#[tauri::command]
+pub async fn mr_detail(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    iid: u64,
+    epoch: u64,
+    force: Option<bool>,
+) -> Result<Detail, ApiError> {
+    load_detail(
+        &app,
+        &state.0.clone(),
+        iid,
+        epoch,
+        force.unwrap_or(false),
+        true,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn mr_diffs(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    iid: u64,
+    version_id: u64,
+    epoch: u64,
+) -> Result<DiffVersion, ApiError> {
+    let service = state.0.clone();
+    let _gate = service.diff_gate.lock().await;
+    let context = {
+        let inner = service.lock();
+        let context = inner.context(epoch, false)?;
+        if let Some(cached) = inner.cache().and_then(|c| c.diffs.get(&(iid, version_id))) {
+            return Ok(cached.value.clone());
+        }
+        context
+    };
+    let result = read_deadline(api::diffs(
+        &context.config,
+        project(&context)?,
+        iid,
+        version_id,
+    ))
+    .await;
+    let mut inner = service.lock();
+    if !inner.accepts(&context) {
+        return Err(error("stale", "差异所属仓库或账号已改变"));
+    }
+    let result = match result {
+        Ok(result) => result,
+        Err(failure) => {
+            inner.failure(&context, failure.clone());
+            inner.publish(&app);
+            service.changed.notify_one();
+            return Err(failure);
+        }
+    };
+    let cache = inner
+        .caches
+        .get_mut(&context.key)
+        .expect("configured cache");
+    cache.diffs.insert(
+        (iid, version_id),
+        Cached {
+            value: result.clone(),
+            at: now(),
+        },
+    );
+    trim_diffs(&mut cache.diffs);
+    inner.trim_budget(CACHE_BUDGET);
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn mr_discussions(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    iid: u64,
+    epoch: u64,
+) -> Result<Vec<Discussion>, ApiError> {
+    let requested_at = now();
+    let service = state.0.clone();
+    let _gate = service.discussion_gate.lock().await;
+    let context = {
+        let inner = service.lock();
+        let context = inner.context(epoch, false)?;
+        if let Some(cached) = inner.cache().and_then(|c| c.discussions.get(&iid)) {
+            if cached.at >= requested_at || now() - cached.at < COOLDOWN {
+                return Ok(cached.value.clone());
+            }
+        }
+        context
+    };
+    let result = read_deadline(api::discussions(&context.config, project(&context)?, iid)).await;
+    let mut inner = service.lock();
+    if !inner.accepts(&context) {
+        return Err(error("stale", "讨论所属仓库或账号已改变"));
+    }
+    let result = match result {
+        Ok(result) => result,
+        Err(failure) => {
+            inner.failure(&context, failure.clone());
+            inner.publish(&app);
+            service.changed.notify_one();
+            return Err(failure);
+        }
+    };
+    let cache = inner
+        .caches
+        .get_mut(&context.key)
+        .expect("configured cache");
+    cache.discussions.insert(
+        iid,
+        Cached {
+            value: result.clone(),
+            at: now(),
+        },
+    );
+    retain_recent(&mut cache.discussions, MAX_DETAILS);
+    inner.trim_budget(CACHE_BUDGET);
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn mr_merge(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    iid: u64,
+    epoch: u64,
+    reviewed_sha: String,
+    expected_target_branch: String,
+    reviewed_version_id: u64,
+    reviewed_refs: api::DiffRefs,
+    squash: bool,
+    delete_source: bool,
+) -> Result<MergeResult, ApiError> {
+    let service = state.0.clone();
+    let _gate = service
+        .mutation_gate
+        .try_lock()
+        .map_err(|_| error("blocked", "已有合并操作正在进行，请等待结果"))?;
+    let context = {
+        let mut inner = service.lock();
+        let context = inner.context(epoch, false)?;
+        project(&context)?;
+        if reviewed_sha.is_empty() {
+            return Err(error("blocked", "请先查看并确认本次提交差异"));
+        }
+        inner.write_generation += 1;
+        Context {
+            generation: inner.write_generation,
+            ..context
+        }
+    };
+    // API revalidates server readiness and passes the reviewed SHA to the merge endpoint.
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        api::merge(
+            &context.config,
+            project(&context)?,
+            iid,
+            &reviewed_sha,
+            &expected_target_branch,
+            reviewed_version_id,
+            &reviewed_refs,
+            squash,
+            delete_source,
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(error(
+            "uncertain",
+            "合并操作结果尚未确认，请到 GitLab 核实，勿重复提交",
+        ))
+    });
+    {
+        let mut inner = service.lock();
+        if !inner.accepts(&context) {
+            return Err(error(
+                if inner.epoch == epoch {
+                    "uncertain"
+                } else {
+                    "stale"
+                },
+                "操作已发送，但应用状态已变化，请到原 GitLab 项目核实结果，勿重复提交",
+            ));
+        }
+        inner.write_generation += 1;
+        if let Some(cache) = inner.caches.get_mut(&context.key) {
+            cache.details.remove(&iid);
+            cache.discussions.remove(&iid);
+            if let Ok(result) = &result {
+                if let Some(summary) = &result.summary {
+                    update_summary(cache, summary.clone());
+                }
+            }
+        }
+        inner.data_revision += 1;
+        inner.publish(&app);
+    }
+    // Only this MR is re-read. A timed-out mutation is never automatically re-issued.
+    let _ = load_detail(&app, &service, iid, epoch, true, true).await;
+    result.map_err(|failure| {
+        if matches!(failure.kind.as_str(), "timeout" | "network") {
+            error(
+                "uncertain",
+                "合并操作结果尚未确认，请刷新状态或到 GitLab 核实，勿直接重复提交",
+            )
+        } else {
+            failure
+        }
+    })
+}
+
+#[tauri::command]
+pub fn mr_open(state: tauri::State<'_, MrState>, iid: u64, epoch: u64) -> Result<(), ApiError> {
+    let inner = state.0.lock();
+    let context = inner.context(epoch, true)?;
+    let cache = inner
+        .cache()
+        .ok_or_else(|| error("not_found", "尚未加载合并请求"))?;
+    let summary = cache
+        .items
+        .iter()
+        .find(|row| row.iid == iid)
+        .or_else(|| cache.details.get(&iid).map(|d| &d.value.summary))
+        .ok_or_else(|| error("not_found", "此合并请求不在当前列表"))?;
+    let url = api::validated_web_url(&context.config, project(&context)?, iid, &summary.web_url)?;
+    crate::git::open_in_browser(&url).map_err(|message| error("blocked", &message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> Inner {
+        let config = api::Config {
+            url: "https://gitlab.example".into(),
+            token: "fixture-only".into(),
+            remote: "git@gitlab.example:team/project.git".into(),
+        };
+        let key = context_key("gitlab", "https://gitlab.example/team/project");
+        let active = Active {
+            fingerprint: digest(&config.token),
+            config,
+            account_key: "gitlab".into(),
+            repo_path: "/fixture".into(),
+            key: key.clone(),
+            instance: "https://gitlab.example".into(),
+            identity_verified: false,
+        };
+        let mut caches = HashMap::new();
+        caches.insert(key, Cache::default());
+        Inner {
+            epoch: 4,
+            revision: 0,
+            active: Some(active),
+            caches,
+            seen: SeenStore::default(),
+            file: PathBuf::new(),
+            persistence_error: None,
+            visibility: Visibility {
+                online: true,
+                ..Visibility::default()
+            },
+            foreground: true,
+            sleeping: false,
+            resume_after: 0,
+            retry_after: 0,
+            failures: 0,
+            detail_failures: 0,
+            detail_retry_after: 0,
+            stopped: false,
+            account_stops: HashSet::new(),
+            project_stops: HashSet::new(),
+            next_list: 0,
+            next_detail: 0,
+            list_running: None,
+            write_generation: 2,
+            data_revision: 0,
+            last_emitted: None,
+        }
+    }
+
+    fn row(iid: u64, title_bytes: usize) -> Summary {
+        Summary {
+            id: iid,
+            project_id: 9,
+            iid,
+            title: "x".repeat(title_bytes),
+            state: "opened".into(),
+            description: None,
+            source_branch: "source".into(),
+            target_branch: "main".into(),
+            author: User {
+                id: 7,
+                name: "Fixture".into(),
+                username: "fixture".into(),
+            },
+            roles: vec!["author".into()],
+            draft: false,
+            updated_at: "2026-10-06".into(),
+            sha: None,
+            detailed_merge_status: None,
+            web_url: "https://gitlab.example/team/project/-/merge_requests/1".into(),
+            pipeline_status: None,
+        }
+    }
+
+    #[test]
+    fn cache_budget_evicts_inactive_lru_without_truncating_active_summary() {
+        let mut inner = fixture();
+        let active = inner.active.as_ref().unwrap().key.clone();
+        let active_rows = vec![row(1, 64)];
+        inner.caches.get_mut(&active).unwrap().items = active_rows.clone();
+        inner.caches.insert(
+            "old".into(),
+            Cache {
+                items: vec![row(2, 8_000)],
+                used_at: 1,
+                ..Cache::default()
+            },
+        );
+        inner.caches.insert(
+            "new".into(),
+            Cache {
+                items: vec![row(3, 8_000)],
+                used_at: 2,
+                ..Cache::default()
+            },
+        );
+        let old_bytes = cache_bytes(inner.caches.get("old").unwrap()) + "old".len();
+        let budget = inner.retained_bytes() - old_bytes;
+        inner.trim_budget(budget);
+        assert!(inner.retained_bytes() <= budget);
+        assert!(!inner.caches.contains_key("old"));
+        assert!(inner.caches.contains_key("new"));
+        assert_eq!(inner.caches.get(&active).unwrap().items, active_rows);
+    }
+
+    #[test]
+    fn payload_budget_preserves_selected_detail_and_rejects_oversized_summary_before_replacement() {
+        let mut inner = fixture();
+        let key = inner.active.as_ref().unwrap().key.clone();
+        inner.visibility.detail_iid = Some(1);
+        let original = vec![row(1, 32)];
+        let detail = Detail {
+            summary: original[0].clone(),
+            description: "reviewed".into(),
+            pipeline_status: None,
+            approvals: api::ApprovalState {
+                readable: true,
+                approved: None,
+                approvals_required: None,
+                approvals_left: None,
+                approved_by: vec![],
+            },
+            blocking_discussions_resolved: None,
+            can_merge: false,
+            blocked_reasons: vec![],
+            diff_refs: None,
+            diff_versions: vec![],
+            squash_policy: "default_off".into(),
+            squash: false,
+            delete_source_default: false,
+            delete_source_required: false,
+            delete_source_allowed: None,
+        };
+        let cache = inner.caches.get_mut(&key).unwrap();
+        cache.items = original.clone();
+        cache.details.insert(
+            1,
+            Cached {
+                value: detail.clone(),
+                at: 0,
+            },
+        );
+        let discussion = vec![Discussion {
+            id: "notes".repeat(1_000),
+            individual_note: true,
+            notes: vec![],
+        }];
+        cache.discussions.insert(
+            1,
+            Cached {
+                value: discussion.clone(),
+                at: 1,
+            },
+        );
+        cache.discussions.insert(
+            2,
+            Cached {
+                value: discussion.clone(),
+                at: 2,
+            },
+        );
+        let budget = inner.retained_bytes() - discussion_bytes(&discussion);
+        inner.trim_budget(budget);
+        assert!(inner.retained_bytes() <= budget);
+        let cache = inner.caches.get(&key).unwrap();
+        assert!(!cache.discussions.contains_key(&1));
+        assert!(cache.discussions.contains_key(&2));
+        assert_eq!(cache.details.get(&1).unwrap().value, detail);
+        assert!(validate_summaries(&[row(2, 4_000)], 1_000).is_err());
+        assert_eq!(cache.items, original);
+    }
+
+    #[test]
+    fn baseline_never_notifies_existing_requests_and_unchanged_checks_do_not_persist() {
+        let mut entry = SeenEntry::default();
+        let initial = HashSet::from([10, 20]);
+        assert!(reconcile_seen(&mut entry, &initial, 100));
+        assert_eq!(entry.viewed, initial);
+        assert!(!reconcile_seen(&mut entry, &initial, 200));
+        let changed = HashSet::from([10, 20, 30]);
+        assert!(!reconcile_seen(&mut entry, &changed, 300));
+        assert_eq!(
+            changed
+                .difference(&entry.viewed)
+                .copied()
+                .collect::<HashSet<_>>(),
+            HashSet::from([30])
+        );
+        entry.viewed.insert(30);
+        assert!(reconcile_seen(&mut entry, &HashSet::from([10, 30]), 400));
+        assert_eq!(entry.viewed, HashSet::from([10, 30]));
+    }
+
+    #[test]
+    fn epoch_and_read_generation_reject_late_credentials_sleep_and_mutation_results() {
+        let mut inner = fixture();
+        let context = inner.context(4, false).unwrap();
+        assert!(inner.accepts(&context));
+        inner.write_generation += 1;
+        assert!(!inner.accepts(&context));
+        let new_context = inner.context(4, false).unwrap();
+        inner.epoch += 1;
+        assert!(!inner.accepts(&new_context));
+        assert_eq!(inner.context(4, false).err().unwrap().kind, "stale");
+    }
+
+    #[test]
+    fn offline_sleep_and_wake_grace_block_reads_but_keep_snapshot_available() {
+        let mut inner = fixture();
+        inner.visibility.online = false;
+        assert!(inner.context(4, false).is_err());
+        assert!(inner.context(4, true).is_ok());
+        inner.visibility.online = true;
+        inner.sleeping = true;
+        assert!(inner.context(4, false).is_err());
+        inner.sleeping = false;
+        inner.resume_after = now() + COOLDOWN;
+        assert!(inner.context(4, false).is_err());
+        assert_eq!(inner.snapshot().epoch, 4);
+    }
+
+    #[test]
+    fn authorization_failure_stops_account_and_preserves_existing_complete_check() {
+        let mut inner = fixture();
+        let key = inner.active.as_ref().unwrap().key.clone();
+        inner.caches.get_mut(&key).unwrap().checked_at = Some(42);
+        let context = inner.context(4, false).unwrap();
+        inner.failure(&context, error("unauthorized", "expired"));
+        assert!(inner.stopped);
+        assert!(inner
+            .account_stops
+            .contains(&account_stop_key(inner.active.as_ref().unwrap())));
+        assert_eq!(inner.snapshot().last_checked_at, Some(42));
+        assert!(inner.snapshot().stale);
+        assert_eq!(inner.context(4, false).err().unwrap().kind, "unauthorized");
+    }
+
+    #[test]
+    fn concurrent_success_never_clears_an_unexpired_retry_after_or_detail_backoff() {
+        let mut inner = fixture();
+        let key = inner.active.as_ref().unwrap().key.clone();
+        let context = inner.context(4, false).unwrap();
+        let at = now();
+        inner.failure(
+            &context,
+            ApiError {
+                kind: "rate_limit".into(),
+                message: "wait".into(),
+                retry_after: Some(3600),
+            },
+        );
+        let deadline = inner.retry_after;
+        inner.acknowledge_list_success(&key, at);
+        assert_eq!(inner.retry_after, deadline);
+        assert!(inner.snapshot().error.is_some());
+        inner.detail_retry_after = deadline + MAX_BACKOFF;
+        inner.acknowledge_list_success(&key, deadline);
+        assert_eq!(inner.retry_after, 0);
+        assert!(inner.snapshot().error.is_some());
+        inner.acknowledge_list_success(&key, inner.detail_retry_after);
+        assert!(inner.snapshot().error.is_none());
+    }
+
+    #[test]
+    fn background_dominates_open_list_and_running_ci() {
+        assert_eq!(interval(false, true, true, true), 300_000);
+        assert_eq!(interval(true, false, false, true), 60_000);
+        assert_eq!(interval(true, true, false, true), 30_000);
+        assert_eq!(interval(true, false, true, true), 15_000);
+        assert_eq!(interval(true, false, true, false), 30_000);
+    }
+
+    #[test]
+    fn retry_after_is_not_shortened_by_backoff_limit() {
+        assert_eq!(backoff(1, None), 15_000);
+        assert_eq!(backoff(30, None), 900_000);
+        assert_eq!(backoff(30, Some(3600)), 3_600_000);
+    }
+
+    #[test]
+    fn keys_isolate_accounts_instances_and_provider_identity() {
+        let key = context_key("gitlab", "https://gitlab.example/team/project");
+        assert_eq!(
+            key,
+            context_key("gitlab", "https://gitlab.example/team/project")
+        );
+        assert_ne!(
+            key,
+            context_key("other", "https://gitlab.example/team/project")
+        );
+        assert_ne!(
+            key,
+            context_key("gitlab", "https://other.example/team/project")
+        );
+        let active = Active {
+            config: api::Config {
+                url: "https://gitlab.example".into(),
+                token: "private".into(),
+                remote: "x".into(),
+            },
+            account_key: "gitlab".into(),
+            repo_path: "/clone".into(),
+            key,
+            instance: "https://gitlab.example".into(),
+            fingerprint: "x".into(),
+            identity_verified: false,
+        };
+        assert_ne!(seen_key(&active, 1, 10), seen_key(&active, 2, 10));
+        assert_ne!(seen_key(&active, 1, 10), seen_key(&active, 1, 11));
+        let mut renamed = active.clone();
+        renamed.key = context_key("gitlab", "https://gitlab.example/team/renamed-project");
+        assert_eq!(seen_key(&active, 1, 10), seen_key(&renamed, 1, 10));
+        assert!(!serde_json::to_string(&SeenStore::default())
+            .unwrap()
+            .contains("private"));
+    }
+
+    #[test]
+    fn detail_cache_has_a_fixed_bound() {
+        let mut cache = HashMap::new();
+        for id in 0..20 {
+            cache.insert(
+                id,
+                Cached {
+                    value: id,
+                    at: id as i64,
+                },
+            );
+        }
+        retain_recent(&mut cache, MAX_DETAILS);
+        assert_eq!(cache.len(), MAX_DETAILS);
+        assert!(cache.contains_key(&19));
+        assert!(!cache.contains_key(&0));
+    }
+}

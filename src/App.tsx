@@ -43,8 +43,12 @@ import type { WorkingFile } from "./workingStatus";
 import { ProjectOverview, WorkbenchActionBar } from "./Workbench";
 import { ToolbarText } from "./ToolbarText";
 import { useProjectOverview } from "./useProjectOverview";
+import { useAppForeground } from "./useAppForeground";
 import { useProjectActivity } from "./useProjectActivity";
-import { overviewAttentionCount } from "./projectOverview";
+import { applyOverviewToProjects, overviewAttentionCount } from "./projectOverview";
+import { MergeRequestEntry, MergeRequestPopover, MergeRequestDetail } from "./MergeRequests";
+import { useMergeRequests } from "./useMergeRequests";
+import { gitlabRemote, mrCommitFiles } from "./mergeRequestHelpers";
 import type { OverviewTarget } from "./projectOverview";
 export type { WorkingFile } from "./workingStatus";
 
@@ -413,7 +417,7 @@ export interface Author { name: string; email: string; initials: string; color: 
 export interface CommitFile {
   path: string;
   status: "added" | "modified" | "deleted" | "renamed";
-  additions: number; deletions: number; diff?: string; diffError?: boolean;
+  additions: number; deletions: number; diff?: string; diffError?: boolean; diffNotice?: string;
 }
 export interface Commit {
   hash: string; fullHash: string; message: string; body?: string;
@@ -1171,10 +1175,11 @@ function OperationCapsule({ kind, title, context, progress, outcome, settledPhas
   );
 }
 
-function StatusBar({ project, branch, changes, ready, errored, home, checkProgress, checkResult, onShowCheckResult, onShowChanges, onSearch }: {
+function StatusBar({ project, branch, changes, ready, errored, home, checkProgress, checkResult, onShowCheckResult, onShowChanges, onSearch, mrEntry, mrNew }: {
   project?: Project; branch?: Branch; changes: number; ready: boolean; errored: boolean;
   home?: { projects: number; attention: number; refreshing: boolean };
   checkProgress: CheckProgress | null; checkResult: CheckResult | null; onShowCheckResult: () => void; onShowChanges: () => void; onSearch: () => void;
+  mrEntry?: React.ReactNode; mrNew?: boolean;
 }) {
   const t = useTheme();
   const remoteName = branch?.remote?.split("/")[0];
@@ -1207,7 +1212,7 @@ function StatusBar({ project, branch, changes, ready, errored, home, checkProgre
         "--gk-status-border": statusBorder,
       } as React.CSSProperties}>
       <div className="gk-status-context flex items-center gap-1.5 min-w-0" role={checkProgress ? "status" : undefined}>
-        {checkProgress ? (
+        {mrNew ? mrEntry : checkProgress ? (
           <>
             <span className="truncate tabular-nums" title={checkProgress.project}>{checkProgress.paused ? tx("等待休眠恢复后补查") : tf("已检查 {0} / {1} · 正在检查 {2}", checkProgress.current, checkProgress.total, checkProgress.project)}</span>
             <RefreshCw size={12} className="animate-spin flex-shrink-0" aria-hidden="true" />
@@ -1232,6 +1237,7 @@ function StatusBar({ project, branch, changes, ready, errored, home, checkProgre
             </span>}
           </>
         )}
+        {!mrNew && mrEntry}
       </div>
       <div className="flex items-center justify-center min-w-0" role="status">
         {home ? <span className="gk-status-pill px-3">{home.refreshing ? tx("正在刷新状态…") : tf("{0} 个项目需关注", home.attention)}</span>
@@ -2303,7 +2309,7 @@ function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, onExpan
           diff={selectedFile.diff} additions={selectedFile.additions} deletions={selectedFile.deletions}
           statusLabel={fss(selectedFile.status).label} statusColor={fss(selectedFile.status).color}
           loading={!!repoPath && selectedFile.diff === undefined && !selectedFile.diffError}
-          diffError={selectedFile.diffError} onExpand={onExpand} compact={compact} onTrace={onTrace}
+          diffError={selectedFile.diffError} diffNotice={selectedFile.diffNotice} onExpand={onExpand} compact={compact} onTrace={onTrace}
           fileActions={compact && <DetailMenuButton label={tx("更多文件操作")} items={[
             ...(onRevealFile ? [{ label: fileManagerActionLabel(), Icon: FolderOpen, onClick: () => onRevealFile(selectedFile) } as CtxItem] : []),
             { label: tx("复制文件路径"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(selectedFile.path).catch(() => toast.error(tx("无法复制到剪贴板"))); } },
@@ -3287,9 +3293,13 @@ function loadConn(key: string): RemoteConn {
     return { url: typeof c.url === "string" ? c.url : "", token: typeof c.token === "string" ? c.token : "" };
   } catch { return { url: "", token: "" }; }
 }
-function saveConn(key: string, c: RemoteConn): void {
-  try { localStorage.setItem(key, JSON.stringify(c)); } catch { /* ignore */ }
+function saveConn(key: string, c: RemoteConn): boolean {
+  try { localStorage.setItem(key, JSON.stringify(c)); } catch {
+    toast.error(tx("无法保存账号配置，请重试"));
+    return false;
+  }
   window.dispatchEvent(new Event("gitkit-credentials-changed"));
+  return true;
 }
 const loadGitlab = () => loadConn("gitkit.gitlab");
 
@@ -4842,15 +4852,17 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
   const saveNow = () => {
     if (!canSave) return;
     const next = { url: url.trim().replace(/\/+$/, ""), token: token.trim() };
+    if (!saveConn(storageKey, next)) return;
     if (next.url !== saved.url || next.token !== saved.token) gitlabInfoCache.invalidate(saved.url, saved.token);
-    saveConn(storageKey, next); setSaved(next); resetResult(); setShowToken(false); setEditing(false);
+    setSaved(next); resetResult(); setShowToken(false); setEditing(false);
     const cached = gitlabInfoCache.read(next.url, next.token);
     setInfo(cached?.info ?? null); setInfoError(cached?.error ?? ""); setCheckedAt(cached?.checkedAt ?? null);
     toast.success(tx("GitLab 集成已保存"));
   };
   const removeNow = () => {
+    if (!saveConn(storageKey, { url: "", token: "" })) return;
     gitlabInfoCache.invalidate(saved.url, saved.token);
-    saveConn(storageKey, { url: "", token: "" }); setSaved({ url: "", token: "" });
+    setSaved({ url: "", token: "" });
     setUrl(""); setToken(""); resetResult(); setShowToken(false); setEditing(false);
     toast.success(tx("已删除集成"));
   };
@@ -5868,7 +5880,7 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId,
   language: Language; setLanguage: (language: Language) => void;
   dailyCheck: DailyCheck; setDailyCheck: (c: DailyCheck) => void;
   onRunCheckNow: () => void; checkBusy: boolean; checkProgress: CheckProgress | null; projectCount: number;
-  initialSection?: "identity" | "github";
+  initialSection?: "identity" | "github" | "gitlab";
   onClose: () => void;
 }) {
   const t = useTheme();
@@ -5952,10 +5964,10 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId,
                 defaultId={defaultId} setDefaultId={setDefaultId} />
             )}
             {section === "gitlab" && (
-              <RemoteConnSettings storageKey="gitkit.gitlab" title={tx("自建 GitLab 集成")}
-                desc={tx("填入自建 GitLab 实例地址与个人访问令牌 (Personal Access Token),用于列项目、创建合并请求、推送认证。")}
+              <RemoteConnSettings storageKey="gitkit.gitlab" title={tx("GitLab 集成")}
+                desc={tx("填入 GitLab 实例地址与个人访问令牌 (Personal Access Token)，用于查看、创建及合并请求和推送认证。")}
                 urlPlaceholder="https://gitlab.example.com" tokenPlaceholder="glpat-…"
-                hint={tx("api 可用于创建 MR 与推送；仅拉取可用 read_repository，仅推送可用 write_repository。令牌保存在本机。")}
+                hint={tx("查看合并请求可用 read_api；创建与合并请求需要 api。仅拉取可用 read_repository，仅推送可用 write_repository。令牌保存在本机。")}
                 test={gitlabTest} />
             )}
             {section === "github" && <GithubAccountsSettings />}
@@ -6190,7 +6202,7 @@ export default function App() {
 
   // ── settings + committer identities (persisted) ──
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<"identity" | "github">("identity");
+  const [settingsSection, setSettingsSection] = useState<"identity" | "github" | "gitlab">("identity");
   const [identities, setIdentities] = useState<Identity[]>(loadIdentities);
   const [defaultIdentityId, setDefaultIdentityId] = useState<string>(loadDefaultIdentityId);
   useEffect(() => { saveIdentities(identities); }, [identities]);
@@ -6201,6 +6213,10 @@ export default function App() {
   const [activeProjectId, setActiveProjectId] = useState<string>(loadActiveProjectId);
   const [workspaceView, setWorkspaceView] = useState<"home" | "repository">(loadWorkspaceView);
   const [projectSidebarOpen, setProjectSidebarOpen] = useState(true);
+  const [appFocusRevision, setAppFocusRevision] = useState(0);
+  const appForeground = useAppForeground();
+  const appForegroundRef = useRef(appForeground);
+  appForegroundRef.current = appForeground;
   const selectedProject = projects.find((p) => p.id === activeProjectId) ?? projects[0];
   const activeProject = workspaceView === "repository" ? selectedProject : undefined;
   const isReal = !!activeProject;
@@ -6351,6 +6367,9 @@ export default function App() {
   const [workingSnapshot, setWorkingSnapshot] = useState<{ path: string; files: WorkingFile[]; changedPaths?: string[] } | null>(null);
   const workingPreviewContext = useRef<{ path?: string; visible: boolean }>({ visible: false });
   const workingCache = useRef<Map<string, WorkingFile[]>>(new Map());
+  // A background overview read must not replace a newer watched status, even
+  // after that repository moves from active to the warm watcher slot.
+  const workingStatusRevisions = useRef(new Map<string, number>());
   const watchedPaths = useRef<string[]>([]); // LRU order: warm repo, active repo
   const warmWatchTimer = useRef<number | null>(null);
   const statusJobs = useRef<Map<string, {
@@ -6884,6 +6903,7 @@ export default function App() {
   // polls while the app is idle.
   const applyWorkingStatusRef = useRef<(repoPath: string, files: WorkingFile[], changedPaths?: string[]) => void>(() => {});
   applyWorkingStatusRef.current = (repoPath, files, changedPaths) => {
+    workingStatusRevisions.current.set(repoPath, (workingStatusRevisions.current.get(repoPath) ?? 0) + 1);
     workingCache.current.delete(repoPath);
     workingCache.current.set(repoPath, files);
     while (workingCache.current.size > WATCHED_REPO_LIMIT) {
@@ -6967,7 +6987,7 @@ export default function App() {
       })
       .finally(() => {
         job!.inFlight = null;
-        if (job!.rerun && watchedPaths.current.includes(repoPath)) {
+        if (job!.rerun && appForegroundRef.current && watchedPaths.current.includes(repoPath)) {
           job!.rerun = false;
           queueMicrotask(() => { void requestWorkingStatusRef.current(repoPath).catch(() => {}); });
         } else if (!watchedPaths.current.includes(repoPath) && activePathRef.current !== repoPath) {
@@ -6985,6 +7005,7 @@ export default function App() {
     full?: boolean,
   ) => void>(() => {});
   scheduleWorkingStatusRef.current = (repoPath, immediate = false, paths = [], full = immediate) => {
+    if (!appForegroundRef.current || !watchedPaths.current.includes(repoPath)) return;
     let job = statusJobs.current.get(repoPath);
     if (!job) {
       job = { timer: null, inFlight: null, rerun: false, paths: new Set(), full: false };
@@ -7007,6 +7028,7 @@ export default function App() {
     } else {
       job.timer = window.setTimeout(() => {
         job!.timer = null;
+        if (!appForegroundRef.current || !watchedPaths.current.includes(repoPath)) return;
         void requestWorkingStatusRef.current(repoPath, true).catch(() => {});
       }, STATUS_DEBOUNCE_MS);
     }
@@ -7030,12 +7052,13 @@ export default function App() {
     let unlisten: (() => void) | null = null;
     listen<WorkingTreeChanged>("working-tree-changed", (event) => {
       const change = event.payload;
-      if (!stopped && watchedPaths.current.includes(change.path)) {
+      if (!stopped && appForegroundRef.current && watchedPaths.current.includes(change.path)) {
         scheduleWorkingStatusRef.current(change.path, false, change.paths, change.full);
       }
     }).then((fn) => { if (stopped) fn(); else unlisten = fn; }).catch(() => {});
 
     const refreshActive = () => {
+      if (!appForegroundRef.current) return;
       const active = activePathRef.current;
       if (!active) return;
       if (uninitializedRef.current) {
@@ -7063,6 +7086,18 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!appForeground) {
+      for (const job of statusJobs.current.values()) {
+        if (job.timer !== null) window.clearTimeout(job.timer);
+        job.timer = null;
+        job.rerun = false;
+      }
+      return;
+    }
+    for (const watched of watchedPaths.current) scheduleWorkingStatusRef.current(watched, true);
+  }, [appForeground, appFocusRevision]);
+
   // Promote the selected repo to the active watcher slot. Starting the watcher
   // before the status read closes the switch race: an edit during the read queues
   // exactly one follow-up reconciliation.
@@ -7085,7 +7120,9 @@ export default function App() {
     watchedPaths.current = next;
     void startWatch(path)
       .catch(() => {})
-      .finally(() => scheduleWorkingStatusRef.current(path, true));
+      .finally(() => {
+        if (appForegroundRef.current && watchedPaths.current.includes(path)) scheduleWorkingStatusRef.current(path, true);
+      });
 
     if (warmWatchTimer.current !== null) window.clearTimeout(warmWatchTimer.current);
     const warm = next.length > 1 ? next[0] : undefined;
@@ -7661,28 +7698,30 @@ export default function App() {
   const [checkSnapshot, setCheckSnapshot] = useState<CheckSnapshot | null>(null);
   const checkProgress = checkSnapshot?.progress ?? null;
   const checkBusy = checkProgress !== null;
-  const overview = useProjectOverview(projects, workspaceView === "home", reloadTick, checkSnapshot?.result ?? null);
-  const activity = useProjectActivity(projects, workspaceView === "home", reloadTick, checkSnapshot?.result ?? null);
+  const overviewActive = workspaceView === "home" || projectSidebarOpen;
+  const overview = useProjectOverview(projects, overviewActive,
+    reloadTick, checkSnapshot?.result ?? null, workingStatusRevisions.current,
+    { foreground: appForeground, foregroundRevision: appFocusRevision,
+      full: workspaceView === "home", activePath: activeProject?.path ?? "",
+      isLiveWatched: (repoPath) => watchedPaths.current.includes(repoPath),
+      reconcileLiveStatus: (repoPath) => scheduleWorkingStatusRef.current(repoPath, true) });
+  const activity = useProjectActivity(projects, workspaceView === "home" && appForeground,
+    reloadTick, checkSnapshot?.result ?? null);
   const attentionCount = overviewAttentionCount(projects, overview.entries);
   useEffect(() => {
-    if (workspaceView !== "home" || overview.refreshing) return;
-    setProjects((previous) => {
-      let changed = false;
-      const next = previous.map((project) => {
-        const entry = overview.entries[project.id];
-        if (!entry?.summary || entry.checking || entry.error) return project;
-        const { initialized, currentBranch, changedFiles } = entry.summary;
-        if (project.initialized === initialized && project.branch === currentBranch && project.changes === changedFiles) return project;
-        changed = true;
-        return { ...project, initialized, branch: currentBranch, changes: changedFiles };
-      });
-      return changed ? next : previous;
-    });
-  }, [workspaceView, overview.entries, overview.refreshing]);
+    if (!overviewActive || !appForeground) return;
+    setProjects((previous) => applyOverviewToProjects(previous, overview.statusEntries,
+      activePathRef.current ?? "", workingStatusRevisions.current));
+  }, [activeProject?.path, appForeground, overviewActive, overview.statusEntries]);
   const [pullBusy, setPullBusy] = useState(false);
   const [updateRows, setUpdateRows] = useState<UpdateRow[] | null>(null);
   const [checkFocused, setCheckFocused] = useState(false);
   const [credentialRevision, setCredentialRevision] = useState(0);
+  const mrConnection = loadGitlab();
+  const mrRemote = dataReady && gitAvailable ? gitlabRemote(remotes, mrConnection.url, mrConnection.token) : null;
+  const mr = useMergeRequests({repoPath: activeProject?.path ?? null, remote: mrRemote,
+    url: mrConnection.url, token: mrConnection.token, credentialRevision});
+  const mrFiles = useMemo(() => mr.diffVersion ? mrCommitFiles(mr.diffVersion) : [], [mr.diffVersion, language]);
   const checkRevisionRef = useRef(-1);
   const completedCheckRef = useRef(0);
   const presentedCheckRef = useRef(0);
@@ -7724,6 +7763,7 @@ export default function App() {
       .catch((error) => { if (!disposed) toast.error(tf("监听检查状态失败：{0}", error)); });
     void getCurrentWindow().onFocusChanged(({ payload }) => {
       if (disposed) return;
+      if (payload) setAppFocusRevision((value) => value + 1);
       const revision = ++focusRevision;
       setCheckFocused(false);
       if (payload) void refresh().then(() => { if (!disposed && revision === focusRevision) setCheckFocused(true); });
@@ -8720,6 +8760,18 @@ export default function App() {
           ) : (
           <div className="gk-workspace-card flex flex-1 min-w-0 overflow-hidden"
             style={{ background: theme.bgPanel, boxShadow: theme.shadowEl }}>
+            {mr.selectedIid !== null && <MergeRequestDetail key={`${mr.key}:${mr.selectedIid}`}
+              theme={theme} detail={mr.detail} latest={mr.latest} snapshot={mr.snapshot}
+              loading={mr.loading} error={mr.error} files={mrFiles} diffVersion={mr.diffVersion}
+              diffLoading={mr.diffLoading} diffError={mr.diffError} discussions={mr.discussions}
+              discussionsLoading={mr.discussionsLoading} discussionsError={mr.discussionsError}
+              onRefresh={mr.refresh} onReviewLatest={mr.reviewLatest} onMerge={mr.merge} onOpenExternal={mr.openExternal}
+              onBackList={mr.backList} onBackWorkspace={mr.backWorkspace} onTabChange={mr.onTabChange}
+              renderDiff={(files, selected, onSelect, sourceKey) => <FileDiffView files={files} selectedFile={selected}
+                onFileSelect={onSelect} repoPath="" sourceKey={sourceKey} compact />} />}
+            <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden" aria-hidden={mr.selectedIid !== null}
+              ref={(element) => { if (element) element.inert = mr.selectedIid !== null; }}
+              style={{display:mr.selectedIid !== null ? "none" : "flex"}}>
             <Sidebar branches={branches} remotes={remotes} stashes={stashes}
               currentBranch={currentBranch} focusBranch={focusBranch}
               hidden={hiddenBranches} setHidden={updateHiddenBranches}
@@ -9060,15 +9112,23 @@ export default function App() {
             )}
             </div>
           </div>
+          </div>
           )}
           </div>
           <StatusBar project={activeProject} branch={branches.find((b) => b.current)} changes={changesCount}
+            mrNew={!!mrRemote && (mr.snapshot?.newCount ?? 0) > 0}
+            mrEntry={mrRemote ? <MergeRequestEntry theme={theme} snapshot={mr.snapshot} open={mr.listOpen}
+              anchorRef={mr.anchorRef} onToggle={mr.toggleList} /> : undefined}
             home={workspaceView === "home" ? { projects: projects.length, attention: attentionCount, refreshing: overview.refreshing } : undefined}
             ready={dataReady} errored={errored}
             checkProgress={checkProgress} checkResult={checkSnapshot?.result ?? null}
             onShowCheckResult={() => { if (!pullBusy && checkSnapshot?.result) void openCheckResult(checkSnapshot.result); }}
-            onShowChanges={() => { setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
+            onShowChanges={() => { mr.backWorkspace(); setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
             onSearch={() => { if (workspaceView === "home") document.getElementById("overview-search")?.focus(); else setSearchOpen(true); }} />
+          <MergeRequestPopover theme={theme} snapshot={mr.snapshot} open={!!mrRemote && mr.listOpen}
+            configured={mr.enabled} error={mr.error} anchorRef={mr.anchorRef} onClose={mr.closeList}
+            onSelect={(iid) => { setDiffExpanded(false); void mr.select(iid); }} onRefresh={mr.refresh}
+            onConfigure={() => { mr.closeList(); setSettingsSection("gitlab"); setSettingsOpen(true); }} />
         </div>
 
         {diffExpanded && detailOpen && !viewChanges && !fileTrace && (

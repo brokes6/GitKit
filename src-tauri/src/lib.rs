@@ -1,6 +1,7 @@
 mod git;
 mod daily_check;
 mod github_token;
+mod merge_requests;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -8,8 +9,17 @@ pub fn run() {
         .manage(git::WatchState::default())
         .manage(git::CancelState::default())
         .plugin(tauri_plugin_dialog::init())
+        .on_window_event(|window, event| {
+            use tauri::Manager;
+            if window.label() != "main" { return; }
+            let background = matches!(event, tauri::WindowEvent::Focused(false) | tauri::WindowEvent::Destroyed)
+                || (matches!(event, tauri::WindowEvent::Resized(_))
+                    && (window.is_minimized().unwrap_or(true) || !window.is_visible().unwrap_or(false)));
+            if background { git::suspend_project_watches(window.app_handle()); }
+        })
         .setup(|app| {
             daily_check::setup(app.handle())?;
+            merge_requests::setup(app.handle())?;
             // Desktop-only plugins: window-state remembers window geometry
             // across launches; updater + process power in-app auto-update.
             #[cfg(desktop)]
@@ -33,6 +43,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            merge_requests::mr_snapshot,
+            merge_requests::mr_configure,
+            merge_requests::mr_visibility,
+            merge_requests::mr_refresh,
+            merge_requests::mr_mark_viewed,
+            merge_requests::mr_detail,
+            merge_requests::mr_diffs,
+            merge_requests::mr_discussions,
+            merge_requests::mr_merge,
+            merge_requests::mr_open,
             daily_check::daily_check_snapshot,
             daily_check::daily_check_configure,
             daily_check::daily_check_set_busy,
@@ -40,6 +60,7 @@ pub fn run() {
             daily_check::daily_check_now,
             git::open_repo,
             git::project_overview::git_project_overview,
+            git::project_status::git_project_status_summary,
             git::project_activity::git_project_activity,
             git::git_init,
             git::reveal_in_file_manager,
@@ -115,6 +136,7 @@ pub fn run() {
             git::git_clone,
             git::start_watch,
             git::stop_watch,
+            git::project_watch_configure,
         ])
         .run(tauri::generate_context!())
         .expect("error while running GitKit");

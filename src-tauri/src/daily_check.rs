@@ -532,6 +532,7 @@ async fn run(
 }
 
 fn power_changed(app: &tauri::AppHandle, sleeping: bool) {
+    crate::merge_requests::power_changed(app, sleeping);
     let state = app.state::<DailyCheckState>();
     let op = {
         let mut inner = state.0.lock().unwrap();

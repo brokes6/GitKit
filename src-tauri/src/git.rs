@@ -15,6 +15,7 @@ mod operation;
 mod snapshot_hash;
 pub mod local_merge;
 pub mod project_overview;
+pub mod project_status;
 pub mod project_activity;
 pub mod file_trace;
 pub use operation::CancelState;
@@ -2977,7 +2978,7 @@ fn github_api_base(url: &str) -> String {
 
 /// Open a URL in the user's default browser (cross-platform: macOS `open`,
 /// Windows `cmd /C start`, other unix `xdg-open`).
-fn open_in_browser(url: &str) -> Result<(), String> {
+pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     return command("open")
         .arg(url)
@@ -3648,12 +3649,159 @@ pub async fn git_clone(
     .await
 }
 
-/// Live filesystem watchers, one per watched repo path. Kept in Tauri managed
-/// state so the OS watch stays alive until `stop_watch` drops it. Replaces the
-/// old 3-second `git status` polling: edits show up as soon as the OS reports
-/// them (tens of ms) instead of on the next poll tick.
+/// Both sidebar projects and the working pane retain the same OS watcher.
+/// Releasing one owner must not stop the other owner's notifications.
+#[derive(Clone, Default)]
+pub struct WatchState(Arc<Mutex<WatchRegistry<RepoWatcher>>>, Arc<Mutex<WorkingWatchIntents>>);
+
+struct RepoWatcher {
+    _watcher: RecommendedWatcher,
+    roots: RepoWatchRoots,
+    instance: Arc<()>,
+}
+
 #[derive(Default)]
-pub struct WatchState(pub Mutex<HashMap<String, RecommendedWatcher>>);
+struct WorkingWatchIntents {
+    next_revision: u64,
+    pending: HashMap<String, (u64, bool)>,
+}
+
+impl WorkingWatchIntents {
+    fn request(&mut self, path: &str, enabled: bool) -> u64 {
+        self.next_revision += 1;
+        self.pending.insert(path.to_string(), (self.next_revision, enabled));
+        self.next_revision
+    }
+
+    fn finish(&mut self, path: &str, revision: u64) {
+        if self.pending.get(path).is_some_and(|(current, _)| *current == revision) { self.pending.remove(path); }
+    }
+}
+
+struct OwnedWatch<W> {
+    _watcher: W,
+    working: bool,
+    project: bool,
+}
+
+struct WatchRegistry<W> {
+    entries: HashMap<String, OwnedWatch<W>>,
+    project_revision: Option<u64>,
+    project_requested_paths: HashSet<String>,
+    failed_paths: Vec<String>,
+}
+
+impl<W> Default for WatchRegistry<W> {
+    fn default() -> Self {
+        Self { entries: HashMap::new(), project_revision: None, project_requested_paths: HashSet::new(), failed_paths: Vec::new() }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWatchResult {
+    pub failed_paths: Vec<String>,
+    pub revision: u64,
+}
+
+impl<W> WatchRegistry<W> {
+    fn acquire_working(&mut self, path: String, create: impl FnOnce(&str) -> Result<W, String>) -> Result<(), String> {
+        if let Some(entry) = self.entries.get_mut(&path) {
+            entry.working = true;
+        } else {
+            let watcher = create(&path)?;
+            self.entries.insert(path, OwnedWatch { _watcher: watcher, working: true, project: false });
+        }
+        Ok(())
+    }
+
+    fn release_working(&mut self, path: &str) {
+        if let Some(entry) = self.entries.get_mut(path) { entry.working = false; }
+        self.entries.retain(|_, entry| entry.working || entry.project);
+    }
+
+    fn suspend_projects(&mut self) {
+        for entry in self.entries.values_mut() { entry.project = false; }
+        self.entries.retain(|_, entry| entry.working);
+        // Native blur may arrive before the WebView's background configuration.
+        // Report the uncovered foreground cohort until a newer request resumes
+        // it or explicitly disables it, including in stale configure responses.
+        self.failed_paths = self.project_requested_paths.iter().cloned().collect();
+        self.failed_paths.sort();
+    }
+
+    fn replace_owned_if(
+        &mut self,
+        path: &str,
+        matches: impl FnOnce(&W) -> bool,
+        create: impl FnOnce() -> Result<W, String>,
+    ) -> Result<bool, String> {
+        let Some(entry) = self.entries.get_mut(path) else { return Ok(false); };
+        if !(entry.working || entry.project) || !matches(&entry._watcher) { return Ok(false); }
+        // Keep owners and the old watch if creation fails. Only a successful
+        // replacement drops the old OS registration.
+        entry._watcher = create()?;
+        Ok(true)
+    }
+
+    fn configure_projects(
+        &mut self,
+        paths: Vec<String>,
+        foreground: bool,
+        available: bool,
+        revision: u64,
+        mut create: impl FnMut(&str) -> Result<W, String>,
+    ) -> ProjectWatchResult {
+        if self.project_revision.is_some_and(|current| revision <= current) {
+            return ProjectWatchResult { failed_paths: self.failed_paths.clone(), revision: self.project_revision.unwrap() };
+        }
+        self.project_revision = Some(revision);
+        self.project_requested_paths = if foreground { paths.into_iter().collect() } else { HashSet::new() };
+        let desired = if available { self.project_requested_paths.clone() } else { HashSet::new() };
+        for (path, entry) in &mut self.entries { entry.project = desired.contains(path); }
+        self.entries.retain(|_, entry| entry.working || entry.project);
+        let mut ordered: Vec<String> = desired.into_iter().collect();
+        ordered.sort();
+        self.failed_paths = if available { Vec::new() } else { self.project_requested_paths.iter().cloned().collect() };
+        for path in ordered {
+            if self.entries.contains_key(&path) { continue; }
+            match create(&path) {
+                Ok(watcher) => { self.entries.insert(path, OwnedWatch { _watcher: watcher, working: false, project: true }); }
+                Err(_) => self.failed_paths.push(path),
+            }
+        }
+        self.failed_paths.sort();
+        ProjectWatchResult { failed_paths: self.failed_paths.clone(), revision }
+    }
+}
+
+/// start/stop can reach blocking workers in a different order during a rapid
+/// pane switch. Record the intent before spawning, and discard late acquires.
+fn apply_working_watch_request<W>(
+    registry: &mut WatchRegistry<W>,
+    intents: &Mutex<WorkingWatchIntents>,
+    path: String,
+    revision: u64,
+    create: impl FnOnce(&str) -> Result<W, String>,
+) -> Result<(), String> {
+    let enabled = {
+        let intents = intents.lock().map_err(|error| error.to_string())?;
+        match intents.pending.get(&path) {
+            Some((current, enabled)) if *current == revision => *enabled,
+            _ => return Ok(()),
+        }
+    };
+    let result = if enabled { registry.acquire_working(path.clone(), create) } else {
+        registry.release_working(&path);
+        Ok(())
+    };
+    let mut intents = intents.lock().map_err(|error| error.to_string())?;
+    if intents.pending.get(&path).is_some_and(|(_, enabled)| !enabled) {
+        registry.release_working(&path);
+    }
+    intents.finish(&path, revision);
+    result
+}
 
 const WATCH_PATH_LIMIT: usize = 256;
 
@@ -3661,6 +3809,7 @@ const WATCH_PATH_LIMIT: usize = 256;
 struct WatchBatch {
     paths: HashSet<String>,
     full: bool,
+    refresh_roots: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -3681,6 +3830,16 @@ fn git_relative_path(p: &std::path::Path) -> String {
         .join("/")
 }
 
+fn watch_event_changes_files(kind: &notify::EventKind) -> bool {
+    match kind {
+        // inotify also reports OPEN for our read-only Git probes. Treating a
+        // read as a change would make status reads trigger another status read.
+        notify::EventKind::Access(notify::event::AccessKind::Close(notify::event::AccessMode::Write)) => true,
+        notify::EventKind::Access(_) => false,
+        _ => true,
+    }
+}
+
 /// Working-tree writes always affect status. Inside `.git`, only metadata that
 /// can change the visible working state is relevant; objects, logs and lock
 /// files are intentionally ignored to avoid event storms during fetches.
@@ -3691,7 +3850,9 @@ fn path_triggers_status(p: &std::path::Path) -> bool {
             continue;
         }
         let Some(first) = components.next().map(|item| item.as_os_str()) else {
-            return false;
+            // Creating/replacing the .git directory or a linked-worktree .git
+            // file changes the project's initialized state.
+            return true;
         };
         return first == "index"
             || first == "HEAD"
@@ -3705,10 +3866,29 @@ fn path_triggers_status(p: &std::path::Path) -> bool {
     true
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct WatchGitRoots {
     git_dir: std::path::PathBuf,
     common_dir: std::path::PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RepoWatchRoots {
+    repo: std::path::PathBuf,
+    git: Option<WatchGitRoots>,
+}
+
+impl RepoWatchRoots {
+    fn resolve(path: &str) -> Result<Self, String> {
+        let (repo, initialized) = project_status::probe_project_directory(path)?;
+        let git = if initialized { Some(WatchGitRoots::resolve(&repo.to_string_lossy())?) } else { None };
+        Ok(Self { repo, git })
+    }
+
+    fn pointer_changed(&self, event_path: &std::path::Path) -> bool {
+        let pointer = self.repo.join(".git");
+        event_path == pointer || (self.git.is_none() && event_path.starts_with(pointer))
+    }
 }
 
 impl WatchGitRoots {
@@ -3751,30 +3931,28 @@ impl WatchGitRoots {
     }
 }
 
-/// Start watching `path` recursively. Emits one coalesced `working-tree-changed`
-/// event for working files or status-relevant Git metadata. Idempotent — watching
-/// an already-watched repo is a no-op. The watcher lives in `WatchState` until
-/// `stop_watch` removes (and thus drops) it.
-#[tauri::command]
-pub fn start_watch(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, WatchState>,
-    path: String,
-) -> Result<(), String> {
-    let mut map = state.0.lock().map_err(|e| e.to_string())?;
-    if map.contains_key(&path) {
-        return Ok(());
-    }
-    let roots = WatchGitRoots::resolve(&path)?;
-    let repo_root = std::fs::canonicalize(&path).map_err(|e| e.to_string())?;
-    let external_watch_dirs = roots.external_watch_dirs(&repo_root);
-    let repo = path.clone();
+/// One shared watcher factory: ownership changes do not duplicate callbacks or
+/// change the existing coalesced working-tree event contract.
+fn create_repo_watcher(app: tauri::AppHandle, path: &str) -> Result<RepoWatcher, String> {
+    create_repo_watcher_at(app, path, RepoWatchRoots::resolve(path)?)
+}
+
+fn create_repo_watcher_at(app: tauri::AppHandle, path: &str, watch_roots: RepoWatchRoots) -> Result<RepoWatcher, String> {
+    let repo_root = watch_roots.repo.clone();
+    let roots = watch_roots.git.clone();
+    let external_watch_dirs = roots.as_ref().map(|roots| roots.external_watch_dirs(&repo_root)).unwrap_or_default();
+    let repo = path.to_string();
+    let watched_root = repo_root.clone();
+    let pointer_roots = watch_roots.clone();
+    let instance = Arc::new(());
+    let callback_instance = Arc::clone(&instance);
     // `notify` can deliver several events for one editor save. Coalesce them
     // before crossing the Rust/WebView boundary so idle and burst CPU stay low.
     let emit_pending = Arc::new(AtomicBool::new(false));
     let batch = Arc::new(Mutex::new(WatchBatch::default()));
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
+            if !ev.need_rescan() && !watch_event_changes_files(&ev.kind) { return; }
             let mut relevant = false;
             if let Ok(mut pending_batch) = batch.lock() {
                 if ev.need_rescan() {
@@ -3782,9 +3960,10 @@ pub fn start_watch(
                     pending_batch.full = true;
                     pending_batch.paths.clear();
                 }
-                for event_path in ev.paths.iter().filter(|p| roots.triggers_status(p)) {
+                for event_path in ev.paths.iter().filter(|p| roots.as_ref().map_or_else(|| path_triggers_status(p), |roots| roots.triggers_status(p))) {
                     relevant = true;
-                    if roots.is_metadata(event_path) || path_in_git(event_path) {
+                    if pointer_roots.pointer_changed(event_path) { pending_batch.refresh_roots = true; }
+                    if roots.as_ref().is_some_and(|roots| roots.is_metadata(event_path)) || path_in_git(event_path) {
                         pending_batch.full = true;
                         pending_batch.paths.clear();
                         continue;
@@ -3799,7 +3978,7 @@ pub fn start_watch(
                     if pending_batch.full {
                         continue;
                     }
-                    match event_path.strip_prefix(std::path::Path::new(&repo)) {
+                    match event_path.strip_prefix(&watched_root) {
                         Ok(relative) if !relative.as_os_str().is_empty() => {
                             pending_batch.paths.insert(git_relative_path(relative));
                             if pending_batch.paths.len() > WATCH_PATH_LIMIT {
@@ -3819,20 +3998,24 @@ pub fn start_watch(
                 let repo = repo.clone();
                 let pending = Arc::clone(&emit_pending);
                 let batch = Arc::clone(&batch);
+                let instance = Arc::clone(&callback_instance);
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(120)).await;
-                    let (paths, full) = batch
+                    let (paths, full, refresh_roots) = batch
                         .lock()
                         .map(|mut current| {
                             let paths = current.paths.drain().collect();
                             let full = current.full;
+                            let refresh_roots = current.refresh_roots;
                             current.full = false;
-                            (paths, full)
+                            current.refresh_roots = false;
+                            (paths, full, refresh_roots)
                         })
-                        .unwrap_or_else(|_| (Vec::new(), true));
+                        .unwrap_or_else(|_| (Vec::new(), true, false));
                     // Clear before emitting: an event arriving during the status
                     // refresh can schedule exactly one later reconciliation.
                     pending.store(false, Ordering::Release);
+                    if refresh_roots { refresh_repo_watch(&app, &repo, instance); }
                     let _ = app.emit(
                         "working-tree-changed",
                         WorkingTreeChanged { path: repo, paths, full },
@@ -3843,21 +4026,115 @@ pub fn start_watch(
     })
     .map_err(|e| format!("无法创建文件监听：{e}"))?;
     watcher
-        .watch(std::path::Path::new(&path), RecursiveMode::Recursive)
+        .watch(&repo_root, RecursiveMode::Recursive)
         .map_err(|e| format!("无法监听目录：{e}"))?;
     for directory in external_watch_dirs {
         watcher.watch(&directory, RecursiveMode::Recursive)
             .map_err(|e| format!("无法监听 Git 暂存区：{e}"))?;
     }
-    map.insert(path, watcher);
-    Ok(())
+    Ok(RepoWatcher { _watcher: watcher, roots: watch_roots, instance })
 }
 
-/// Stop watching `path` (drops the watcher, releasing the OS watch).
+/// A .git pointer can turn a previously plain folder into a linked worktree, or
+/// move its external git-dir. Refresh only that owned watch, never on index/refs
+/// writes; old queued callbacks cannot replace a newer watcher instance.
+fn refresh_repo_watch(app: &tauri::AppHandle, path: &str, instance: Arc<()>) {
+    use tauri::Manager;
+    let state = app.state::<WatchState>();
+    let registry = Arc::clone(&state.0);
+    let intents = Arc::clone(&state.1);
+    let app = app.clone();
+    let path = path.to_string();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(mut registry) = registry.lock() else { return; };
+        if !project_window_foreground(&app) { registry.suspend_projects(); }
+        // A stop request may be waiting behind this worker. Respect its latest
+        // intent before doing any Git or OS registration work.
+        if intents.lock().ok().is_some_and(|intents| intents.pending.get(&path).is_some_and(|(_, enabled)| !enabled)) {
+            registry.release_working(&path);
+        }
+        let Some(entry) = registry.entries.get(&path) else { return; };
+        if !Arc::ptr_eq(&entry._watcher.instance, &instance) { return; }
+        let Ok(roots) = RepoWatchRoots::resolve(&path) else { return; };
+        if roots == entry._watcher.roots { return; }
+        let _ = registry.replace_owned_if(&path,
+            |watcher| Arc::ptr_eq(&watcher.instance, &instance),
+            || create_repo_watcher_at(app.clone(), &path, roots));
+        if !project_window_foreground(&app) { registry.suspend_projects(); }
+        if intents.lock().ok().is_some_and(|intents| intents.pending.get(&path).is_some_and(|(_, enabled)| !enabled)) {
+            registry.release_working(&path);
+        }
+    });
+}
+
+/// The working pane owns a watch independently of sidebar project ownership.
 #[tauri::command]
-pub fn stop_watch(state: tauri::State<'_, WatchState>, path: String) -> Result<(), String> {
-    state.0.lock().map_err(|e| e.to_string())?.remove(&path);
-    Ok(())
+pub async fn start_watch(app: tauri::AppHandle, state: tauri::State<'_, WatchState>, path: String) -> Result<(), String> {
+    let registry = Arc::clone(&state.0);
+    let intents = Arc::clone(&state.1);
+    let revision = intents.lock().map_err(|error| error.to_string())?.request(&path, true);
+    run_blocking(move || {
+        let mut registry = registry.lock().map_err(|error| error.to_string())?;
+        apply_working_watch_request(&mut registry, &intents, path, revision, |path| create_repo_watcher(app, path))
+    }).await
+}
+
+#[tauri::command]
+pub async fn stop_watch(state: tauri::State<'_, WatchState>, path: String) -> Result<(), String> {
+    let registry = Arc::clone(&state.0);
+    let intents = Arc::clone(&state.1);
+    let revision = intents.lock().map_err(|error| error.to_string())?.request(&path, false);
+    run_blocking(move || {
+        let mut registry = registry.lock().map_err(|error| error.to_string())?;
+        apply_working_watch_request(&mut registry, &intents, path, revision, |_| Err("监听请求已结束".into()))
+    }).await
+}
+
+fn project_window_foreground(app: &tauri::AppHandle) -> bool {
+    use tauri::Manager;
+    app.get_webview_window("main").is_some_and(|window| {
+        window.is_focused().unwrap_or(false) && window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true)
+    })
+}
+
+/// Revision and owner mutations share one mutex. A late older foreground IPC
+/// cannot reopen watches after a newer background configuration.
+#[tauri::command]
+pub async fn project_watch_configure(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, WatchState>,
+    paths: Vec<String>,
+    foreground: bool,
+    revision: u64,
+) -> Result<ProjectWatchResult, String> {
+    let registry = Arc::clone(&state.0);
+    run_blocking(move || {
+        let mut registry = registry.lock().map_err(|error| error.to_string())?;
+        let available = project_window_foreground(&app);
+        let mut result = registry.configure_projects(paths, foreground, available, revision, |path| {
+            if !project_window_foreground(&app) { return Err("项目监听已暂停".into()); }
+            create_repo_watcher(app.clone(), path)
+        });
+        // Focus can change while OS watchers are being installed. Native window
+        // state is authoritative even when the WebView has already suspended.
+        if !project_window_foreground(&app) { registry.suspend_projects(); }
+        result.failed_paths = registry.failed_paths.clone();
+        Ok(result)
+    }).await
+}
+
+/// Called by native window events, without waiting for a suspended WebView.
+pub fn suspend_project_watches(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let registry = Arc::clone(&app.state::<WatchState>().0);
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Ok(mut registry) = registry.lock() {
+            // An older blur worker may acquire this lock after focus and a new
+            // configuration. It must not release the new foreground owners.
+            if !project_window_foreground(&app) { registry.suspend_projects(); }
+        }
+    });
 }
 
 #[cfg(test)]
