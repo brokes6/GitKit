@@ -3,24 +3,27 @@ import type { Project } from "./App";
 import type { CheckResult } from "./dailyCheck";
 import { loadProjectActivity } from "./git";
 import { createOverviewScanner } from "./overviewScanner";
-import { createActivityCache, createActivityWindow } from "./projectActivity";
-import type { ActivityEntry, ActivityRequest, ProjectActivitySummary } from "./projectActivity";
+import { activityAuthorEmails, activityEntryForScope, createActivityCache, createActivityWindow } from "./projectActivity";
+import type { ActivityEntry, ActivityRequest, ProjectActivitySummary, StoredActivityEntry } from "./projectActivity";
 
 interface ScanProject { id: string; path: string }
-interface StoredEntry { path: string; windowKey: string; value: ActivityEntry }
 const IDLE_ENTRY: ActivityEntry = { summary: null, error: null, checking: false };
 const LOADING_ENTRY: ActivityEntry = { ...IDLE_ENTRY, checking: true };
 
-export function useProjectActivity(projects: Project[], active: boolean, revision: number, remoteResult: CheckResult | null) {
-  const [stored, setStored] = useState<Record<string, StoredEntry>>({});
+export function useProjectActivity(projects: Project[], identities: readonly { email: string }[], active: boolean, revision: number, remoteResult: CheckResult | null) {
+  const [stored, setStored] = useState<Record<string, StoredActivityEntry>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [refreshRevision, setRefreshRevision] = useState(0);
   const [, setCalendarRevision] = useState(0);
   const calculatedWindow = createActivityWindow();
   const window = useMemo(() => calculatedWindow, [calculatedWindow.key]);
   const cohortKey = JSON.stringify(projects.map(({ id, path }) => ({ id, path })));
-  const requestKey = `${window.key}:${revision}:${remoteResult?.id ?? 0}:${remoteResult?.completedAt ?? 0}:${refreshRevision}`;
-  const requestRef = useRef<ActivityRequest>({ key: requestKey, window });
+  const identityKey = JSON.stringify(activityAuthorEmails(identities));
+  const authorEmails = useMemo<string[]>(() => JSON.parse(identityKey), [identityKey]);
+  const hasIdentities = authorEmails.length > 0;
+  const scopeKey = `${window.key}:${identityKey}`;
+  const requestKey = `${scopeKey}:${revision}:${remoteResult?.id ?? 0}:${remoteResult?.completedAt ?? 0}:${refreshRevision}`;
+  const requestRef = useRef<ActivityRequest>({ key: requestKey, window, authorEmails });
   const cacheRef = useRef<ReturnType<typeof createActivityCache> | null>(null);
   if (!cacheRef.current) cacheRef.current = createActivityCache(loadProjectActivity);
   const cache = cacheRef.current;
@@ -44,24 +47,23 @@ export function useProjectActivity(projects: Project[], active: boolean, revisio
     let disposed = false;
     const cohort: ScanProject[] = JSON.parse(cohortKey);
     cache.retain(cohort.map((project) => project.path));
-    requestRef.current = { key: requestKey, window };
+    requestRef.current = { key: requestKey, window, authorEmails };
     const pendingPaths = new Set<string>();
-    const pending = active ? cohort.filter((project) => {
+    const pending = active && hasIdentities ? cohort.filter((project) => {
       if (cache.get(project.path, requestKey) || pendingPaths.has(project.path)) return false;
       pendingPaths.add(project.path);
       return true;
     }) : [];
     setRefreshing(pending.length > 0);
     setStored((previous) => {
-      const next: Record<string, StoredEntry> = {};
+      const next: Record<string, StoredActivityEntry> = {};
       for (const project of cohort) {
-        const prior = previous[project.id];
-        const old = prior?.path === project.path && prior.windowKey === window.key ? prior.value : IDLE_ENTRY;
+        const old = activityEntryForScope(previous[project.id], project.path, scopeKey) ?? IDLE_ENTRY;
         const cached = cache.get(project.path, requestKey);
-        next[project.id] = { path: project.path, windowKey: window.key, value: {
+        next[project.id] = { path: project.path, scopeKey, value: {
           summary: cached?.summary ?? old.summary,
           error: cached ? cached.error : old.error,
-          checking: active && !cached,
+          checking: active && hasIdentities && !cached,
         } };
       }
       return next;
@@ -75,7 +77,7 @@ export function useProjectActivity(projects: Project[], active: boolean, revisio
           // A shared checkout can appear more than once in the project list.
           for (const member of cohort) {
             if (member.path !== project.path || next[member.id]?.path !== member.path) continue;
-            next[member.id] = { path: member.path, windowKey: window.key, value: {
+            next[member.id] = { path: member.path, scopeKey, value: {
               summary: summary ?? next[member.id].value.summary, error, checking: false,
             } };
           }
@@ -85,12 +87,11 @@ export function useProjectActivity(projects: Project[], active: boolean, revisio
       onComplete: () => { if (!disposed) setRefreshing(false); },
     });
     return () => { disposed = true; scan.cancel(); };
-  }, [active, cohortKey, requestKey, window, cache, scanner]);
+  }, [active, cohortKey, requestKey, scopeKey, window, authorEmails, hasIdentities, cache, scanner]);
 
   const entries = useMemo(() => Object.fromEntries((JSON.parse(cohortKey) as ScanProject[]).map((project) => {
-    const saved = stored[project.id];
-    return [project.id, saved?.path === project.path && saved.windowKey === window.key
-      ? saved.value : active ? LOADING_ENTRY : IDLE_ENTRY];
-  })), [cohortKey, stored, active, window.key]);
-  return { entries, window, refreshing, refresh };
+    return [project.id, activityEntryForScope(stored[project.id], project.path, scopeKey)
+      ?? (active && hasIdentities ? LOADING_ENTRY : IDLE_ENTRY)];
+  })), [cohortKey, stored, active, hasIdentities, scopeKey]);
+  return { entries, window, refreshing, refresh, hasIdentities };
 }

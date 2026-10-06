@@ -95,7 +95,7 @@ fn activity_log(path: &str, from_timestamp: i64, head: Option<&str>) -> Result<S
     let mut filter = since.as_deref();
     loop {
         let mut args = vec![
-            "--no-optional-locks", "log", "--format=%H%x09%ct", "--no-patch",
+            "--no-optional-locks", "log", "--format=%H%x00%ct%x00%ae", "-z", "--no-patch",
             "--no-color", "--no-decorate", "--no-show-signature",
             "--branches", "--remotes", "--tags",
         ];
@@ -118,26 +118,35 @@ fn activity_log(path: &str, from_timestamp: i64, head: Option<&str>) -> Result<S
     }
 }
 
-fn parse_activity(output: &str, from_timestamp: i64, to_timestamp: i64) -> Result<Vec<ProjectActivityCommit>, String> {
+fn parse_activity(output: &str, from_timestamp: i64, to_timestamp: i64, author_emails: &HashSet<String>) -> Result<Vec<ProjectActivityCommit>, String> {
     let mut commits = Vec::new();
     let mut seen = HashSet::new();
-    for line in output.lines() {
-        let (oid, date) = line.split_once('\t').ok_or("无法读取提交活动")?;
+    let mut fields = output.split_terminator('\0');
+    while let Some(oid) = fields.next() {
+        let date = fields.next().ok_or("无法读取提交活动")?;
+        let author_email = fields.next().ok_or("无法读取提交活动")?;
         if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("无法读取提交活动".into());
         }
         let committed_at = date.parse::<i64>().map_err(|_| "无法读取提交活动")?;
-        if committed_at >= from_timestamp && committed_at < to_timestamp && seen.insert(oid) {
+        if committed_at >= from_timestamp && committed_at < to_timestamp
+            && author_emails.contains(&author_email.trim().to_ascii_lowercase()) && seen.insert(oid) {
             commits.push(ProjectActivityCommit { oid: oid.to_string(), committed_at });
         }
     }
     Ok(commits)
 }
 
-pub(super) fn project_activity_inner(path: &str, from_timestamp: i64, to_timestamp: i64) -> Result<ProjectActivitySummary, String> {
+pub(super) fn project_activity_inner(path: &str, from_timestamp: i64, to_timestamp: i64, author_emails: &[String]) -> Result<ProjectActivitySummary, String> {
     if from_timestamp >= to_timestamp { return Err("提交活动时间范围无效".into()); }
+    let author_emails: HashSet<_> = author_emails.iter().map(|email| email.trim().to_ascii_lowercase())
+        .filter(|email| !email.is_empty()).collect();
     let commits = if let Some(repo) = activity_repository(path)? {
-        parse_activity(&activity_log(&repo.path, from_timestamp, repo.head.as_deref())?, from_timestamp, to_timestamp)?
+        if author_emails.is_empty() {
+            Vec::new()
+        } else {
+            parse_activity(&activity_log(&repo.path, from_timestamp, repo.head.as_deref())?, from_timestamp, to_timestamp, &author_emails)?
+        }
     } else {
         Vec::new()
     };
@@ -146,12 +155,14 @@ pub(super) fn project_activity_inner(path: &str, from_timestamp: i64, to_timesta
     Ok(ProjectActivitySummary { commits, checked_at })
 }
 
-/// All authors, by committer timestamp, over local heads/remotes/tags and HEAD.
+/// Configured author emails, by committer timestamp, over local heads/remotes/tags and HEAD.
+/// Original author emails match exactly after trimming and ignoring ASCII case;
+/// committer identities, author names and mailmap aliases do not confer ownership.
 /// The start is inclusive and the end exclusive. OIDs are full and unique per
 /// repository; callers can deduplicate clones and worktrees across projects.
 #[tauri::command]
-pub async fn git_project_activity(path: String, from_timestamp: i64, to_timestamp: i64) -> Result<ProjectActivitySummary, String> {
-    run_blocking(move || project_activity_inner(&path, from_timestamp, to_timestamp)).await
+pub async fn git_project_activity(path: String, from_timestamp: i64, to_timestamp: i64, author_emails: Vec<String>) -> Result<ProjectActivitySummary, String> {
+    run_blocking(move || project_activity_inner(&path, from_timestamp, to_timestamp, &author_emails)).await
 }
 
 #[cfg(test)]

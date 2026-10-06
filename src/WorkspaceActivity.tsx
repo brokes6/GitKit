@@ -14,8 +14,8 @@ interface WorkspaceActivityProps {
 }
 
 export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActivityProps) {
-  const { entries, window } = activity;
-  const refreshing = activity.refreshing || projects.some((project) => entries[project.id]?.checking);
+  const { entries, window, hasIdentities } = activity;
+  const refreshing = hasIdentities && (activity.refreshing || projects.some((project) => entries[project.id]?.checking));
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   // Retain the last day's content while its detail panel closes.
   const [detailKey, setDetailKey] = useState<string | null>(null);
@@ -37,8 +37,8 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
     const value = entry?.error === null ? entry.summary?.checkedAt : undefined;
     return value ? Math.min(oldest ?? value, value) : oldest;
   }, null);
-  const incomplete = refreshing || failed.length > 0 || loadedCount < projects.length;
-  const available = loadedCount > 0;
+  const incomplete = hasIdentities && (refreshing || failed.length > 0 || loadedCount < projects.length);
+  const available = !hasIdentities || loadedCount > 0;
   const loading = refreshing && !available;
   const selectedDay = data.days.find((day) => day.key === selectedKey);
   const detailDay = selectedDay ?? data.days.find((day) => day.key === detailKey);
@@ -84,7 +84,7 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
         {refreshing && <span className="gk-activity-progress"><LoaderCircle size={12} className="gk-overview-spin" aria-hidden="true" />{tx("更新中")}</span>}
       </div>
     </div>
-    <div className="gk-activity-scope"><span>{tx("所有项目与作者 · 按提交者日期 · 包含未推送提交")}</span>
+    <div className="gk-activity-scope"><span>{tx("所有项目 · 仅设置中的提交者身份 · 按提交者日期 · 包含未推送提交")}</span>
       {checkedAt && <span>{tf("活动读取于 {0}", new Intl.DateTimeFormat(locale, {
         month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
       }).format(checkedAt))}</span>}
@@ -117,7 +117,7 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
     {(loading || failed.length > 0 || (!refreshing && available && data.totalCommits === 0)) && <div className="gk-activity-status" role="status">
       {loading ? <span>{tf("正在读取 {0} 个项目的提交活动", projects.length)}</span>
         : failed.length > 0 ? <><CircleAlert size={13} aria-hidden="true" /><span>{tf("{0} 个项目读取失败，统计尚不完整", failed.length)}</span></>
-          : <span>{tx("最近 12 个月没有可见提交")}</span>}
+          : <span>{hasIdentities ? tx("最近 12 个月没有匹配已配置身份的提交") : tx("请先在设置中配置提交者身份")}</span>}
       {failed.length > 0 && <button className="gk-activity-retry" disabled={refreshing} onClick={activity.refresh}>
         <RefreshCw size={12} aria-hidden="true" />{tx("重新读取")}</button>}
     </div>}

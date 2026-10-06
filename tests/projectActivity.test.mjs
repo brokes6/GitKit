@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  activityDateKey, activityIntensity, activityKeyboardIndex, aggregateProjectActivity,
+  activityAuthorEmails, activityDateKey, activityEntryForScope, activityIntensity, activityKeyboardIndex, aggregateProjectActivity,
   createActivityCache, createActivityWindow,
 } from "../src/projectActivity.ts";
 import { createOverviewScanner } from "../src/overviewScanner.ts";
@@ -12,12 +12,55 @@ const commit = (oid, date) => ({ oid, committedAt: Math.floor(date.getTime() / 1
 const summary = (commits = []) => ({ commits, checkedAt: 1234 });
 const entry = (commits = [], extra = {}) => ({ summary: summary(commits), error: null, checking: false, ...extra });
 const window = createActivityWindow(new Date(2026, 9, 5, 12));
+const authorEmails = ["own@example.com"];
+const identityScope = (identities) => JSON.stringify(activityAuthorEmails(identities));
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 function inTimezone(zone, run) {
   const previous = process.env.TZ;
   process.env.TZ = zone;
   try { return run(); } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
 }
+
+test("configured identity emails normalize whitespace, ASCII case, duplicates, and empty values", () => {
+  assert.deepEqual(activityAuthorEmails([
+    { email: "  ZED@Example.com\t" }, { email: "own@example.com" }, { email: " OWN@EXAMPLE.COM " },
+    { email: "" }, { email: " \n\t " }, { email: "ÖWN@EXAMPLE.COM" },
+  ]), ["own@example.com", "zed@example.com", "Öwn@example.com"]);
+  assert.deepEqual(activityAuthorEmails([]), []);
+});
+
+test("activity scope includes every configured identity and ignores default selection, names, and order", () => {
+  const identities = [
+    { id: "personal", name: "Personal", email: "own@example.com", isDefault: true },
+    { id: "work", name: "Work", email: "work@example.com", isDefault: false },
+    { id: "legacy", name: "Old name", email: "legacy@example.com", isDefault: false },
+  ];
+  assert.deepEqual(activityAuthorEmails(identities), ["legacy@example.com", "own@example.com", "work@example.com"]);
+  const renamedAndReordered = identities.toReversed().map((identity) => ({
+    ...identity, name: `${identity.name} renamed`, isDefault: identity.id === "work",
+  }));
+  assert.equal(identityScope(renamedAndReordered), identityScope(identities));
+});
+
+test("adding or removing a configured email changes activity scope", () => {
+  const identities = [{ email: "own@example.com" }, { email: "work@example.com" }];
+  assert.notEqual(identityScope(identities.slice(0, 1)), identityScope(identities));
+  assert.notEqual(identityScope([...identities, { email: "legacy@example.com" }]), identityScope(identities));
+  assert.notEqual(identityScope([]), identityScope(identities));
+});
+
+test("an activity snapshot contributes only to its current repository and identity scope", () => {
+  const snapshot = entry([commit("owned", new Date(2026, 9, 4, 12))]);
+  const scopeKey = identityScope([{ email: "own@example.com" }]);
+  const stored = { path: "/repos/a", scopeKey, value: snapshot };
+  assert.equal(activityEntryForScope(stored, "/repos/a", scopeKey), snapshot);
+  assert.equal(activityEntryForScope(stored, "/repos/moved", scopeKey), null);
+  assert.equal(activityEntryForScope(undefined, "/repos/a", scopeKey), null);
+  const changedScope = identityScope([{ email: "work@example.com" }]);
+  const current = activityEntryForScope(stored, "/repos/a", changedScope);
+  assert.equal(current, null);
+  assert.equal(aggregateProjectActivity([project("a")], { a: current ?? entry() }, window).totalCommits, 0);
+});
 
 test("rolling calendar includes today and has inclusive local start, exclusive next midnight", () => {
   const range = createActivityWindow(new Date(2026, 9, 5, 22));
@@ -114,15 +157,15 @@ test("session cache reuses matching native reads but revisions trigger new data"
   let count = 0;
   let release;
   const cache = createActivityCache(async () => { count++; await new Promise((resolve) => { release = resolve; }); return summary(); });
-  const first = cache.read("/repo", { key: "first", window });
-  const duplicate = cache.read("/repo", { key: "first", window });
+  const first = cache.read("/repo", { key: "first", window, authorEmails });
+  const duplicate = cache.read("/repo", { key: "first", window, authorEmails });
   assert.equal(first, duplicate);
   await turn();
   release();
   await first;
-  await cache.read("/repo", { key: "first", window });
+  await cache.read("/repo", { key: "first", window, authorEmails });
   assert.equal(count, 1);
-  const next = cache.read("/repo", { key: "new-revision", window });
+  const next = cache.read("/repo", { key: "new-revision", window, authorEmails });
   await turn();
   release();
   await next;
@@ -132,19 +175,19 @@ test("session cache reuses matching native reads but revisions trigger new data"
 test("errors remain explicit in cache and can be retried with a fresh generation", async () => {
   let calls = 0;
   const cache = createActivityCache(async () => { if (++calls === 1) throw new Error("Unavailable"); return summary(); });
-  await assert.rejects(cache.read("/repo", { key: "first", window }), /Unavailable/);
+  await assert.rejects(cache.read("/repo", { key: "first", window, authorEmails }), /Unavailable/);
   assert.equal(cache.get("/repo", "first").error, "Unavailable");
-  await assert.rejects(cache.read("/repo", { key: "first", window }), /Unavailable/);
+  await assert.rejects(cache.read("/repo", { key: "first", window, authorEmails }), /Unavailable/);
   assert.equal(calls, 1);
-  assert.deepEqual(await cache.read("/repo", { key: "retry", window }), summary());
+  assert.deepEqual(await cache.read("/repo", { key: "retry", window, authorEmails }), summary());
   assert.equal(cache.get("/repo", "retry").error, null);
 });
 
 test("an obsolete completion cannot overwrite a newer cached generation", async () => {
   const releases = [];
   const cache = createActivityCache(() => new Promise((resolve) => releases.push(resolve)));
-  const old = cache.read("/repo", { key: "old", window });
-  const next = cache.read("/repo", { key: "next", window });
+  const old = cache.read("/repo", { key: "old", window, authorEmails });
+  const next = cache.read("/repo", { key: "next", window, authorEmails });
   await turn();
   releases[1](summary([{ oid: "new", committedAt: window.fromTimestamp }]));
   await next;
@@ -153,11 +196,54 @@ test("an obsolete completion cannot overwrite a newer cached generation", async 
   assert.equal(cache.get("/repo", "next").summary.commits[0].oid, "new");
 });
 
+test("identity scope changes request fresh native data and pass the complete configured email list", async () => {
+  const calls = [];
+  const cache = createActivityCache(async (path, fromTimestamp, toTimestamp, emails) => {
+    calls.push({ path, fromTimestamp, toTimestamp, emails });
+    return summary([{ oid: emails.join("+"), committedAt: fromTimestamp }]);
+  });
+  const firstEmails = activityAuthorEmails([{ email: "own@example.com" }]);
+  const nextEmails = activityAuthorEmails([{ email: "work@example.com" }, { email: "own@example.com" }]);
+  const first = { key: `${window.key}:${JSON.stringify(firstEmails)}`, window, authorEmails: firstEmails };
+  const next = { key: `${window.key}:${JSON.stringify(nextEmails)}`, window, authorEmails: nextEmails };
+  await cache.read("/repo", first);
+  await cache.read("/repo", first);
+  const result = await cache.read("/repo", next);
+  assert.deepEqual(calls, [
+    { path: "/repo", fromTimestamp: window.fromTimestamp, toTimestamp: window.toTimestamp, emails: firstEmails },
+    { path: "/repo", fromTimestamp: window.fromTimestamp, toTimestamp: window.toTimestamp, emails: nextEmails },
+  ]);
+  assert.equal(result.commits[0].oid, "own@example.com+work@example.com");
+  assert.equal(cache.get("/repo", first.key), undefined);
+  assert.equal(cache.get("/repo", next.key).summary, result);
+});
+
+test("a late read for an old identity scope cannot overwrite the new scope's snapshot", async () => {
+  const releases = [];
+  const cache = createActivityCache((path, fromTimestamp, toTimestamp, emails) => new Promise((resolve) => {
+    releases.push({ emails, resolve });
+  }));
+  const oldEmails = ["own@example.com"];
+  const newEmails = ["work@example.com"];
+  const oldKey = `${window.key}:${JSON.stringify(oldEmails)}`;
+  const newKey = `${window.key}:${JSON.stringify(newEmails)}`;
+  const old = cache.read("/repo", { key: oldKey, window, authorEmails: oldEmails });
+  const next = cache.read("/repo", { key: newKey, window, authorEmails: newEmails });
+  await turn();
+  assert.deepEqual(releases.map((read) => read.emails), [oldEmails, newEmails]);
+  releases[1].resolve(summary([{ oid: "work-commit", committedAt: window.fromTimestamp }]));
+  await next;
+  releases[0].resolve(summary([{ oid: "personal-commit", committedAt: window.fromTimestamp }]));
+  await old;
+  assert.equal(cache.get("/repo", oldKey), undefined);
+  assert.equal(cache.get("/repo", newKey).summary.commits[0].oid, "work-commit");
+});
+
 test("removed project paths are not retained by a late successful read", async () => {
   let release;
   const cache = createActivityCache(() => new Promise((resolve) => { release = resolve; }));
   cache.retain(["/repo"]);
-  const read = cache.read("/repo", { key: "one", window });
+  const read = cache.read("/repo", { key: "one", window, authorEmails });
   await turn();
   cache.retain([]);
   release(summary());
@@ -169,7 +255,7 @@ test("cancelled activity scans cache completed calls and never publish obsolete 
   const releases = [];
   let calls = 0;
   const cache = createActivityCache(() => { calls++; return new Promise((resolve) => releases.push(resolve)); });
-  const request = { key: "one", window };
+  const request = { key: "one", window, authorEmails };
   const scanner = createOverviewScanner((path) => cache.read(path, request));
   const oldPublished = [];
   const old = scanner.start([project("a"), project("b"), project("c"), project("never")], {
@@ -192,10 +278,11 @@ test("cancelled activity scans cache completed calls and never publish obsolete 
 
 const previousWindow = globalThis.window;
 test.after(() => { if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow; });
-test("native API wrapper preserves epoch seconds and the complete commit payload", async () => {
+test("native API wrapper preserves epoch seconds, identity emails, and the complete commit payload", async () => {
+  const configuredEmails = ["own@example.com", "work@example.com"];
   globalThis.window = { __TAURI_INTERNALS__: { invoke: async (command, args) => {
-    assert.deepEqual([command, args], ["git_project_activity", { path: "/repo", fromTimestamp: window.fromTimestamp, toTimestamp: window.toTimestamp }]);
+    assert.deepEqual([command, args], ["git_project_activity", { path: "/repo", fromTimestamp: window.fromTimestamp, toTimestamp: window.toTimestamp, authorEmails: configuredEmails }]);
     return summary([{ oid: "full-object-id", committedAt: window.fromTimestamp }]);
   } } };
-  assert.deepEqual(await loadProjectActivity("/repo", window.fromTimestamp, window.toTimestamp), summary([{ oid: "full-object-id", committedAt: window.fromTimestamp }]));
+  assert.deepEqual(await loadProjectActivity("/repo", window.fromTimestamp, window.toTimestamp, configuredEmails), summary([{ oid: "full-object-id", committedAt: window.fromTimestamp }]));
 });

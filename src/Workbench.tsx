@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   ArrowDown, ArrowUp, Check, CheckCheck, ChevronRight, CircleAlert, CloudDownload,
@@ -38,16 +38,19 @@ export function WorkbenchActionBar({ theme, total, attention, reading, refreshin
   return <div className="gk-workbench-toolbar" style={{
     "--gko-text": theme.text, "--gko-secondary": theme.textSec, "--gko-border": theme.border,
     "--gko-accent": theme.accentFg, "--gko-accent-bg": theme.accentBg,
+    "--gk-action-accent": theme.accentFg, "--gk-action-active-bg": theme.accentBg,
   } as CSSProperties}>
     <h1 className="gk-workbench-title"><ToolbarText>{tx("工作台")}</ToolbarText></h1>
     <span className="gk-workbench-summary" title={summary}>{summary}</span>
     <div className="gk-workbench-actions" role="group" aria-label={tx("工作台操作")}>
-      <button className="gk-overview-button gk-shell-button" onClick={onRefresh} disabled={refreshing || !total}
+      <button className="gk-overview-button gk-shell-button gk-git-action" onClick={onRefresh} disabled={refreshing || !total}
+        data-running={refreshing || undefined} aria-busy={refreshing || undefined}
         title={tx("刷新所有项目的本地状态和提交活动")} aria-label={tx("刷新状态")}>
         <RefreshCw size={14} className={refreshing ? "gk-overview-spin" : undefined} aria-hidden="true" />
         <span className="gk-workbench-action-label"><ToolbarText order={1}>{refreshing ? tx("正在刷新") : tx("刷新状态")}</ToolbarText></span>
       </button>
-      <button className="gk-overview-button gk-overview-primary" onClick={onCheckRemote} disabled={remoteBusy || remoteDisabled || !total}
+      <button className="gk-overview-button gk-overview-primary gk-git-action" onClick={onCheckRemote} disabled={remoteBusy || remoteDisabled || !total}
+        data-running={remoteBusy || undefined} aria-busy={remoteBusy || undefined}
         title={tx("检查所有项目的远程更新，不受列表筛选影响")} aria-label={tx("检查远程更新")}>
         {remoteBusy ? <LoaderCircle size={14} className="gk-overview-spin" aria-hidden="true" /> : <CloudDownload size={14} aria-hidden="true" />}
         <span className="gk-workbench-action-label"><ToolbarText order={2}>{remoteBusy ? tx("正在检查远程") : tx("检查远程更新")}</ToolbarText></span>
@@ -91,6 +94,44 @@ function operationLabel(operation: ProjectOverviewSummary["operation"]): string 
     default: return tx("操作");
   }
 }
+
+const OnboardingDotField = memo(function OnboardingDotField() {
+  const fieldRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const field = fieldRef.current;
+    if (!field) return;
+    const dots = Array.from(field.querySelectorAll<HTMLElement>(".gk-onboarding-dot-highlight"));
+    let columns = 1, rows = 1;
+    const relocate = (dot: HTMLElement) => {
+      dot.style.setProperty("--gk-dot-column", String(Math.floor(Math.random() * columns)));
+      dot.style.setProperty("--gk-dot-row", String(Math.floor(Math.random() * rows)));
+    };
+    const resize = () => {
+      columns = Math.max(1, Math.ceil((field.clientWidth - 12) / 24));
+      rows = Math.max(1, Math.ceil((field.clientHeight - 12) / 24));
+      dots.forEach(relocate);
+    };
+    const nextPoint = (event: AnimationEvent) => {
+      if (event.target instanceof HTMLElement && event.target.classList.contains("gk-onboarding-dot-highlight")) relocate(event.target);
+    };
+    const updateVisibility = () => { field.dataset.paused = String(document.hidden); };
+    const observer = new ResizeObserver(resize);
+    observer.observe(field);
+    resize();
+    updateVisibility();
+    field.addEventListener("animationiteration", nextPoint);
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => {
+      observer.disconnect();
+      field.removeEventListener("animationiteration", nextPoint);
+      document.removeEventListener("visibilitychange", updateVisibility);
+    };
+  }, []);
+  return <div ref={fieldRef} className="gk-onboarding-dot-field" aria-hidden="true">
+    {Array.from({ length: 6 }, (_, index) => <span key={index} className="gk-onboarding-dot-highlight"
+      style={{ animationDuration: `${5.4 + index * 0.7}s`, animationDelay: `${-index * 1.1}s` }} />)}
+  </div>;
+});
 
 function stateTitle(state: OverviewState, entry: OverviewEntry | undefined): string {
   const summary = entry?.summary;
@@ -244,7 +285,7 @@ export function ProjectOverview({ theme, projects, entries, refreshing, remoteBu
     "--gko-text": theme.text, "--gko-secondary": theme.textSec, "--gko-muted": theme.textMuted,
     "--gko-border": theme.border, "--gko-hover": theme.rowHover, "--gko-input": theme.inputBg,
     "--gko-input-border": theme.inputBorder, "--gko-accent": theme.accentFg, "--gko-accent-bg": theme.accentBg,
-    "--gko-panel": theme.bgPanel, "--gko-surface": theme.bg,
+    "--gko-panel": theme.bgPanel, "--gko-surface": theme.bg, "--gko-accent2": theme.accent2Fg,
     "--gko-danger": theme.isDark ? theme.red : `color-mix(in srgb, ${theme.red} 88%, ${theme.text})`,
     "--gko-warning": theme.isDark ? theme.amber : `color-mix(in srgb, ${theme.amber} 75%, ${theme.text})`,
     "--gk-shell-hover": theme.rowHover,
@@ -274,9 +315,18 @@ export function ProjectOverview({ theme, projects, entries, refreshing, remoteBu
           </div>
         </div>
       </>}
-      <div className="gk-overview-content" aria-busy={refreshing}>
+      <div className={`gk-overview-content${projects.length === 0 ? " is-onboarding" : ""}`} aria-busy={refreshing}>
         {projects.length === 0 ? <div className="gk-overview-empty gk-overview-onboarding">
-          <FolderGit2 size={28} strokeWidth={1.4} aria-hidden="true" />
+          <OnboardingDotField />
+          <div className="gk-onboarding-art" aria-hidden="true">
+            <svg viewBox="0 0 240 148" fill="none" strokeLinecap="round" strokeLinejoin="round">
+              <path className="gk-onboarding-folder" d="M82 46H105L114 56H155A8 8 0 0 1 163 64V112A8 8 0 0 1 155 120H82A8 8 0 0 1 74 112V54A8 8 0 0 1 82 46Z" />
+              <path className="gk-onboarding-link" d="M104 104V74M104 94C104 85 139 96 139 76V72" />
+              <circle className="gk-onboarding-point" cx="104" cy="104" r="4" />
+              <circle className="gk-onboarding-point" cx="104" cy="70" r="4" />
+              <circle className="gk-onboarding-point" cx="139" cy="68" r="4" />
+            </svg>
+          </div>
           <h2>{tx("从一个仓库开始")}</h2><p>{tx("添加项目后，在这里查看更改、未完成操作和远程更新。")}</p>
           <div className="gk-overview-actions"><button className="gk-overview-button gk-overview-primary" onClick={onAdd}><Plus size={14} aria-hidden="true" />{tx("添加仓库")}</button>
             <button className="gk-overview-button gk-shell-button" onClick={onClone}><CloudDownload size={14} aria-hidden="true" />{tx("克隆仓库")}</button></div>

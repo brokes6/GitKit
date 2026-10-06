@@ -263,6 +263,7 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
   const [notice, setNotice] = useState<string | null>(null);
   const [needsRecheck, setNeedsRecheck] = useState(false);
   const [result, setResult] = useState<MrMergeResult | null>(null);
+  const [animateMergeCompletion, setAnimateMergeCompletion] = useState(false);
   const submitRef = useRef(false);
   const aliveRef = useRef(true);
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -297,6 +298,14 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
   const effectiveDelete = deleteRequired || deleteAllowed && deleteSource;
 
   useEffect(() => { aliveRef.current = true; return () => { aliveRef.current = false; }; }, []);
+  useEffect(() => {
+    if (!animateMergeCompletion) return;
+    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const stopForReducedMotion = () => { if (preference.matches) setAnimateMergeCompletion(false); };
+    stopForReducedMotion();
+    preference.addEventListener("change", stopForReducedMotion);
+    return () => preference.removeEventListener("change", stopForReducedMotion);
+  }, [animateMergeCompletion]);
   useEffect(() => {
     if (summary && focusedDetailRef.current !== summary.id) {
       focusedDetailRef.current = summary.id;
@@ -351,7 +360,12 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
     setNotice(null);
     try {
       const next = await onMerge({ reviewedSha, squash: effectiveSquash, deleteSource: effectiveDelete });
-      if (aliveRef.current) { setResult(next); setView("result"); }
+      if (aliveRef.current) {
+        // Only this submission's confirmed result celebrates; opening or refreshing an already merged request stays still.
+        setAnimateMergeCompletion(next.state === "merged" && !window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+        setResult(next);
+        setView("result");
+      }
     } catch (cause) {
       if (aliveRef.current) {
         const kind = failureKind(cause);
@@ -381,7 +395,22 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
         <label className="gkm-option"><input type="checkbox" checked={effectiveDelete} disabled={submitting || deleteRequired || !deleteAllowed} onChange={event => setDeleteSource(event.target.checked)} /><span>{tx("合并后删除源分支")}<small>{tx(deleteRequired ? "项目要求删除源分支" : !deleteAllowed ? "没有删除源分支的权限" : "只影响远程源分支，本地分支保持原样")}</small></span></label><div className="gkm-sha-check"><ShieldCheck size={15} aria-hidden="true" />{tx("合并时再次核对源版本与权限")}</div>
       </div><footer className="gkm-detail-foot"><span>{tx("不会自动更新本地仓库")}</span><div className="gkm-foot-actions"><button className="gkm-button" type="button" onClick={() => setView("detail")} disabled={submitting}>{tx("返回详情")}</button><button className="gkm-button gkm-button-primary" type="button" onClick={merge} disabled={mergeBlocked}>{submitting ? <LoaderCircle className="gkm-spin" size={14} /> : <GitMerge size={14} />}{tx(submitting ? "正在提交…" : "确认合并")}</button></div></footer>
     </> : view === "result" || alreadyMerged ? <>
-      <div className={`gkm-result${successful ? " is-success" : ""}`}>{successful ? <CheckCircle2 size={40} aria-hidden="true" /> : <Clock3 size={40} aria-hidden="true" />}<h3>{tx(successful ? "合并完成" : result?.state === "pending" ? "GitLab 正在处理合并" : "合并结果暂时无法确认")}</h3><p>{successful ? tf("!{0} 已合并到 {1}。", summary!.iid, summary!.targetBranch) : translateNativeMessage(result?.message || "")}</p>{!successful && <p>{tx("请刷新状态或在 GitLab 中确认结果。")}</p>}<div className="gkm-result-local">{tx("本地仓库尚未更新，可以稍后执行 Pull。")}</div></div><footer className="gkm-detail-foot"><span>{tx("以 GitLab 实际状态为准")}</span><div className="gkm-foot-actions">{!successful && <button className="gkm-button" type="button" onClick={refresh} disabled={refreshing}>{refreshing && <LoaderCircle size={14} className="gkm-spin" />}{tx("刷新状态")}</button>}<button className="gkm-button gkm-button-primary" type="button" onClick={onBackList}>{tx("返回合并请求")}</button></div></footer>
+      <div className={`gkm-result${successful ? " is-success" : ""}`}>
+        {successful ? <div className={`gkm-merge-completion${animateMergeCompletion ? " is-arriving" : ""}`} aria-hidden="true" onAnimationEnd={event => {
+          if (event.target === event.currentTarget) setAnimateMergeCompletion(false);
+        }}>
+          <svg width="112" height="72" viewBox="0 0 112 72" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path className="gkm-merge-branch" d="M12 18H26C40 18 38 36 55 36H65" />
+            <path className="gkm-merge-branch" d="M12 54H26C40 54 38 36 55 36H65" />
+            <circle className="gkm-merge-node" cx="12" cy="18" r="4" />
+            <circle className="gkm-merge-node" cx="12" cy="54" r="4" />
+            <path className="gkm-merge-flow" pathLength="100" d="M16 18H26C40 18 38 36 55 36H65" />
+            <path className="gkm-merge-flow gkm-merge-flow-second" pathLength="100" d="M16 54H26C40 54 38 36 55 36H65" />
+            <circle className="gkm-merge-ring" pathLength="100" cx="83" cy="36" r="18" />
+            <path className="gkm-merge-check" pathLength="100" strokeWidth="3" d="M75 36L80 41L91 30" />
+          </svg>
+        </div> : <Clock3 size={40} aria-hidden="true" />}
+        <h3>{tx(successful ? "合并完成" : result?.state === "pending" ? "GitLab 正在处理合并" : "合并结果暂时无法确认")}</h3><p>{successful ? tf("!{0} 已合并到 {1}。", summary!.iid, summary!.targetBranch) : translateNativeMessage(result?.message || "")}</p>{!successful && <p>{tx("请刷新状态或在 GitLab 中确认结果。")}</p>}<div className="gkm-result-local">{tx("本地仓库尚未更新，可以稍后执行 Pull。")}</div></div><footer className="gkm-detail-foot"><span>{tx("以 GitLab 实际状态为准")}</span><div className="gkm-foot-actions">{!successful && <button className="gkm-button" type="button" onClick={refresh} disabled={refreshing}>{refreshing && <LoaderCircle size={14} className="gkm-spin" />}{tx("刷新状态")}</button>}<button className="gkm-button gkm-button-primary" type="button" onClick={onBackList}>{tx("返回合并请求")}</button></div></footer>
     </> : <>
       <div ref={tabsRef} className="gkm-tabs" role="tablist" aria-label={tx("合并请求内容")} onKeyDown={event => {
         const index = tabs.findIndex(([value]) => value === tab);

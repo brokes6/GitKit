@@ -524,6 +524,15 @@ select:focus-visible,
   animation: gk-action-breathe 1.15s ease-in-out infinite;
 }
 .gk-shell-button:disabled[data-running="true"] { opacity: 1; }
+.gk-primary-sweep { position: relative; overflow: hidden; isolation: isolate; }
+.gk-primary-sweep > span { position: relative; z-index: 1; }
+.gk-primary-sweep::after {
+  content: ""; position: absolute; inset: 0; width: 55%; pointer-events: none;
+  background: linear-gradient(105deg, transparent 15%, color-mix(in srgb, currentColor 18%, transparent), transparent 85%);
+  transform: translateX(-150%);
+}
+.gk-primary-sweep:not(:disabled):is(:hover, :focus-visible)::after { animation: gk-primary-sweep 520ms ease-out both; }
+@keyframes gk-primary-sweep { to { transform: translateX(240%); } }
 .gk-update-card {
   transition: border-color 140ms ease-out, background-color 140ms ease-out;
 }
@@ -588,8 +597,18 @@ select:focus-visible,
 }
 .gk-glide-list > [data-glide-row] { z-index: 1; }
 .gk-commit-glide > .gk-glide-highlight { left: 5px; right: 5px; border-radius: 7px; }
-.gk-project-item[data-project-active] { background: var(--gk-project-selected); }
-.gk-project-list[data-gliding="true"] .gk-project-item[data-project-active] { background: transparent; }
+.gk-project-item {
+  background-color: transparent;
+  transition: background-color 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.gk-project-item[data-project-active] {
+  background-color: var(--gk-project-selected);
+  animation: gk-project-select 900ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+@keyframes gk-project-select {
+  from { background-color: color-mix(in srgb, var(--gk-accent) 48%, var(--gk-project-selected)); }
+  to { background-color: var(--gk-project-selected); }
+}
 .gk-project-close { opacity: 0; }
 .gk-project-item:hover .gk-project-close,
 .gk-project-item:focus-within .gk-project-close { opacity: 1; }
@@ -607,6 +626,9 @@ select:focus-visible,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .gk-project-item { transition-duration: 80ms; }
+  .gk-project-item[data-project-active] { animation: none; }
+  .gk-primary-sweep::after { display: none; }
   .gk-git-action[data-running="true"]::after {
     left: 12px;
     width: calc(100% - 24px);

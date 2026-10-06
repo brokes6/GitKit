@@ -1,4 +1,4 @@
-import { tf, tx, translateNativeMessage, getLanguage, getCurrentLanguage, setCurrentLanguage, languageProgress } from "./i18n";
+import { tf, tx, translateNativeMessage, getLanguage, getCurrentLanguage, setCurrentLanguage } from "./i18n";
 import type { Language } from "./i18n";
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useDeferredValue, startTransition, useTransition, createContext, useContext, memo, Fragment } from "react";
 import { createPortal } from "react-dom";
@@ -15,7 +15,7 @@ import { DAILY_CHECK_DEFAULT, nextCheckLabel, shouldPresentCheck, validCheckTime
 import type { DailyCheck, CheckProgress, CheckSnapshot, CheckResult } from "./dailyCheck";
 import {
   GitBranch, GitMerge, GitPullRequest, Upload, Download, RefreshCw,
-  Layers, ChevronRight, ChevronDown, Copy, Check, GitCommit, FileText,
+  Layers, ChevronRight, ChevronDown, Copy, Check, GitCommit, FileText, Info,
   Moon, Sun, Monitor, Plus, Minus, X, FolderOpen, ArrowRight,
   Pin, EyeOff, Eye, Folder, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
   Settings, UserPlus, Trash2, Star, Users, Github, Laptop, Sparkles, Languages, RotateCcw, TerminalSquare,
@@ -52,6 +52,7 @@ import { mrCommitFiles } from "./mergeRequestHelpers";
 import type { OverviewTarget } from "./projectOverview";
 import { CommitTopology } from "./CommitTopology";
 export type { WorkingFile } from "./workingStatus";
+import "./styles/settings.css";
 
 // ─── theme ────────────────────────────────────────────────────────────────────
 
@@ -675,6 +676,93 @@ function TitleBar({ themeMode, onThemeCycle, onOpenSettings }: {
   );
 }
 
+function HistoryModeSwitch({ mode, onChange }: {
+  mode: "list" | "topology"; onChange: (mode: "list" | "topology") => void;
+}) {
+  const t = useTheme();
+  const groupRef = useRef<HTMLDivElement>(null);
+  const sliderRef = useRef<HTMLSpanElement>(null);
+  const listLabel = tx("列表"), topologyLabel = tx("拓扑图");
+
+  useLayoutEffect(() => {
+    const group = groupRef.current, slider = sliderRef.current;
+    if (!group || !slider) return;
+    const position = () => {
+      const button = group.querySelector<HTMLButtonElement>('button[aria-pressed="true"]');
+      if (!button) return;
+      slider.style.width = `${button.offsetWidth}px`;
+      slider.style.transform = `translateX(${button.offsetLeft}px)`;
+    };
+    position();
+    // Resolve the saved selection in place before enabling subsequent slides.
+    if (group.dataset.ready !== "true") {
+      slider.getBoundingClientRect();
+      group.dataset.ready = "true";
+    }
+    const observer = new ResizeObserver(position);
+    group.querySelectorAll("button").forEach((button) => observer.observe(button));
+    return () => observer.disconnect();
+  }, [mode, listLabel, topologyLabel]);
+
+  return <div ref={groupRef} className="gk-history-mode" role="group" aria-label={tx("提交历史视图")}
+    style={{ "--gk-mode-border": t.inputBorder, "--gk-mode-bg": t.inputBg,
+      "--gk-mode-muted": t.textSec, "--gk-mode-text": t.text,
+      "--gk-mode-accent-fg": t.accentFg, "--gk-mode-accent-bg": t.accentBg } as React.CSSProperties}>
+    <span ref={sliderRef} className="gk-history-mode-slider" aria-hidden="true" />
+    <button type="button" aria-pressed={mode === "list"} onClick={() => onChange("list")}>
+      <List size={12} aria-hidden="true" />{listLabel}
+    </button>
+    <button type="button" aria-pressed={mode === "topology"} onClick={() => onChange("topology")}>
+      <Network size={12} aria-hidden="true" />{topologyLabel}
+    </button>
+  </div>;
+}
+
+function BranchFocusBanner({ branch, onClear }: { branch: string | null; onClear: () => void }) {
+  const t = useTheme();
+  const shellRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [contentHeight, setContentHeight] = useState(0);
+  const lastBranch = useRef(branch);
+  const visible = !!branch;
+
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const measure = () => setContentHeight(content.getBoundingClientRect().height);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
+
+  useLayoutEffect(() => {
+    if (branch) lastBranch.current = branch;
+    if (shellRef.current) shellRef.current.inert = !branch;
+  }, [branch]);
+
+  return <div ref={shellRef} className="gk-branch-focus" data-visible={visible} aria-hidden={!visible}
+    style={{ height: visible ? contentHeight : 0, flexShrink: 0, overflow: "hidden",
+      opacity: visible ? 1 : 0, visibility: visible ? "visible" : "hidden",
+      pointerEvents: visible ? "auto" : "none",
+      transition: visible
+        ? "height 220ms cubic-bezier(0.16, 1, 0.3, 1), opacity 150ms ease-out 20ms, visibility 0s"
+        : "height 180ms cubic-bezier(0.4, 0, 1, 1), opacity 120ms ease-in, visibility 0s linear 180ms" }}>
+    <div ref={contentRef} className="flex items-center gap-2 px-3 py-1.5"
+      style={{ borderBottom: `0.5px solid ${t.border}`, background: t.accentBg }}>
+      <GitBranch size={11} aria-hidden="true" style={{ color: t.accent }} />
+      <span className="text-[11px] flex-1 truncate" style={{ color: t.accentFg }}>
+        {tx("只看分支")} {branch ?? lastBranch.current}
+      </span>
+      <button type="button" onClick={onClear} disabled={!visible}
+        className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] cursor-pointer flex-shrink-0"
+        style={{ color: t.accent, borderRadius: R - 4 }}>
+        <X size={10} aria-hidden="true" /> {tx("全部视图")}
+      </button>
+    </div>
+  </div>;
+}
+
 // ─── Project sidebar ──────────────────────────────────────────────────────────
 
 function GlideList({ children, className = "", style, insetY = 0 }: {
@@ -941,7 +1029,7 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
     { label: tx("Cherry-pick"), Icon: GitCommit, action: onCherryPick },
     { label: tx("储藏"), Icon: Layers, action: onStash },
     { label: tx("创建 Tag 并推送"), Icon: TagIcon, action: onCreateTag },
-    { label: tx("创建合并请求"), Icon: GitPullRequest, action: onCreatePR },
+    { label: tx("合并"), Icon: GitMerge, action: canMerge ? onMerge : undefined },
     { label: tx("强制推送…"), Icon: AlertTriangle, action: onForcePush },
   ];
   return (
@@ -986,10 +1074,10 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
         style={{ borderRadius: R - 3 }}>
         <GitBranchPlus size={15} aria-hidden="true" /><ToolbarText order={6}>{tx("新建分支")}</ToolbarText>
       </button>
-      <button disabled={!canMerge || !onMerge || !!busy} onClick={onMerge}
+      <button disabled={!onCreatePR || !!busy} onClick={onCreatePR}
         className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
-        style={{ borderRadius: R - 3, background: canMerge ? t.accent : t.inputBg, color: canMerge ? "#fff" : t.textMuted }}>
-        <GitMerge size={15} aria-hidden="true" /><ToolbarText order={7}>{tx("合并")}</ToolbarText>
+        style={{ borderRadius: R - 3, background: onCreatePR ? t.accent : t.inputBg, color: onCreatePR ? "#fff" : t.textMuted }}>
+        <GitPullRequest size={15} aria-hidden="true" /><ToolbarText order={7}>{tx("创建合并请求")}</ToolbarText>
       </button>
       <button ref={moreButton} disabled={!moreActions.some(({ action }) => !!action) || !!busy} aria-label={tx("更多仓库操作")} title={tx("更多仓库操作")}
         aria-haspopup="menu" aria-expanded={!!morePos}
@@ -2890,7 +2978,7 @@ function WorkingFileRow({ file, selected, disabled, onSelect, onStage, onUnstage
 // ─── ChangesPanel ─────────────────────────────────────────────────────────────
 
 function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStage, onUnstage, busy, operationActive,
-  identities, defaultIdentityId, projectKey, onCommit, onDiscard, onDiscardAll }: {
+  identities, defaultIdentityId, projectKey, onCommit, onConfigureIdentity, onDiscard, onDiscardAll }: {
   files: WorkingFile[]; selectedFile: WorkingFile | null;
   onFileSelect: (f: WorkingFile | null) => void;
   currentBranch: string; busy: boolean;
@@ -2898,6 +2986,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
   onStage: (files: string[]) => Promise<void>; onUnstage: (files: string[]) => Promise<void>;
   identities: Identity[]; defaultIdentityId: string; projectKey: string;
   onCommit: (message: string, files: WorkingFile[], identity: Identity | null) => Promise<void>;
+  onConfigureIdentity: () => void;
   onDiscard: (file: string) => void; onDiscardAll: () => void;
 }) {
   const t = useTheme();
@@ -2930,11 +3019,15 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
   const staged   = files.filter((f) => f.staged);
   const unstaged = files.filter((f) => !f.staged);
   const locked = busy || committing;
+  const needsIdentity = identities.length === 0;
+  const commitDisabled = locked || (!needsIdentity && (!commitMsg.trim() || staged.length === 0));
   const stageAll = () => { void onStage(unstaged.map((file) => file.path)); };
   const unstageAll = () => { void onUnstage(staged.map((file) => file.path)); };
   const isSelected = (file: WorkingFile) => !!selectedFile && workingFileKey(selectedFile) === workingFileKey(file);
   const handleCommit = async () => {
-    if (!commitMsg.trim() || staged.length === 0 || locked || operationActive) return;
+    if (locked || operationActive) return;
+    if (needsIdentity) { onConfigureIdentity(); return; }
+    if (!commitMsg.trim() || staged.length === 0) return;
     const submittedDraft = commitMsg;
     setCommitting(true);
     try {
@@ -3036,8 +3129,8 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
         {/* Committer — defaults to the default identity */}
         <div className="flex items-center gap-2 mt-2">
           <span className="text-[11px] flex-shrink-0" style={{ color: t.textMuted }}>{tx("提交者")}</span>
-          {identities.length === 0 ? (
-            <span className="text-[11px] truncate" style={{ color: t.textFaint }}>{tx("使用仓库默认（在设置中可添加身份）")}</span>
+          {needsIdentity ? (
+            <span className="text-[11px] truncate" style={{ color: t.textMuted }}>{tx("还没有提交者身份")}</span>
           ) : (
             <select value={identityId} onChange={(e) => chooseIdentity(e.target.value)}
               title={tx("该选择会记住到当前项目")}
@@ -3051,21 +3144,22 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
           )}
         </div>
 
-        <button {...press(handleCommit)} disabled={!commitMsg.trim() || staged.length === 0 || locked}
-          className="w-full mt-2 py-2 text-xs font-semibold transition-all duration-150 cursor-pointer"
+        <button {...press(handleCommit)} disabled={commitDisabled}
+          title={needsIdentity ? tx("请先在设置中配置提交者身份") : undefined}
+          className="gk-primary-sweep w-full mt-2 py-2 text-xs font-semibold transition-all duration-150 cursor-pointer"
           style={{
-            background: !commitMsg.trim() || staged.length === 0 || locked ? t.inputBg : t.accent,
-            color:      !commitMsg.trim() || staged.length === 0 || locked ? t.textFaint : "#fff",
+            background: commitDisabled ? t.inputBg : t.accent,
+            color:      commitDisabled ? t.textFaint : "#fff",
             borderRadius: R, border: `0.5px solid ${t.inputBorder}`,
-            boxShadow: commitMsg.trim() && staged.length > 0 && !locked ? `0 4px 16px ${t.accent}44` : "none",
-            cursor: !commitMsg.trim() || staged.length === 0 || locked ? "not-allowed" : "pointer",
+            boxShadow: !commitDisabled ? `0 4px 16px ${t.accent}44` : "none",
+            cursor: commitDisabled ? "not-allowed" : "pointer",
           }}
-          onMouseEnter={(e) => { if (commitMsg.trim() && staged.length > 0 && !locked) e.currentTarget.style.opacity = "0.88"; }}
+          onMouseEnter={(e) => { if (!commitDisabled) e.currentTarget.style.opacity = "0.88"; }}
           onMouseLeave={(e) => { e.currentTarget.style.opacity = "1"; }}>
           <span className="flex items-center justify-center gap-1.5">
-            <GitCommit size={11} className={committing ? "animate-spin" : undefined} />
-            {committing ? tx("提交中…") : tf("提交到 {0}", currentBranch)}
-            {staged.length > 0 && !committing && (
+            {needsIdentity ? <Users size={11} aria-hidden="true" /> : <GitCommit size={11} className={committing ? "animate-spin" : undefined} />}
+            {committing ? tx("提交中…") : needsIdentity ? tx("先配置提交者身份") : tf("提交到 {0}", currentBranch)}
+            {staged.length > 0 && !committing && !needsIdentity && (
               <span className="ml-1 px-1.5 py-px rounded-full text-[11px]"
                 style={{ background: "rgba(255,255,255,0.2)" }}>
                 {staged.length}
@@ -4621,22 +4715,61 @@ function CreatePRDialog({ path, branches, currentBranch, defaultTarget, term, on
 // ─── SettingsDialog ─────────────────────────────────────────────────────────
 
 // Second-level pane: manage committer identities.
-function IdentitySettings({ identities, setIdentities, defaultId, setDefaultId }: {
+function settingsPageStyle(t: ThemeColors): React.CSSProperties {
+  return {
+    "--gks-text": t.text, "--gks-secondary": t.textSec, "--gks-muted": t.textMuted,
+    "--gks-faint": t.textFaint, "--gks-accent": t.accent, "--gks-accent-fg": t.accentFg,
+    "--gks-accent-bg": t.accentBg, "--gks-border": t.border, "--gks-input-bg": t.inputBg,
+    "--gks-input-border": t.inputBorder, "--gks-dialog": t.dialogBg, "--gks-row-hover": t.rowHover,
+    "--gks-green": t.green, "--gks-green-bg": t.greenBg, "--gks-red": t.red, "--gks-red-bg": t.redBg,
+  } as React.CSSProperties;
+}
+
+function IdentitySettings({ identities, setIdentities, defaultId, setDefaultId, onOpenProjects }: {
   identities: Identity[]; setIdentities: React.Dispatch<React.SetStateAction<Identity[]>>;
-  defaultId: string; setDefaultId: (id: string) => void;
+  defaultId: string; setDefaultId: (id: string) => void; onOpenProjects: () => void;
 }) {
   const t = useTheme();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const valid = name.trim().length > 0 && /.+@.+\..+/.test(email.trim());
-  // The form is only mounted while adding a new identity or editing an existing one.
+  const [submitted, setSubmitted] = useState(false);
+  const [moreId, setMoreId] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const addRef = useRef<HTMLButtonElement>(null);
+  const validName = name.trim().length > 0;
+  const validEmail = /.+@.+\..+/.test(email.trim());
   const showForm = adding || editingId !== null;
 
-  const reset = () => { setName(""); setEmail(""); setEditingId(null); setAdding(false); };
+  useEffect(() => { if (showForm) nameRef.current?.focus(); }, [showForm, editingId]);
+  useEffect(() => {
+    if (!moreId) return;
+    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    const closeOutside = (event: MouseEvent) => {
+      if (!menuRef.current?.contains(event.target as Node)) setMoreId(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault(); event.stopPropagation();
+      menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+      setMoreId(null);
+    };
+    document.addEventListener("mousedown", closeOutside, true);
+    document.addEventListener("keydown", closeOnEscape, true);
+    return () => {
+      document.removeEventListener("mousedown", closeOutside, true);
+      document.removeEventListener("keydown", closeOnEscape, true);
+    };
+  }, [moreId]);
+
+  const reset = () => {
+    setName(""); setEmail(""); setEditingId(null); setAdding(false); setSubmitted(false);
+    addRef.current?.focus();
+  };
   const submit = () => {
-    if (!valid) return;
+    if (!validName || !validEmail) { setSubmitted(true); return; }
     const n = name.trim(), e = email.trim();
     if (editingId) {
       setIdentities((prev) => prev.map((i) => i.id === editingId ? { ...i, name: n, email: e } : i));
@@ -4647,81 +4780,81 @@ function IdentitySettings({ identities, setIdentities, defaultId, setDefaultId }
     }
     reset();
   };
-  const startAdd = () => { setEditingId(null); setName(""); setEmail(""); setAdding(true); };
-  const startEdit = (i: Identity) => { setAdding(false); setEditingId(i.id); setName(i.name); setEmail(i.email); };
+  const startAdd = () => {
+    setEditingId(null); setName(""); setEmail(""); setAdding(true); setSubmitted(false); setMoreId(null);
+  };
+  const startEdit = (i: Identity) => {
+    setAdding(false); setEditingId(i.id); setName(i.name); setEmail(i.email); setSubmitted(false); setMoreId(null);
+  };
   const remove = (id: string) => {
     setIdentities((prev) => {
       const next = prev.filter((i) => i.id !== id);
       if (id === defaultId) setDefaultId(next[0]?.id ?? "");
       return next;
     });
+    setMoreId(null);
     if (editingId === id) reset();
   };
-
-  const inputStyle = { background: t.inputBg, color: t.text, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
+  const enterToSubmit = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+    if (event.key === "Enter") { event.preventDefault(); submit(); }
+  };
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex flex-col gap-1 min-w-0">
-          <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{tx("提交者身份")}</span>
-          <span className="text-[11px]" style={{ color: t.textFaint }}>
-            {tx("维护多套 name / email，提交时按所选身份注入，不改动全局 Git 配置。")}
-          </span>
+    <section className="gk-settings-page" style={settingsPageStyle(t)} aria-label={tx("提交者身份")}>
+      <div className="gk-settings-page-header">
+        <div className="gk-settings-heading-group">
+          <div className="gk-settings-title-row">
+            <h2 className="gk-heading gk-settings-heading">{tx("提交者身份")}</h2>
+            <span className="gk-settings-count" aria-label={tf("{0} 个身份", identities.length)}>{identities.length}</span>
+          </div>
+          <p className="gk-settings-description">{tx("提交时使用所选名称与邮箱，不改动全局 Git 配置。")}</p>
         </div>
-        {identities.length > 0 && (
-          <span className="flex-shrink-0 px-2 py-0.5 text-[10px] font-medium"
-            style={{ color: t.textMuted, background: t.inputBg, borderRadius: R - 4 }}>
-            {identities.length} {tx("个身份")}
-          </span>
-        )}
+        <button ref={addRef} type="button" {...press(startAdd)} className="gk-settings-primary">
+          <Plus size={14} aria-hidden="true" />{tx("新增身份")}
+        </button>
       </div>
-
-      <div className="overflow-hidden"
-        style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 1 }}>
+      <div className="gk-settings-list">
         {identities.length === 0 ? (
-          <div className="text-[11px] px-4 py-8 text-center" style={{ color: t.textFaint }}>
-            {tx("还没有身份，点击下方「新增身份」添加")}
+          <div className="gk-settings-empty">
+            <span className="gk-settings-empty-icon"><Users size={16} aria-hidden="true" /></span>
+            <h3>{tx("还没有提交者身份")}</h3>
+            <p>{tx("添加名称与邮箱，即可在提交时快速选择。首个身份会自动设为默认。")}</p>
           </div>
         ) : (
-          <div className="overflow-y-auto overscroll-contain"
-            style={{ maxHeight: showForm ? 184 : 320, scrollbarGutter: "stable" }}>
-            {identities.map((i, index) => {
+          <div className="gk-settings-identity-scroll" style={{ maxHeight: showForm ? 184 : 320, scrollbarGutter: "stable" }}>
+            {identities.map((i) => {
               const isDefault = i.id === defaultId;
               return (
-                <div key={i.id} className="group flex items-center gap-3 px-3 py-2.5"
-                  style={{ minHeight: 56, background: isDefault ? t.accentBg : "transparent",
-                    borderBottom: index < identities.length - 1 ? `0.5px solid ${t.border}` : undefined }}>
+                <div key={i.id} className="gk-settings-identity-row" data-default={isDefault}>
                   <Avatar author={{ initials: authorInitials(i.name), color: authorColor(i.email) }} size={34} />
-                  <div className="flex flex-col min-w-0 flex-1 gap-0.5">
-                    <span className="text-xs font-medium truncate" style={{ color: t.text }}>
-                      {i.name}{isDefault && (
-                        <span className="ml-2 text-[10px] font-normal" style={{ color: t.accent }}>{tx("默认")}</span>
-                      )}
+                  <div className="gk-settings-identity-copy">
+                    <span className="gk-settings-identity-name truncate" title={i.name}>
+                      {i.name}{isDefault && <span className="gk-settings-default-label">{tx("默认")}</span>}
                     </span>
-                    <span className="text-[11px] font-mono truncate" style={{ color: t.textMuted }}>{i.email}</span>
+                    <span className="gk-settings-identity-email" title={i.email}>{i.email}</span>
                   </div>
-                  <div className="flex items-center gap-0.5 flex-shrink-0">
-                    <button {...press(() => setDefaultId(i.id))}
+                  <div className="gk-settings-row-actions">
+                    <button type="button" {...press(() => setDefaultId(i.id))}
                       aria-label={isDefault ? tf("{0} 是默认身份", i.name) : tf("将 {0} 设为默认身份", i.name)}
                       title={isDefault ? tx("默认身份") : tx("设为默认")}
-                      className="gk-shell-button flex items-center justify-center w-7 h-7 cursor-pointer"
-                      style={{ color: isDefault ? t.accent : t.textFaint, borderRadius: R - 4,
-                        "--gk-shell-hover": t.inputBg } as React.CSSProperties}>
-                      <Star size={14} fill={isDefault ? t.accent : "none"} />
+                      className="gk-settings-row-action" style={{ color: isDefault ? t.accentFg : t.textMuted }}>
+                      <Star size={14} fill={isDefault ? t.accentFg : "none"} />
                     </button>
-                    <button {...press(() => startEdit(i))} aria-label={tf("编辑 {0}", i.name)} title={tx("编辑")}
-                      className="gk-shell-button flex items-center justify-center w-7 h-7 cursor-pointer opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
-                      style={{ color: t.textMuted, borderRadius: R - 4,
-                        "--gk-shell-hover": t.inputBg } as React.CSSProperties}>
-                      <Pencil size={13} />
+                    <button type="button" {...press(() => startEdit(i))} aria-label={tf("编辑 {0}", i.name)} className="gk-settings-row-action">
+                      <Pencil size={13} aria-hidden="true" /><span>{tx("编辑")}</span>
                     </button>
-                    <button {...press(() => remove(i.id))} aria-label={tf("删除 {0}", i.name)} title={tx("删除")}
-                      className="gk-shell-button flex items-center justify-center w-7 h-7 cursor-pointer opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity"
-                      style={{ color: t.textMuted, borderRadius: R - 4,
-                        "--gk-shell-hover": t.inputBg } as React.CSSProperties}>
-                      <Trash2 size={13} />
-                    </button>
+                    <div ref={moreId === i.id ? menuRef : undefined} className="gk-settings-more">
+                      <button type="button" {...press(() => setMoreId(moreId === i.id ? null : i.id))}
+                        aria-label={tf("{0} 的更多操作", i.name)} aria-expanded={moreId === i.id} className="gk-settings-more-summary">
+                        <MoreHorizontal size={15} aria-hidden="true" />
+                      </button>
+                      {moreId === i.id && <div className="gk-settings-more-menu">
+                        <button type="button" {...press(() => remove(i.id))} aria-label={tf("删除 {0}", i.name)}>
+                          <Trash2 size={13} aria-hidden="true" />{tx("删除身份")}
+                        </button>
+                      </div>}
+                    </div>
                   </div>
                 </div>
               );
@@ -4729,38 +4862,38 @@ function IdentitySettings({ identities, setIdentities, defaultId, setDefaultId }
           </div>
         )}
       </div>
-
-      {showForm ? (
-        <div className="flex flex-col gap-2 p-3" style={{ background: t.inputBg + "80", borderRadius: R - 1, border: `0.5px solid ${t.border}` }}>
-          <span className="text-[11px] font-semibold" style={{ color: t.textMuted }}>
-            {editingId ? tx("编辑身份") : tx("新增身份")}
-          </span>
-          <input value={name} autoFocus onChange={(e) => setName(e.target.value)} placeholder={tx("名称 (user.name)")}
-            className="text-xs px-2.5 py-2 outline-none" style={inputStyle} />
-          <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder={tx("邮箱 (user.email)")}
-            onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-            className="text-xs px-2.5 py-2 outline-none font-mono" style={inputStyle} />
-          <div className="flex items-center justify-end gap-2">
-            <button {...press(reset)} className="px-3 py-1.5 text-xs cursor-pointer"
-              style={{ color: t.textMuted, borderRadius: R - 3 }}>{tx("取消")}</button>
-            <button {...(valid ? press(submit) : {})} disabled={!valid}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium cursor-pointer"
-              style={{ background: valid ? t.accent : t.inputBg, color: valid ? "#fff" : t.textFaint,
-                borderRadius: R - 3, opacity: valid ? 1 : 0.7, cursor: valid ? "pointer" : "not-allowed" }}>
-              {editingId ? tx("保存") : tx("添加")}
-            </button>
+      {showForm && (
+        <form className="gk-settings-form" noValidate onSubmit={(event) => { event.preventDefault(); submit(); }}>
+          <div className="gk-settings-form-title"><Pencil size={14} aria-hidden="true" />{editingId ? tx("编辑身份") : tx("新增身份")}</div>
+          <div className="gk-settings-fields">
+            <label className="gk-settings-field" htmlFor="gk-identity-name">
+              <span>{tx("名称")} <span style={{ color: t.textFaint }}>user.name</span></span>
+              <input ref={nameRef} id="gk-identity-name" value={name} onChange={(event) => setName(event.target.value)}
+                onKeyDown={enterToSubmit} placeholder={tx("如：Blake")} className="gk-settings-input"
+                aria-invalid={submitted && !validName} aria-describedby={submitted && !validName ? "gk-identity-name-error" : undefined} />
+              {submitted && !validName && <span id="gk-identity-name-error" className="gk-settings-error">{tx("请输入提交者名称")}</span>}
+            </label>
+            <label className="gk-settings-field" htmlFor="gk-identity-email">
+              <span>{tx("邮箱")} <span style={{ color: t.textFaint }}>user.email</span></span>
+              <input id="gk-identity-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)}
+                onKeyDown={enterToSubmit} placeholder="name@example.com" className="gk-settings-input"
+                aria-invalid={submitted && !validEmail} aria-describedby={submitted && !validEmail ? "gk-identity-email-error" : undefined} />
+              {submitted && !validEmail && <span id="gk-identity-email-error" className="gk-settings-error">{tx("请输入有效的邮箱地址")}</span>}
+            </label>
           </div>
-        </div>
-      ) : (
-        <button {...press(startAdd)}
-          className="flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium cursor-pointer transition-colors"
-          style={{ color: t.textSec, borderRadius: R - 2, border: `0.5px dashed ${t.inputBorder}` }}
-          onMouseEnter={(e) => { e.currentTarget.style.background = t.rowHover; e.currentTarget.style.color = t.text; }}
-          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textSec; }}>
-          <UserPlus size={13} /> {tx("新增身份")}
-        </button>
+          <div className="gk-settings-form-footer">
+            <button type="button" {...press(reset)} className="gk-settings-quiet">{tx("取消")}</button>
+            <button type="button" {...press(submit)} className="gk-settings-primary">{editingId ? tx("保存") : tx("添加")}</button>
+          </div>
+        </form>
       )}
-    </div>
+      <div className="gk-settings-note">
+        <Info size={13} aria-hidden="true" />
+        <p>{tx("仓库可单独记住提交者身份。")} <button type="button" {...press(onOpenProjects)} className="gk-settings-link">
+          {tx("查看项目配置")}<ArrowRight size={12} aria-hidden="true" />
+        </button></p>
+      </div>
+    </section>
   );
 }
 
@@ -4951,8 +5084,8 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
   return (
     <div className="flex flex-col gap-5">
       <div className="flex items-start justify-between gap-3">
-        <div className="flex flex-col gap-1.5 min-w-0">
-          <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{title}</span>
+        <div className="flex flex-col gap-1.5 min-w-0 gk-settings-heading-group">
+          <span className="gk-heading gk-settings-heading" style={{ color: t.text }}>{title}</span>
           <span className="text-[11px] leading-relaxed" style={{ color: t.textSec }}>{desc}</span>
         </div>
         <TokenSettingsLink provider="gitlab" url={editing ? url : saved.url} />
@@ -5200,8 +5333,8 @@ function GithubAccountsSettings() {
 
   return <div className="flex flex-col gap-4">
     <div className="flex items-start justify-between gap-3">
-      <div className="flex flex-col gap-1.5 min-w-0">
-        <h2 className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{tx("GitHub 集成")}</h2>
+      <div className="flex flex-col gap-1.5 min-w-0 gk-settings-heading-group">
+        <h2 className="gk-heading gk-settings-heading" style={{ color: t.text }}>{tx("GitHub 集成")}</h2>
         <p className="text-[11px] leading-relaxed" style={{ color: t.textSec }}>{tx("按远程地址匹配账号；匹配到多个账号时选择使用，也可在「项目配置」中指定账号。")}</p>
       </div>
       <TokenSettingsLink provider="github" url={showForm ? url : selected?.url ?? ""}
@@ -5314,8 +5447,8 @@ function AppearanceSettings({ paletteId, setPaletteId, themeMode, setThemeMode }
   return (
     <div className="flex flex-col gap-6">
       {/* Theme palette + mode */}
-      <div className="flex flex-col gap-1">
-        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{tx("主题配色")}</span>
+      <div className="flex flex-col gap-1 gk-settings-heading-group">
+        <span className="gk-heading gk-settings-heading" style={{ color: t.text }}>{tx("主题配色")}</span>
         <span className="text-[11px]" style={{ color: t.textFaint }}>
           {tx("选择配色方案与明暗模式。跟随系统时按 macOS 外观自动切换亮/暗。")}
         </span>
@@ -5382,31 +5515,30 @@ function LanguageSettings({ language, onChange }: { language: Language; onChange
     { id: "en", label: "English", nativeLabel: "英语" },
   ];
   return (
-    <section className="flex flex-col gap-4" aria-label={tx("语言")}>
-      <div className="flex flex-col gap-1">
-        <h2 className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{tx("界面语言")}</h2>
-        <p className="text-[11px] leading-relaxed" style={{ color: t.textMuted }}>
-          {tx("语言设置会立即生效。进度表示已翻译的静态界面文案比例；尚未翻译的内容仍显示中文。")}
-        </p>
+    <section className="gk-settings-page" style={settingsPageStyle(t)} aria-label={tx("语言")}>
+      <div className="gk-settings-heading-group">
+        <h2 className="gk-heading gk-settings-heading">{tx("界面语言")}</h2>
+        <p className="gk-settings-description">{tx("选择 GitKit 使用的界面语言。")}</p>
       </div>
-      <div className="flex flex-col gap-2" role="radiogroup" aria-label={tx("界面语言")}>
-        {options.map((option) => {
-          const active = language === option.id;
-          const progress = languageProgress(option.id);
-          return (
-            <button key={option.id} type="button" role="radio" aria-checked={active}
-              onClick={() => onChange(option.id)}
-              className="flex items-center gap-3 w-full px-4 py-3 text-left cursor-pointer transition-colors"
-              style={{ border: `1px solid ${active ? t.accent : t.border}`,
-                background: active ? t.accentBg : t.inputBg, borderRadius: R }}>
-              <span className="flex-1 min-w-0 flex flex-col gap-0.5">
-                <span className="text-xs font-semibold" style={{ color: t.text }}>{option.label} ({progress}%)</span>
-                <span className="text-[11px]" style={{ color: t.textMuted }}>{option.nativeLabel}</span>
-              </span>
-              {active && <Check size={15} aria-hidden="true" style={{ color: t.accent }} />}
-            </button>
-          );
-        })}
+      <div className="gk-settings-language-group" role="radiogroup" aria-label={tx("界面语言")}>
+        {options.map((option, index) => (
+          <button key={option.id} type="button" role="radio" aria-checked={language === option.id}
+            onClick={() => onChange(option.id)} className="gk-settings-language-option"
+            onKeyDown={(event) => {
+              if (["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft"].includes(event.key)) {
+                event.preventDefault();
+                const next = (index + 1) % options.length;
+                onChange(options[next].id);
+                event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("button")[next]?.focus();
+              }
+            }}>
+            <span className="gk-settings-radio-dot" aria-hidden="true" />
+            <span className="gk-settings-language-copy">
+              <span className="gk-settings-language-label">{option.label}</span>
+              <span className="gk-settings-language-native-label">{option.nativeLabel}</span>
+            </span>
+          </button>
+        ))}
       </div>
     </section>
   );
@@ -5427,8 +5559,8 @@ function DailyCheckSettings({ cfg, setCfg, onRunNow, busy, progress, projectCoun
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1.5">
-        <span className="gk-heading text-base font-semibold" style={{ color: t.text }}>{tx("定时检查更新")}</span>
+      <div className="flex flex-col gap-1.5 gk-settings-heading-group">
+        <span className="gk-heading gk-settings-heading" style={{ color: t.text }}>{tx("定时检查更新")}</span>
         <span className="text-xs leading-relaxed max-w-[62ch]" style={{ color: t.textMuted }}>
           {tx("按设定时间在后台检查已打开项目。发现更新或检查失败时，前台显示汇总，后台通过 Dock 图标或任务栏提醒。")}
         </span>
@@ -5569,8 +5701,8 @@ function UpdateSettings() {
 
   return (
     <div className="flex flex-col gap-5">
-      <div className="flex flex-col gap-1.5">
-        <span className="gk-heading text-base font-semibold" style={{ color: t.text }}>{tx("软件更新")}</span>
+      <div className="flex flex-col gap-1.5 gk-settings-heading-group">
+        <span className="gk-heading gk-settings-heading" style={{ color: t.text }}>{tx("软件更新")}</span>
         <span className="text-xs leading-relaxed" style={{ color: t.textMuted }}>
           {tx("从发布服务器检查新版本。更新包经签名校验后下载、安装并重启。")}
         </span>
@@ -5724,71 +5856,57 @@ function DependencySettings() {
   const t = useTheme();
   const [deps, setDeps] = useState<DepInfo[] | null>(null);
   const [checking, setChecking] = useState(false);
+  const [error, setError] = useState("");
   const run = async () => {
-    setChecking(true);
+    setChecking(true); setError("");
     try { setDeps(await checkDeps()); }
-    catch (e) { toast.error(tf("检测失败：{0}", e)); }
+    catch (e) { const message = tf("检测失败：{0}", e); setError(message); toast.error(message); }
     finally { setChecking(false); }
   };
-  useEffect(() => { run(); }, []); // auto-check on open
+  useEffect(() => { run(); }, []);
 
-  const meta: Record<string, { label: string; hint: string }> = {
-    git: { label: "Git", hint: tx("核心依赖。macOS 装 Xcode Command Line Tools 或 Homebrew 即可获得。") },
-    "git-lfs": { label: "Git LFS", hint: tx("许多仓库用它管理大文件。未安装时 checkout/push 的 LFS 钩子会报错。安装：brew install git-lfs && git lfs install") },
-    ksdiff: { label: "Kaleidoscope", hint: tx("可选。Cherry-pick/合并冲突时用它图形化解决。安装 Kaleidoscope.app 后，在其菜单执行「Integrations → Install ksdiff」即可。") },
+  const meta: Record<string, { label: string; summary: string; hint: string }> = {
+    git: { label: "Git", summary: tx("仓库操作所需的核心工具"), hint: tx("核心依赖。macOS 装 Xcode Command Line Tools 或 Homebrew 即可获得。") },
+    "git-lfs": { label: "Git LFS", summary: tx("用于管理仓库中的大文件"), hint: tx("许多仓库用它管理大文件。未安装时 checkout/push 的 LFS 钩子会报错。安装：brew install git-lfs && git lfs install") },
+    ksdiff: { label: "Kaleidoscope", summary: tx("可选，用于图形化解决合并冲突"), hint: tx("可选。Cherry-pick/合并冲突时用它图形化解决。安装 Kaleidoscope.app 后，在其菜单执行「Integrations → Install ksdiff」即可。") },
   };
+  const names = deps ? deps.map((d) => d.name) : Object.keys(meta);
 
   return (
-    <div className="flex flex-col gap-5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex flex-col gap-1">
-          <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{tx("环境依赖")}</span>
-          <span className="text-[11px]" style={{ color: t.textFaint }}>
-            {tx("检测 GitKit 调用的命令行工具是否在应用可见的 PATH 上。")}
-          </span>
+    <section className="gk-settings-page" style={settingsPageStyle(t)} aria-label={tx("环境依赖")}>
+      <div className="gk-settings-page-header">
+        <div className="gk-settings-heading-group">
+          <h2 className="gk-heading gk-settings-heading">{tx("环境依赖")}</h2>
+          <p className="gk-settings-description">{tx("检测 GitKit 调用的命令行工具是否可用。")}</p>
         </div>
-        <button {...(checking ? {} : press(run))} disabled={checking}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium flex-shrink-0"
-          style={{ background: t.accent, color: "#fff", borderRadius: R - 3,
-            cursor: checking ? "not-allowed" : "pointer", opacity: checking ? 0.6 : 1 }}>
-          <RefreshCw size={12} className={checking ? "animate-spin" : undefined} /> {tx("重新检测")}
+        <button type="button" {...(checking ? {} : press(run))} disabled={checking} className="gk-settings-primary">
+          <RefreshCw size={13} aria-hidden="true" className={checking ? "animate-spin" : undefined} />{checking ? tx("检测中…") : tx("重新检测")}
         </button>
       </div>
-
-      <div className="flex flex-col gap-2">
-        {(deps ?? []).map((d) => {
-          const m = meta[d.name] ?? { label: d.name, hint: "" };
+      <div className="gk-settings-deps-group" aria-busy={checking}>
+        {names.map((name) => {
+          const d = deps?.find((item) => item.name === name);
+          const m = meta[name] ?? { label: name, summary: "", hint: "" };
           return (
-            <div key={d.name} className="flex flex-col gap-1.5 px-3 py-2.5"
-              style={{ background: t.inputBg, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 }}>
-              <div className="flex items-center gap-2">
-                <span className="flex items-center justify-center w-4 h-4 rounded-full flex-shrink-0"
-                  style={{ background: d.found ? t.green + "22" : t.red + "22" }}>
-                  {d.found ? <Check size={11} style={{ color: t.green }} /> : <X size={11} style={{ color: t.red }} />}
-                </span>
-                <span className="text-xs font-semibold" style={{ color: t.text }}>{m.label}</span>
-                <span className="text-[11px] font-medium px-1.5 py-0.5 rounded"
-                  style={{ background: d.found ? t.greenBg : t.redBg, color: d.found ? t.green : t.red }}>
-                  {d.found ? tx("已安装") : tx("未找到")}
-                </span>
-                {d.found && d.version && (
-                  <span className="text-[11px] font-mono truncate" style={{ color: t.textMuted }}>{d.version}</span>
-                )}
+            <div key={name} className="gk-settings-dependency-row">
+              <TerminalSquare size={15} aria-hidden="true" />
+              <div className="gk-settings-dependency-copy">
+                <span className="gk-settings-dependency-name">{m.label}</span>
+                {m.summary && <p className="gk-settings-dependency-summary">{m.summary}</p>}
+                {d?.found && d.version && <span className="gk-settings-dependency-detail">{d.version}</span>}
+                {d?.found && d.path && <span className="gk-settings-dependency-path">{d.path}</span>}
+                {d && !d.found && m.hint && <p className="gk-settings-dependency-hint">{m.hint}</p>}
               </div>
-              {d.found && d.path && (
-                <span className="text-[10px] font-mono truncate pl-6" style={{ color: t.textFaint }}>{d.path}</span>
-              )}
-              {!d.found && m.hint && (
-                <span className="text-[10px] pl-6" style={{ color: t.textFaint }}>{m.hint}</span>
-              )}
+              <span className="gk-settings-status-badge" data-state={checking ? "checking" : d ? d.found ? "found" : "missing" : "unknown"}>
+                {checking ? tx("检测中…") : d ? d.found ? tx("已安装") : tx("未找到") : tx("未检测")}
+              </span>
             </div>
           );
         })}
-        {deps === null && (
-          <div className="text-[11px] px-1 py-4 text-center" style={{ color: t.textFaint }}>{tx("检测中…")}</div>
-        )}
       </div>
-    </div>
+      {error && <div className="gk-settings-error-box" role="alert"><Info size={14} aria-hidden="true" /><span>{error}</span></div>}
+      <div className="gk-settings-note"><Info size={13} aria-hidden="true" /><p>{tx("检测范围为应用可见的 PATH。")}</p></div>
+    </section>
   );
 }
 
@@ -5834,65 +5952,56 @@ function ProjectPrefsSettings({ identities }: { identities: Identity[] }) {
     const i = identities.find((x) => x.id === id);
     return i ? `${i.name} <${i.email}>` : tx("身份已删除");
   };
-  const chip = (label: string, value: string, stale: boolean) => (
-    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] max-w-full"
-      style={{ borderRadius: R - 4, background: t.inputBg, color: stale ? t.textFaint : t.textMuted }}>
-      <span style={{ color: t.textFaint }}>{label}</span>
-      <span className="truncate" style={{ color: stale ? t.amber : t.textSec }}>{value}</span>
+  const chip = (label: string, value: string, stale: boolean, content: React.ReactNode = value) => (
+    <span className="gk-settings-project-chip" title={value}>
+      <span className="gk-settings-project-chip-label">{label}</span>
+      <span className="gk-settings-project-chip-value" style={{ color: stale ? t.amber : t.textSec }}>{content}</span>
     </span>
   );
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>{tx("已保存的项目配置")}</span>
-        <span className="text-[11px]" style={{ color: t.textFaint }}>
-          {tx("这里是各个项目记住的选择：推送 / 拉取使用的 GitHub 账号,以及提交时使用的身份。删除后该项目会恢复为每次询问 / 使用默认身份。")}
-        </span>
+    <section className="gk-settings-page" style={settingsPageStyle(t)} aria-label={tx("项目配置")}>
+      <div className="gk-settings-heading-group">
+        <div className="gk-settings-title-row">
+          <h2 className="gk-heading gk-settings-heading">{tx("项目配置")}</h2>
+          <span className="gk-settings-count" aria-label={tx("已保存的项目配置")}>{rows.length}</span>
+        </div>
+        <p className="gk-settings-description">{tx("查看各项目记住的账号与身份。清除后，恢复为每次询问或使用默认身份。")}</p>
       </div>
-
-      <div className="flex flex-col gap-1.5">
-        {rows.length === 0 && (
-          <div className="text-[11px] px-1 py-6 text-center" style={{ color: t.textFaint }}>
-            {tx("还没有保存的项目配置。在账号选择弹窗中勾选「记住本项目的选择」即可保存")}
-          </div>
-        )}
+      <div className="flex flex-col gap-3">
+        {rows.length === 0 && <div className="gk-settings-list gk-settings-empty">
+          <span className="gk-settings-empty-icon"><FolderGit2 size={16} aria-hidden="true" /></span>
+          <h3>{tx("还没有保存的项目配置")}</h3>
+          <p>{tx("在账号选择弹窗中勾选「记住本项目的选择」即可保存。")}</p>
+        </div>}
         {rows.map((r) => {
           const acc = accountLabel(r.accountId);
           const ident = identityLabel(r.identityId);
+          const identity = identities.find((i) => i.id === r.identityId);
           return (
-            <div key={r.path} className="group flex items-center gap-2.5 px-2.5 py-2"
-              style={{ borderRadius: R - 2, border: `0.5px solid ${t.border}` }}>
-              <div className="flex items-center justify-center rounded-full flex-shrink-0"
-                style={{ width: 26, height: 26, background: t.accentBg }}>
-                <FolderGit2 size={13} style={{ color: t.accent }} />
-              </div>
-              <div className="flex flex-col min-w-0 flex-1 gap-1">
-                <span className="text-xs font-medium truncate" style={{ color: t.text }}>{nameOf(r.path)}</span>
-                <span className="text-[10px] font-mono truncate" style={{ color: t.textFaint }}>{r.path}</span>
-                <div className="flex items-center gap-1.5 flex-wrap">
+            <div key={r.path} className="gk-settings-project-row">
+              <span className="gk-settings-project-icon"><FolderGit2 size={16} aria-hidden="true" /></span>
+              <div className="gk-settings-project-copy">
+                <span className="gk-settings-project-name" title={nameOf(r.path)}>{nameOf(r.path)}</span>
+                <span className="gk-settings-project-path" title={r.path}>{r.path}</span>
+                <div className="gk-settings-project-chips">
                   {acc && chip("GitHub", acc, acc === tx("账号已删除"))}
-                  {ident && chip(tx("提交者"), ident, ident === tx("身份已删除"))}
+                  {ident && chip(tx("提交者"), ident, ident === tx("身份已删除"), identity ? <>{identity.name} <span className="gk-settings-mono">&lt;{identity.email}&gt;</span></> : ident)}
                 </div>
               </div>
-              <button {...press(() => clear(r.path))} title={tx("删除该项目的保存配置")}
-                className="p-1 cursor-pointer opacity-0 group-hover:opacity-100"
-                style={{ color: t.textMuted, borderRadius: R - 4 }}>
-                <Trash2 size={13} />
+              <button type="button" {...press(() => clear(r.path))} aria-label={tf("清除 {0} 的保存配置", nameOf(r.path))}
+                title={tx("删除该项目的保存配置")} className="gk-settings-row-action gk-settings-danger">
+                <Trash2 size={13} aria-hidden="true" />{tx("清除")}
               </button>
             </div>
           );
         })}
       </div>
-
-      {rows.length > 1 && (
-        <button {...press(clearAll)}
-          className="self-start flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium cursor-pointer"
-          style={{ background: t.inputBg, color: t.textMuted, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 }}>
-          <Trash2 size={12} />{tx("清空全部")}
-        </button>
-      )}
-    </div>
+      {rows.length > 1 && <button type="button" {...press(clearAll)} className="gk-settings-secondary self-start">
+        <Trash2 size={13} aria-hidden="true" />{tx("清空全部")}
+      </button>}
+      <div className="gk-settings-note"><Info size={13} aria-hidden="true" /><p>{tx("清除配置不会删除仓库，也不会改动 Git 配置。")}</p></div>
+    </section>
   );
 }
 
@@ -5987,7 +6096,7 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId,
           <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5 overscroll-contain">
             {section === "identity" && (
               <IdentitySettings identities={identities} setIdentities={setIdentities}
-                defaultId={defaultId} setDefaultId={setDefaultId} />
+                defaultId={defaultId} setDefaultId={setDefaultId} onOpenProjects={() => setSection("projects")} />
             )}
             {section === "gitlab" && (
               <RemoteConnSettings storageKey="gitkit.gitlab" title={tx("GitLab 集成")}
@@ -6229,6 +6338,7 @@ export default function App() {
   // ── settings + committer identities (persisted) ──
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<"identity" | "github" | "gitlab">("identity");
+  const openIdentitySettings = () => { setSettingsSection("identity"); setSettingsOpen(true); };
   const [identities, setIdentities] = useState<Identity[]>(loadIdentities);
   const [defaultIdentityId, setDefaultIdentityId] = useState<string>(loadDefaultIdentityId);
   useEffect(() => { saveIdentities(identities); }, [identities]);
@@ -6524,9 +6634,10 @@ export default function App() {
     branchViewFrames.current = [first];
   };
 
-  // Esc or a pointer press outside the drawer closes the detail overlay.
+  // Settings owns dismissal while open; retain the drawer underneath it.
+  // Otherwise Esc or a pointer press outside closes the detail overlay.
   useEffect(() => {
-    if (!detailOpen) return;
+    if (!detailOpen || settingsOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || diffExpanded || detailPanelRef.current?.querySelector(".gk-detail-menu [aria-expanded='true']")) return;
       if (fileTrace) exitFileTrace(); else closeDetail();
@@ -6546,7 +6657,7 @@ export default function App() {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("mousedown", onMouseDown, true);
     };
-  }, [detailOpen, diffExpanded, fileTrace]);
+  }, [detailOpen, settingsOpen, diffExpanded, fileTrace]);
 
   // Data belongs to the active project only when its path matches. On a tab
   // switch this flips false on the very first (urgent) render, so the target
@@ -7736,7 +7847,7 @@ export default function App() {
       full: workspaceView === "home", activePath: activeProject?.path ?? "",
       isLiveWatched: (repoPath) => watchedPaths.current.includes(repoPath),
       reconcileLiveStatus: (repoPath) => scheduleWorkingStatusRef.current(repoPath, true) });
-  const activity = useProjectActivity(projects, workspaceView === "home" && appForeground,
+  const activity = useProjectActivity(projects, identities, workspaceView === "home" && appForeground,
     reloadTick, checkSnapshot?.result ?? null);
   const attentionCount = overviewAttentionCount(projects, overview.entries);
   useEffect(() => {
@@ -7965,6 +8076,10 @@ export default function App() {
 
   // Commit the reviewed index with the chosen identity (or repository config).
   const doCommit = async (message: string, files: WorkingFile[], identity: Identity | null) => {
+    if (identities.length === 0) {
+      openIdentitySettings();
+      throw new Error(tx("请先在设置中配置提交者身份"));
+    }
     if (!activeProject || gitBusy || busyLabel || workingOperationRef.current) throw new Error(tx("请等待当前 Git 操作完成"));
     const repoPath = activeProject.path;
     const revision = files[0]?.revision;
@@ -8859,19 +8974,7 @@ export default function App() {
               <div className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5"
                 style={{ borderBottom: `0.5px solid ${theme.border}`, background: "transparent" }}>
                 <span className="text-xs font-medium" style={{ color: theme.textSec }}>{tx("提交历史")}</span>
-                <div className="gk-history-mode" role="group" aria-label={tx("提交历史视图")}
-                  style={{ "--gk-mode-border": theme.inputBorder, "--gk-mode-bg": theme.inputBg,
-                    "--gk-mode-muted": theme.textSec, "--gk-mode-text": theme.text,
-                    "--gk-mode-accent-fg": theme.accentFg, "--gk-mode-accent-bg": theme.accentBg } as React.CSSProperties}>
-                  <button type="button" aria-pressed={historyMode === "list"}
-                    onClick={() => startTransition(() => setHistoryMode("list"))}>
-                    <List size={12} aria-hidden="true" />{tx("列表")}
-                  </button>
-                  <button type="button" aria-pressed={historyMode === "topology"}
-                    onClick={() => startTransition(() => setHistoryMode("topology"))}>
-                    <Network size={12} aria-hidden="true" />{tx("拓扑图")}
-                  </button>
-                </div>
+                <HistoryModeSwitch mode={historyMode} onChange={(mode) => startTransition(() => setHistoryMode(mode))} />
                 {historyMode === "list" && !focusActive && smartMergeResult.mergedGroups > 0 && (
                   <button type="button" aria-pressed={smartMerge}
                     title={tx("仅合并相同变更的展示，不会修改 Git 历史")}
@@ -8916,20 +9019,7 @@ export default function App() {
                   </button>
                 </div>
               )}
-              {focusActive && (
-                <div className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5"
-                  style={{ borderBottom: `0.5px solid ${theme.border}`, background: theme.accentBg }}>
-                  <GitBranch size={11} style={{ color: theme.accent }} />
-                  <span className="text-[11px] flex-1 truncate" style={{ color: theme.accentFg }}>
-                    {tx("只看分支")} {focusBranch}
-                  </span>
-                  <button onClick={() => setFocus(null)}
-                    className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] cursor-pointer"
-                    style={{ color: theme.accent, borderRadius: R - 4 }}>
-                    <X size={10} /> {tx("全部视图")}
-                  </button>
-                </div>
-              )}
+              <BranchFocusBanner branch={focusActive ? focusBranch : null} onClear={() => setFocus(null)} />
               <div ref={timelineScrollRef} className={`flex-1 min-h-0 ${historyMode === "topology" ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}
                 aria-busy={!dataReady || switching || branchViewLoading}
                 style={{ overscrollBehaviorY: "none" }}>
@@ -8961,7 +9051,7 @@ export default function App() {
                     </span>
                   </div>
                 ) : !hasHead && commits.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
+                  <div className="flex min-h-full flex-col items-center justify-center gap-2 px-6 py-6 text-center">
                     <GitCommit size={24} aria-hidden="true" style={{ color: theme.textMuted }} />
                     <span className="text-sm font-medium" style={{ color: theme.text }}>{tx("当前分支还没有提交")}</span>
                     <span className="text-xs leading-relaxed max-w-sm" style={{ color: theme.textSec }}>
@@ -9118,6 +9208,7 @@ export default function App() {
                         identities={identities} defaultIdentityId={defaultIdentityId}
                         projectKey={path ?? ""}
                         onCommit={doCommit}
+                        onConfigureIdentity={openIdentitySettings}
                         operationActive={!operationKnown || !!activeRepoOperation}
                         busy={!!gitBusy || !!busyLabel || confirmBusy}
                         onStage={(files) => doStage(files, true)}

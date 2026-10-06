@@ -30,8 +30,8 @@ export function configureProjectWatch(paths: string[], foreground: boolean, revi
   return invoke("project_watch_configure", { paths, foreground, revision });
 }
 
-export function loadProjectActivity(path: string, fromTimestamp: number, toTimestamp: number): Promise<ProjectActivitySummary> {
-  return invoke<ProjectActivitySummary>("git_project_activity", { path, fromTimestamp, toTimestamp });
+export function loadProjectActivity(path: string, fromTimestamp: number, toTimestamp: number, authorEmails: readonly string[]): Promise<ProjectActivitySummary> {
+  return invoke<ProjectActivitySummary>("git_project_activity", { path, fromTimestamp, toTimestamp, authorEmails });
 }
 
 /** Keep native errors local to the active UI language without changing payloads. */

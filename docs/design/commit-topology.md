@@ -29,6 +29,16 @@ The canvas retains native two-axis scrolling. Edges and overview markers project
 directly into a viewport-sized SVG, avoiding a history-wide SVG's paint bounds.
 Scrolling synchronizes its viewBox in the DOM without rerendering the graph.
 
+Selection feedback uses one short SVG light segment on the selected commit's
+existing, direct parent/child paths, traveling outward from that commit. Lane
+colors remain the source of the highlight, and stash light segments retain a
+broken-line appearance. A brief outer-ring highlight accompanies the selection;
+the static selection, HEAD, merge, and stash markers remain the visual authority.
+The feedback starts only when the selected full hash changes. Restoring a
+selection on mount, repeating a click, zooming, hovering, resizing, and panning
+do not replay it. A new selection cancels the previous animation. Reduced motion
+keeps the existing static selection without the light segment or ring animation.
+
 ## Direction contract
 
 - THESIS: expose real branch ancestry, forks, and merges as a horizontal diagram

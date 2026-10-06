@@ -21,6 +21,7 @@
 .gk-overview-primary { color: var(--gko-accent); background: var(--gko-accent-bg); font-weight: 600; }
 .gk-overview-primary:not(:disabled):hover { background: color-mix(in srgb, var(--gko-accent-bg), var(--gko-accent) 10%); }
 .gk-overview-button:disabled { opacity: .5; cursor: default; }
+.gk-overview-button:disabled[data-running="true"] { opacity: 1; }
 .gk-overview-add { width: 32px; padding: 0; border: .5px solid var(--gko-border); }
 .gk-overview-freshness { display: flex; flex: 0 0 auto; flex-wrap: wrap; gap: 3px 12px; padding: 10px 24px 0; color: var(--gko-secondary); font-size: 10px; font-variant-numeric: tabular-nums; }
 .gk-overview-filterbar { display: flex; position: sticky; top: 0; z-index: 1; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 24px; border-top: .5px solid var(--gko-border); border-bottom: .5px solid var(--gko-border); background: color-mix(in srgb, var(--gko-surface), var(--gko-panel) 55%); }
@@ -42,6 +43,7 @@
 .gk-overview-search button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex: 0 0 auto; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--gko-secondary); cursor: pointer; }
 .gk-overview-search button:hover { background: var(--gko-hover); color: var(--gko-text); }
 .gk-overview-content { flex: 1 0 auto; min-height: 150px; padding: 4px 16px 18px; }
+.gk-overview-content.is-onboarding { padding: 0; }
 .gk-overview-section + .gk-overview-section { margin-top: 13px; }
 .gk-overview-section-heading { display: flex; align-items: center; gap: 7px; min-height: 34px; padding: 7px 8px 5px; color: var(--gko-secondary); }
 .gk-overview-section-heading h2 { margin: 0; font-family: var(--gk-font-ui); font-size: 11px; font-weight: 600; letter-spacing: 0; }
@@ -87,8 +89,25 @@
 .gk-overview-empty > svg { color: var(--gko-muted); }
 .gk-overview-empty h2 { margin: 1px 0 0; color: var(--gko-text); font-size: 14px; font-weight: 600; }
 .gk-overview-empty p { max-width: 44ch; margin: 0 0 3px; color: var(--gko-secondary); font-size: 12px; }
-.gk-overview-onboarding { height: 100%; min-height: 260px; }
+.gk-overview-onboarding { position: relative; isolation: isolate; overflow: hidden; height: 100%; min-height: 260px; }
+.gk-overview-onboarding > :not(.gk-onboarding-dot-field) { position: relative; z-index: 1; }
 .gk-overview-onboarding .gk-overview-actions { margin-top: 5px; }
+.gk-onboarding-art { position: relative; width: 240px; max-width: 100%; height: 148px; flex: 0 0 auto; margin-bottom: 2px; isolation: isolate; pointer-events: none; }
+.gk-onboarding-art svg { position: relative; width: 100%; height: 100%; stroke-width: 1.5; }
+.gk-onboarding-dot-field {
+  position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
+  background: radial-gradient(circle, color-mix(in srgb, var(--gko-accent) 8%, transparent) 1px, transparent 1.1px) 0 0 / 24px 24px;
+}
+.gk-onboarding-dot-highlight {
+  position: absolute; left: calc(12px + var(--gk-dot-column, 0) * 24px); top: calc(12px + var(--gk-dot-row, 0) * 24px);
+  width: 2px; height: 2px; border-radius: 50%; background: var(--gko-accent); opacity: 0;
+  transform: translate(-50%, -50%); animation: gk-onboarding-dot-glow 6s ease-in-out infinite;
+}
+.gk-onboarding-dot-field[data-paused="true"] .gk-onboarding-dot-highlight { animation-play-state: paused; }
+@keyframes gk-onboarding-dot-glow { 0%, 15%, 85%, 100% { opacity: 0; } 45%, 55% { opacity: .24; } }
+.gk-onboarding-folder { fill: var(--gko-panel); stroke: var(--gko-accent); }
+.gk-onboarding-link { stroke: var(--gko-accent2); stroke-width: 1.8; }
+.gk-onboarding-point { fill: var(--gko-panel); stroke: var(--gko-accent2); stroke-width: 1.8; }
 .gk-overview-footer { display: flex; justify-content: space-between; flex: 0 0 auto; gap: 12px; padding: 10px 24px; border-top: .5px solid var(--gko-border); color: var(--gko-secondary); font-size: 10px; font-variant-numeric: tabular-nums; }
 @keyframes gk-overview-spin { to { transform: rotate(360deg); } }
 .gk-overview-spin { animation: gk-overview-spin 1s linear infinite; }
@@ -117,4 +136,5 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .gk-overview-spin { animation: none; }
+  .gk-onboarding-dot-highlight { display: none; animation: none; }
 }

@@ -1,6 +1,7 @@
 export interface ProjectActivityCommit { oid: string; committedAt: number }
 export interface ProjectActivitySummary { commits: ProjectActivityCommit[]; checkedAt: number }
 export interface ActivityEntry { summary: ProjectActivitySummary | null; error: string | null; checking: boolean }
+export interface StoredActivityEntry { path: string; scopeKey: string; value: ActivityEntry }
 export interface ActivityWindow { key: string; fromTimestamp: number; toTimestamp: number; start: Date; end: Date }
 export interface ActivityDay {
   key: string;
@@ -9,11 +10,21 @@ export interface ActivityDay {
   projects: { id: string; count: number }[];
 }
 interface ActivityProject { id: string }
-export interface ActivityRequest { key: string; window: ActivityWindow }
+export interface ActivityRequest { key: string; window: ActivityWindow; authorEmails: readonly string[] }
 interface CachedActivity { key: string; summary: ProjectActivitySummary | null; error: string | null }
 
+/** Names and default selection do not change which configured authors are ours. */
+export function activityAuthorEmails(identities: readonly { email: string }[]): string[] {
+  return [...new Set(identities.map(({ email }) => email.trim().replace(/[A-Z]/g, (letter) => letter.toLowerCase())).filter(Boolean))].sort();
+}
+
+/** Never show a snapshot from another repository, calendar, or identity set. */
+export function activityEntryForScope(stored: StoredActivityEntry | undefined, path: string, scopeKey: string): ActivityEntry | null {
+  return stored?.path === path && stored.scopeKey === scopeKey ? stored.value : null;
+}
+
 /** Session-only cache: keep completed native reads when the workbench is hidden. */
-export function createActivityCache(load: (path: string, fromTimestamp: number, toTimestamp: number) => Promise<ProjectActivitySummary>) {
+export function createActivityCache(load: (path: string, fromTimestamp: number, toTimestamp: number, authorEmails: readonly string[]) => Promise<ProjectActivitySummary>) {
   const records = new Map<string, CachedActivity>();
   const inFlight = new Map<string, { key: string; promise: Promise<ProjectActivitySummary> }>();
   let retainedPaths: Set<string> | null = null;
@@ -33,7 +44,7 @@ export function createActivityCache(load: (path: string, fromTimestamp: number, 
       const running = inFlight.get(path);
       if (running?.key === request.key) return running.promise;
       const canStore = () => inFlight.get(path)?.promise === promise && (!retainedPaths || retainedPaths.has(path));
-      const promise = Promise.resolve().then(() => load(path, request.window.fromTimestamp, request.window.toTimestamp)).then(
+      const promise = Promise.resolve().then(() => load(path, request.window.fromTimestamp, request.window.toTimestamp, request.authorEmails)).then(
         (summary) => {
           if (canStore()) records.set(path, { key: request.key, summary, error: null });
           return summary;

@@ -55,6 +55,7 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
   const layout = useMemo(() => buildCommitTopology(commits, graph), [commits, graph]);
   const viewportRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const previousSelectionRef = useRef(selectedHash);
   const scrollRef = useRef({ left: 0, top: 0 });
   const [zoom, setZoom] = useState(1);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
@@ -125,9 +126,15 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    const observer = new ResizeObserver(() => {
-      setViewportSize({ width: viewport.clientWidth, height: viewport.clientHeight });
-    });
+    const measure = () => {
+      const width = viewport.clientWidth, height = viewport.clientHeight;
+      setViewportSize(current => current.width === width && current.height === height
+        ? current : { width, height });
+    };
+    // Scope changes remount the canvas. Measure before its first paint so nodes
+    // are centered and SVG edges are visible without waiting for the observer.
+    measure();
+    const observer = new ResizeObserver(measure);
     observer.observe(viewport);
     return () => observer.disconnect();
   }, [layout.nodes.length === 0]);
@@ -147,6 +154,29 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
     }
     syncSvgViewport();
   }, [zoom, layout, initialNode, viewportSize]);
+
+  useLayoutEffect(() => {
+    // Restoring a selection on mount is static. Only a new selected hash plays;
+    // zoom, hover, resize and scrolling never restart the relationship feedback.
+    if (previousSelectionRef.current === selectedHash) return;
+    previousSelectionRef.current = selectedHash;
+    if (!selectedHash || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const svg = svgRef.current;
+    if (!svg) return;
+    const animations: Animation[] = [];
+    svg.querySelectorAll<SVGPathElement>(".gk-topology-edge-flow").forEach(path => {
+      const forward = path.dataset.direction === "forward";
+      animations.push(path.animate([
+        { strokeDashoffset: forward ? "18" : "-100", opacity: 0 },
+        { strokeDashoffset: "-41", opacity: 0.9, offset: 0.5 },
+        { strokeDashoffset: forward ? "-100" : "18", opacity: 0 },
+      ], { duration: 560, delay: 40, easing: "cubic-bezier(0.22, 0.68, 0.24, 1)" }));
+    });
+    const ring = svg.querySelector(".gk-topology-node-pulse");
+    if (ring) animations.push(ring.animate([{ opacity: 0 }, { opacity: 0.7 }, { opacity: 0 }],
+      { duration: 400, easing: "ease-out" }));
+    return () => animations.forEach(animation => animation.cancel());
+  }, [selectedHash]);
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || !event.isPrimary) return;
@@ -228,10 +258,17 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
               const px = stageLeft + edge.parent.x * zoom, py = stageTop + edge.parent.y * zoom;
               const cx = stageLeft + edge.child.x * zoom, cy = stageTop + edge.child.y * zoom;
               const bend = Math.min(84 * zoom, (cx - px) / 2);
-              return <path key={`${edge.child.commit.fullHash}:${edge.parent.commit.fullHash}`}
-                d={`M ${px} ${py} C ${px + bend} ${py}, ${cx - bend} ${cy}, ${cx} ${cy}`}
-                stroke={edge.color} strokeWidth={2} fill="none" strokeLinecap="round"
-                strokeDasharray={edge.child.commit.isStash ? "5 5" : undefined} />;
+              const d = `M ${px} ${py} C ${px + bend} ${py}, ${cx - bend} ${cy}, ${cx} ${cy}`;
+              const related = selectedHash === edge.parent.commit.fullHash || selectedHash === edge.child.commit.fullHash;
+              return <g key={`${edge.child.commit.fullHash}:${edge.parent.commit.fullHash}`}>
+                <path d={d} stroke={edge.color} strokeWidth={2} fill="none" strokeLinecap="round"
+                  strokeDasharray={edge.child.commit.isStash ? "5 5" : undefined} />
+                {related && <path className="gk-topology-edge-flow" d={d} pathLength={100}
+                  data-direction={selectedHash === edge.parent.commit.fullHash ? "forward" : "reverse"}
+                  style={{ "--gk-edge-color": edge.color } as CSSProperties}
+                  stroke={edge.color} strokeWidth={4} fill="none" strokeLinecap="round"
+                  strokeDasharray={edge.child.commit.isStash ? "3 3 3 3 3 109" : "18 100"} />}
+              </g>;
             })}
             {zoom < 0.55 && layout.nodes.map(node => <circle key={node.commit.fullHash}
               cx={stageLeft + node.x * zoom} cy={stageTop + node.y * zoom}
@@ -244,6 +281,14 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
                 r={Math.max(2.8, 8 * zoom)} fill={selectedNode.commit.tags?.includes("HEAD") ? selectedNode.color : theme.bgPanel}
                 stroke={selectedNode.color} strokeWidth={1.5} />
             </g>}
+            {selectedNode && (selectedNode.commit.isStash && zoom >= 0.55 ? <rect
+              className="gk-topology-node-pulse" x={stageLeft + (selectedNode.x - 15) * zoom}
+              y={stageTop + (selectedNode.y - 15) * zoom} width={30 * zoom} height={30 * zoom}
+              rx={6 * zoom} fill="none" stroke={selectedNode.color} strokeWidth={2.5}
+            /> : <circle className="gk-topology-node-pulse"
+              cx={stageLeft + selectedNode.x * zoom} cy={stageTop + selectedNode.y * zoom}
+              r={zoom < 0.55 ? Math.max(2.8, 8 * zoom) + 6 : 15 * zoom}
+              fill="none" stroke={selectedNode.color} strokeWidth={2.5} />)}
           </svg>
         <div className="gk-topology-stage" style={{ left: stageLeft, top: stageTop,
           width: layout.width * zoom, height: layout.height * zoom }}>
