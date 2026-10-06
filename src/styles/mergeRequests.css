@@ -34,6 +34,7 @@
 .gkm-pipeline-success{color:var(--gkm-green)}
 .gkm-pipeline-failed{color:var(--gkm-red)}
 .gkm-row-title{flex:1;min-width:0;display:block;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:12px;font-weight:650;line-height:1.6}
+.gkm-row-project{display:block;overflow:hidden;margin:0 0 3px 19px;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:var(--gkm-secondary)}
 .gkm-row-branch{display:flex;align-items:center;gap:6px;margin-left:19px;font-size:10px;color:var(--gkm-muted)}
 .gkm-row-branch span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:65%}
 .gkm-row-branch svg{flex-shrink:0}
@@ -69,6 +70,8 @@
 .gkm-head-actions>.gkm-text-button{color:var(--gkm-muted)}
 .gkm-detail-head{padding:17px 28px 19px;flex-shrink:0;min-width:0}
 .gkm-detail-kicker{display:flex;align-items:center;gap:7px;color:var(--gkm-muted);font-size:11px}
+.gkm-detail-project{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gkm-detail-kicker>svg,.gkm-detail-kicker>span:not(.gkm-detail-project){flex-shrink:0}
 .gkm-detail-head h2{margin:8px 0 11px;font-size:20px;font-weight:650;line-height:1.4;overflow-wrap:anywhere}
 .gkm-detail-branches{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:11px;color:var(--gkm-muted)}
 .gkm-detail-branches code{font-size:11px;padding:2px 6px;background:var(--gkm-hover);border-radius:4px;overflow:hidden;max-width:42%;text-overflow:ellipsis;white-space:nowrap}

@@ -59,10 +59,11 @@ export interface MergeRequestEntryProps {
 }
 
 export function MergeRequestEntry({ theme, snapshot, open, anchorRef, onToggle }: MergeRequestEntryProps) {
+  if (!snapshot?.total) return null;
   const count = snapshot?.newCount || 0;
   const title = snapshot?.lastCheckedAt === null || !snapshot ? tx("合并请求") : tf("{0} 条相关请求 · {1} 条新请求 · 上次同步 {2}", snapshot.total, count, dateLabel(snapshot.lastCheckedAt));
   return <button ref={anchorRef} type="button" className={`gkm-entry${count ? " gkm-entry-unread" : ""}`} style={themeStyle(theme)} aria-haspopup="dialog" aria-expanded={open} aria-controls="gkm-mr-popover" onClick={onToggle} title={title}>
-    <GitPullRequest size={13} aria-hidden="true" /><span>{count > 0 ? tf("{0} 条新合并请求", count) : tx("合并请求")}</span>{count > 0 && <span className="gkm-entry-dot" aria-hidden="true" />}
+    <GitPullRequest size={13} aria-hidden="true" /><span>{count > 0 ? tf("{0} 条新合并请求", count) : tf("{0} 条合并请求", snapshot.total)}</span>{count > 0 && <span className="gkm-entry-dot" aria-hidden="true" />}
   </button>;
 }
 
@@ -74,7 +75,7 @@ export interface MergeRequestPopoverProps {
   open: boolean;
   anchorRef: RefObject<HTMLButtonElement>;
   onClose: (reason: MergeRequestCloseReason) => void;
-  onSelect: (iid: number) => void;
+  onSelect: (mrId: number) => void;
   onRefresh: () => void | Promise<void>;
   onConfigure?: () => void;
 }
@@ -184,29 +185,30 @@ export function MergeRequestPopover({ theme, snapshot, configured, error, open, 
   const filters: Array<[ListFilter, string]> = [["all", "全部"], ["reviewer", "我审核"], ["assignee", "指派给我"], ["author", "我发起"]];
   const configure = onConfigure && <button className="gkm-button gkm-button-primary" type="button" onClick={onConfigure}><KeyRound size={14} aria-hidden="true" />{tx("连接 GitLab 账号")}</button>;
   return createPortal(<div ref={popoverRef} id="gkm-mr-popover" className="gkm-popover" style={themeStyle(theme)} role="dialog" aria-modal={false} aria-labelledby="gkm-list-title">
-    <header className="gkm-list-head"><div><h2 id="gkm-list-title">{tx("合并请求")}</h2><p title={snapshot?.project?.pathWithNamespace}>{snapshot?.project?.pathWithNamespace || tx("当前仓库")}</p></div><button className="gkm-icon-button" type="button" aria-label={tx("刷新合并请求")} title={tx("刷新合并请求")} onClick={refresh} disabled={!configured || busy}><RefreshCw size={15} className={busy ? "gkm-spin" : undefined} aria-hidden="true" /></button><button className="gkm-icon-button" type="button" aria-label={tx("关闭合并请求")} onClick={() => { onClose("button"); anchorRef.current?.focus(); }}><X size={16} aria-hidden="true" /></button></header>
+    <header className="gkm-list-head"><div><h2 id="gkm-list-title">{tx("合并请求")}</h2><p title={snapshot?.instanceUrl ?? undefined}>{tx("所有项目")}{snapshot?.user && ` · @${snapshot.user.username}`}</p></div><button className="gkm-icon-button" type="button" aria-label={tx("刷新合并请求")} title={tx("刷新合并请求")} onClick={refresh} disabled={!configured || busy}><RefreshCw size={15} className={busy ? "gkm-spin" : undefined} aria-hidden="true" /></button><button className="gkm-icon-button" type="button" aria-label={tx("关闭合并请求")} onClick={() => { onClose("button"); anchorRef.current?.focus(); }}><X size={16} aria-hidden="true" /></button></header>
     {configured && hasCache && <div className="gkm-list-count"><span>{tf("{0} 条相关请求", snapshot?.total || 0)}</span>{!!snapshot?.newCount && <strong>{tf("{0} 条新请求", snapshot.newCount)}</strong>}</div>}
     {configured && <div className="gkm-filters" aria-label={tx("按我的角色筛选")}>{filters.map(([value, label]) => <button type="button" key={value} aria-pressed={filter === value} className={filter === value ? "is-selected" : ""} onClick={() => setFilter(value)}>{tx(label)}{hasCache && <span>{value === "all" ? items.length : items.filter(item => item.roles.includes(value)).length}</span>}</button>)}</div>}
     <div className="gkm-list-body" ref={listRef} onScroll={event => { scrollPositions.current[filter] = event.currentTarget.scrollTop; }}>
-      {!configured ? <EmptyState title={tx("连接账号，查看相关请求")}>{tx("使用当前 GitLab 仓库的账号，同步由你审核、指派给你和你发起的合并请求。")}{configure}</EmptyState> : <>
+      {!configured ? <EmptyState title={tx("连接账号，查看相关请求")}>{tx("连接 GitLab 账号，同步所有项目中由你审核、指派给你和你发起的合并请求。")}{configure}</EmptyState> : <>
         {failure && <Banner tone="error" action={authError && onConfigure ? <button className="gkm-text-button" type="button" onClick={onConfigure}>{tx("更新凭据")}</button> : undefined}>{translateNativeMessage(failure)}{hasCache && <small>{tx("正在显示上次同步的结果。")}</small>}</Banner>}
         {snapshot?.stale && !failure && <Banner>{tx("缓存可能已过期，刷新后确认最新状态。")}</Banner>}
         {snapshot?.persistenceError && <Banner>{tx("已读记录保存失败，下次启动可能再次显示新提醒。")}</Banner>}
-        {!hasCache && busy ? <EmptyState title={tx("正在同步合并请求")} busy>{tx("首次同步会建立基线，已有请求不会全部标为新。")}</EmptyState> : !hasCache && failure ? <EmptyState title={tx("暂时无法同步")}>{tx("连接恢复后可以重试。")}{configure}</EmptyState> : visible.length === 0 ? <EmptyState title={filter === "all" ? tx("没有相关的开放请求") : tx("这个角色下暂无请求")}>{filter === "all" ? tx("新请求会在这里出现。") : tx("可以切换到全部，查看其他相关请求。")}</EmptyState> : visible.map(item => <MergeRequestRow key={`${item.projectId}:${item.iid}`} item={item} unread={!!snapshot?.unseenIids.includes(item.iid)} onSelect={onSelect} />)}
+        {!hasCache && busy ? <EmptyState title={tx("正在同步合并请求")} busy>{tx("首次同步会建立基线，已有请求不会全部标为新。")}</EmptyState> : !hasCache && failure ? <EmptyState title={tx("暂时无法同步")}>{tx("连接恢复后可以重试。")}{configure}</EmptyState> : visible.length === 0 ? <EmptyState title={filter === "all" ? tx("没有相关的开放请求") : tx("这个角色下暂无请求")}>{filter === "all" ? tx("新请求会在这里出现。") : tx("可以切换到全部，查看其他相关请求。")}</EmptyState> : visible.map(item => <MergeRequestRow key={item.id} item={item} unread={!!snapshot?.unseenIds.includes(item.id)} onSelect={onSelect} />)}
       </>}
     </div>
-    <footer className="gkm-list-foot"><span>{busy ? tx("正在同步…") : hasCache ? tf("上次同步 {0}", dateLabel(snapshot!.lastCheckedAt)) : tx("仅同步当前仓库")}</span><span>{tx("打开列表不会清除新提醒")}</span></footer>
+    <footer className="gkm-list-foot"><span>{busy ? tx("正在同步…") : hasCache ? tf("上次同步 {0}", dateLabel(snapshot!.lastCheckedAt)) : tx("同步所有项目的相关请求")}</span><span>{tx("打开列表不会清除新提醒")}</span></footer>
   </div>, document.body);
 }
 
-function MergeRequestRow({ item, unread, onSelect }: { item: MrSummary; unread: boolean; onSelect: (iid: number) => void }) {
+function MergeRequestRow({ item, unread, onSelect }: { item: MrSummary; unread: boolean; onSelect: (mrId: number) => void }) {
   const status = item.draft ? tx("草稿") : item.detailedMergeStatus === "mergeable" ? tx("可以合并")
     : item.detailedMergeStatus === "not_approved" ? tx("等待审批") : item.detailedMergeStatus === "conflict" ? tx("存在冲突")
     : item.pipelineStatus && item.pipelineStatus !== "success" ? statusLabel(item.pipelineStatus) : tx("等待合并检查");
   const ready = !item.draft && item.detailedMergeStatus === "mergeable";
   const failed = item.detailedMergeStatus === "conflict" || item.pipelineStatus === "failed";
-  return <button className="gkm-row" type="button" title={item.title} onClick={() => onSelect(item.iid)} aria-label={tf("打开 !{0}：{1}{2}", item.iid, item.title, unread ? tx("，新请求") : "")}>
+  return <button className="gkm-row" type="button" title={`${item.projectPathWithNamespace} !${item.iid} · ${item.title}`} onClick={() => onSelect(item.id)} aria-label={tf("打开 {0} !{1}：{2}{3}", item.projectPathWithNamespace, item.iid, item.title, unread ? tx("，新请求") : "")}>
     <span className="gkm-row-top"><GitPullRequest size={14} aria-hidden="true" /><span className="gkm-row-title">{item.title}</span>{item.draft && <span className="gkm-tag">{tx("草稿")}</span>}{unread && <span className="gkm-entry-dot" aria-label={tx("新")} />}<span className="gkm-iid">!{item.iid}</span></span>
+    <span className="gkm-row-project" title={item.projectPathWithNamespace}>{item.projectPathWithNamespace}</span>
     <span className="gkm-row-branch" title={`${item.sourceBranch} → ${item.targetBranch}`}><span>{item.sourceBranch}</span><ArrowRight size={11} aria-hidden="true" /><span>{item.targetBranch}</span></span>
     <span className="gkm-row-meta"><span className="gkm-row-identity"><span className="gkm-row-roles">{item.roles.map(roleLabel).join(" · ")}</span><span title={`${item.author.name || item.author.username} · ${dateLabel(item.updatedAt)}`}>{item.author.name || item.author.username} · {dateLabel(item.updatedAt)}</span></span><span className={`gkm-pipeline gkm-pipeline-${ready ? "success" : failed ? "failed" : "none"}`}>{ready ? <CheckCircle2 size={12} aria-hidden="true" /> : failed ? <AlertCircle size={12} aria-hidden="true" /> : <Clock3 size={12} aria-hidden="true" />}<span>{status}</span></span></span>
   </button>;
@@ -367,14 +369,14 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
   const successful = alreadyMerged || result?.state === "merged";
   return <section className="gkm-detail" style={themeStyle(theme)} aria-labelledby="gkm-detail-title">
     <div className="gkm-detail-nav">{backButtons}</div>
-    <header className="gkm-detail-head"><div className="gkm-detail-kicker"><GitPullRequest size={15} aria-hidden="true" /><span>!{summary!.iid}</span><span className="gkm-tag">{tx(alreadyMerged ? "已合并" : remoteState === "closed" ? "已关闭" : summary!.draft ? "草稿" : "开放")}</span>{summary!.roles.map(role => <span className="gkm-role" key={role}>{roleLabel(role)}</span>)}</div><h2 ref={titleRef} tabIndex={-1} id="gkm-detail-title">{summary!.title}</h2><div className="gkm-detail-branches"><code title={summary!.sourceBranch}>{summary!.sourceBranch}</code><ArrowRight size={13} aria-hidden="true" /><code title={summary!.targetBranch}>{summary!.targetBranch}</code><span>{tf("由 {0} 发起", summary!.author.name || summary!.author.username)}</span></div></header>
+    <header className="gkm-detail-head"><div className="gkm-detail-kicker"><GitPullRequest size={15} aria-hidden="true" /><span className="gkm-detail-project" title={summary!.projectPathWithNamespace}>{summary!.projectPathWithNamespace}</span><span>!{summary!.iid}</span><span className="gkm-tag">{tx(alreadyMerged ? "已合并" : remoteState === "closed" ? "已关闭" : summary!.draft ? "草稿" : "开放")}</span>{summary!.roles.map(role => <span className="gkm-role" key={role}>{roleLabel(role)}</span>)}</div><h2 ref={titleRef} tabIndex={-1} id="gkm-detail-title">{summary!.title}</h2><div className="gkm-detail-branches"><code title={summary!.sourceBranch}>{summary!.sourceBranch}</code><ArrowRight size={13} aria-hidden="true" /><code title={summary!.targetBranch}>{summary!.targetBranch}</code><span>{tf("由 {0} 发起", summary!.author.name || summary!.author.username)}</span></div></header>
     {error && <Banner tone="error">{translateNativeMessage(error)}</Banner>}
     {snapshot?.error && !error && <Banner tone="error">{translateNativeMessage(snapshot.error.message)}</Banner>}
     {snapshot?.stale && !snapshot.error && <Banner>{tx("缓存可能已过期，刷新后确认最新状态。")}</Banner>}
     {notice && <Banner tone="error">{translateNativeMessage(notice)}</Banner>}
     {versionChanged && !successful && <Banner action={<button className="gkm-text-button" type="button" onClick={reviewLatest} disabled={reviewing || submitting}>{reviewing && <LoaderCircle className="gkm-spin" size={13} />}{tx("查看最新改动")}</button>}>{tx("合并请求有变化，当前差异仍保留你正在查看的版本。")}</Banner>}
     {view === "confirm" ? <>
-      <div className="gkm-confirm"><div className="gkm-confirm-icon"><GitMerge size={24} aria-hidden="true" /></div><h3>{tf("将 !{0} 合并到 {1}", summary!.iid, summary!.targetBranch)}</h3><p>{tx("提交后，GitLab 将按项目规则执行合并。")}</p><dl className="gkm-confirm-summary"><div><dt>{tx("源分支")}</dt><dd>{summary!.sourceBranch}</dd></div><div><dt>{tx("目标分支")}</dt><dd>{summary!.targetBranch}</dd></div><div><dt>{tx("当前查看的版本")}</dt><dd><code title={reviewedSha}>{reviewedSha.slice(0, 12)}</code></dd></div></dl>
+      <div className="gkm-confirm"><div className="gkm-confirm-icon"><GitMerge size={24} aria-hidden="true" /></div><h3>{tf("将 !{0} 合并到 {1}", summary!.iid, summary!.targetBranch)}</h3><p>{tx("提交后，GitLab 将按项目规则执行合并。")}</p><dl className="gkm-confirm-summary"><div><dt>{tx("项目")}</dt><dd>{summary!.projectPathWithNamespace}</dd></div><div><dt>{tx("源分支")}</dt><dd>{summary!.sourceBranch}</dd></div><div><dt>{tx("目标分支")}</dt><dd>{summary!.targetBranch}</dd></div><div><dt>{tx("当前查看的版本")}</dt><dd><code title={reviewedSha}>{reviewedSha.slice(0, 12)}</code></dd></div></dl>
         <label className="gkm-option"><input type="checkbox" checked={effectiveSquash} disabled={submitting || policy === "always" || policy === "never"} onChange={event => setSquash(event.target.checked)} /><span>{tx("压缩提交（Squash）")}<small>{tx(policy === "always" ? "项目要求压缩提交" : policy === "never" ? "项目禁止压缩提交" : "将本次改动整理为一个提交")}</small></span></label>
         <label className="gkm-option"><input type="checkbox" checked={effectiveDelete} disabled={submitting || deleteRequired || !deleteAllowed} onChange={event => setDeleteSource(event.target.checked)} /><span>{tx("合并后删除源分支")}<small>{tx(deleteRequired ? "项目要求删除源分支" : !deleteAllowed ? "没有删除源分支的权限" : "只影响远程源分支，本地分支保持原样")}</small></span></label><div className="gkm-sha-check"><ShieldCheck size={15} aria-hidden="true" />{tx("合并时再次核对源版本与权限")}</div>
       </div><footer className="gkm-detail-foot"><span>{tx("不会自动更新本地仓库")}</span><div className="gkm-foot-actions"><button className="gkm-button" type="button" onClick={() => setView("detail")} disabled={submitting}>{tx("返回详情")}</button><button className="gkm-button gkm-button-primary" type="button" onClick={merge} disabled={mergeBlocked}>{submitting ? <LoaderCircle className="gkm-spin" size={14} /> : <GitMerge size={14} />}{tx(submitting ? "正在提交…" : "确认合并")}</button></div></footer>

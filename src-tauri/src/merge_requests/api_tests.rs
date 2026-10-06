@@ -20,7 +20,7 @@ fn project() -> Value {
 }
 
 fn mr(iid: u64, author: u64, assignees: &[u64], reviewers: &[u64]) -> Value {
-    json!({"id": 100 + iid, "iid": iid, "project_id": 9, "title": format!("MR {iid}"), "state": "opened",
+    json!({"id": 100 + iid, "iid": iid, "project_id": 9, "references": {"full": format!("team/sub/app!{iid}")}, "title": format!("MR {iid}"), "state": "opened",
         "description": "Only loaded for details", "source_branch": "feature/ui", "target_branch": "main",
         "author": user(author), "assignees": assignees.iter().map(|id| user(*id)).collect::<Vec<_>>(),
         "reviewers": reviewers.iter().map(|id| user(*id)).collect::<Vec<_>>(), "draft": false,
@@ -28,6 +28,23 @@ fn mr(iid: u64, author: u64, assignees: &[u64], reviewers: &[u64]) -> Value {
         "head_pipeline": {"status": "success"}, "user": {"can_merge": true}, "blocking_discussions_resolved": true,
         "has_conflicts": false, "diff_refs": {"base_sha": BASE, "start_sha": START, "head_sha": SHA},
         "squash": false, "should_remove_source_branch": false, "force_remove_source_branch": false, "source_project_id": 9})
+}
+
+fn other_project_mr(iid: u64, author: u64, assignees: &[u64], reviewers: &[u64]) -> Value {
+    let mut request = mr(iid, author, assignees, reviewers);
+    request["id"] = json!(1000 + iid);
+    request["project_id"] = json!(10);
+    request["source_project_id"] = json!(10);
+    request["references"]["full"] = json!(format!("other/mobile!{iid}"));
+    request
+}
+
+fn other_project() -> Value {
+    let mut value = project();
+    value["id"] = json!(10);
+    value["name"] = json!("mobile");
+    value["path_with_namespace"] = json!("other/mobile");
+    value
 }
 
 fn version(id: u64) -> Value {
@@ -196,7 +213,6 @@ fn mock(steps: Vec<Step>) -> (Config, Arc<Mutex<Vec<String>>>, thread::JoinHandl
         Config {
             url: format!("http://{address}/gitlab"),
             token: "fixture-secret".into(),
-            remote: format!("http://{address}/gitlab/team/sub/app.git"),
         },
         requests,
         handle,
@@ -214,7 +230,7 @@ fn run<F: std::future::Future>(future: F) -> F::Output {
 fn preflight(request: Value) -> Vec<Step> {
     vec![
         get("/gitlab/api/v4/user", user(7)),
-        get("/gitlab/api/v4/projects/team%2Fsub%2Fapp", project()),
+        get("/gitlab/api/v4/projects/9", project()),
         get("/gitlab/api/v4/projects/9/merge_requests/1", request),
         get(
             "/merge_requests/1/approvals",
@@ -234,51 +250,55 @@ fn merge_preflight(request: Value) -> Vec<Step> {
 }
 
 #[test]
-fn strict_remote_mapping_preserves_subgroups_subpaths_ports_and_ssh_paths() {
-    for remote in [
-        "https://gitlab.example.test:8443/instance/team/sub/app.git",
-        "ssh://git@gitlab.example.test:2222/team/sub/app.git",
-        "git@gitlab.example.test:team/sub/app.git",
-    ] {
-        let config = Config {
-            url: "https://gitlab.example.test:8443/instance/".into(),
-            token: "fixture-secret".into(),
-            remote: remote.into(),
-        };
-        let context = Context::new(&config).unwrap();
-        assert_eq!(context.project_path, "team/sub/app");
-        assert_eq!(
-            context
-                .endpoint(&["projects", &context.project_path], &[])
-                .unwrap()
-                .as_str(),
-            "https://gitlab.example.test:8443/instance/api/v4/projects/team%2Fsub%2Fapp"
-        );
-        let url = "https://gitlab.example.test:8443/instance/team/sub/app/-/merge_requests/1";
-        assert_eq!(validated_web_url(&config, 9, 1, url).unwrap(), url);
-        assert!(validated_web_url(&config, 9, 2, url).is_err());
-        assert!(validated_web_url(
-            &config,
-            9,
-            1,
-            "https://other.example.test/team/sub/app/-/merge_requests/1"
-        )
-        .is_err());
+fn strict_account_instance_and_open_urls_preserve_subpaths_and_ports() {
+    let config = Config {
+        url: "https://gitlab.example.test:8443/instance/".into(),
+        token: "fixture-secret".into(),
+    };
+    let context = Context::new(&config).unwrap();
+    assert_eq!(
+        validate_config(&config).unwrap(),
+        "https://gitlab.example.test:8443/instance"
+    );
+    assert_eq!(
+        context.endpoint(&["merge_requests"], &[]).unwrap().as_str(),
+        "https://gitlab.example.test:8443/instance/api/v4/merge_requests"
+    );
+    for namespace in ["team/sub/app", "another/app"] {
+        let url =
+            format!("https://gitlab.example.test:8443/instance/{namespace}/-/merge_requests/1");
+        assert_eq!(validated_web_url(&config, 9, 1, &url).unwrap(), url);
+        assert!(validated_web_url(&config, 9, 2, &url).is_err());
     }
-    for remote in [
-        "https://gitlab.example.test/team/sub/app.git",
-        "https://gitlab.example.test:8443/elsewhere/team/sub/app.git",
-        "https://other.example.test:8443/instance/team/sub/app.git",
-        "https://user:fixture-secret@gitlab.example.test:8443/instance/team/sub/app.git",
-        "file:///fixture-secret",
-        "git@gitlab.example.test:team%2Fsub/app.git",
+    for url in [
+        "https://other.example.test:8443/instance/team/app/-/merge_requests/1",
+        "https://gitlab.example.test/instance/team/app/-/merge_requests/1",
+        "https://gitlab.example.test:8443/elsewhere/team/app/-/merge_requests/1",
+        "https://user:fixture-secret@gitlab.example.test:8443/instance/team/app/-/merge_requests/1",
+        "https://gitlab.example.test:8443/instance/team/app/-/merge_requests/1?next=secret",
+        "https://gitlab.example.test:8443/instance/team/app/-/merge_requests/1#secret",
+        "https://gitlab.example.test:8443/instance/team%2Fapp/-/merge_requests/1",
+        "https://gitlab.example.test:8443/instance/team/../app/-/merge_requests/1",
+        "https://gitlab.example.test:8443/instance/team/app/-/merge_requests/1&whoami",
+        "https://gitlab.example.test:8443/instance/app/-/merge_requests/1",
     ] {
-        let config = Config {
-            url: "https://gitlab.example.test:8443/instance".into(),
+        assert!(validated_web_url(&config, 9, 1, url).is_err(), "{url}");
+    }
+    for url in [
+        "https://user:fixture-secret@gitlab.example.test/instance",
+        "https://gitlab.example.test/instance?token=fixture-secret",
+        "https://gitlab.example.test/instance#fixture-secret",
+        "https://gitlab.example.test/instance%2Fextra",
+        "https://gitlab.example.test/instance/..",
+        "https://gitlab.example.test/instance/./extra",
+        "https://gitlab.example.test/instance//extra",
+        "file:///fixture-secret",
+    ] {
+        let invalid = Config {
+            url: url.into(),
             token: "fixture-secret".into(),
-            remote: remote.into(),
         };
-        let error = validate_config(&config).unwrap_err();
+        let error = validate_config(&invalid).unwrap_err();
         assert_eq!(error.kind, "invalid_config");
         assert!(!error.message.contains("fixture-secret"));
     }
@@ -290,7 +310,6 @@ fn list_reads_every_page_deduplicates_roles_and_uses_authenticated_user_id() {
     first.headers.push(("X-Next-Page", "2".into()));
     let steps = vec![
         get("/user", user(7)),
-        get("/projects/team%2Fsub%2Fapp", project()),
         first,
         get("page=2", json!([mr(2, 8, &[], &[7])])),
         get("assignee_id=7", json!([mr(1, 7, &[7], &[])])),
@@ -309,10 +328,126 @@ fn list_reads_every_page_deduplicates_roles_and_uses_authenticated_user_id() {
         ["reviewer"]
     );
     assert!(result.items.iter().all(|mr| mr.description.is_none()));
-    assert_eq!(requests.lock().unwrap().len(), 6);
+    assert_eq!(requests.lock().unwrap().len(), 5);
     assert!(!serde_json::to_string(&result)
         .unwrap()
         .contains("fixture-secret"));
+}
+
+#[test]
+fn global_list_keeps_colliding_project_iids_and_filters_actual_roles_without_project_fanout() {
+    let (config, requests, server) = mock(vec![
+        get("/user", user(7)),
+        get(
+            "author_id=7",
+            json!([mr(1, 7, &[7], &[7]), other_project_mr(1, 7, &[], &[])]),
+        ),
+        get(
+            "assignee_id=7",
+            json!([mr(1, 7, &[7], &[7]), mr(2, 8, &[], &[])]),
+        ),
+        get("reviewer_id=7", json!([mr(1, 7, &[7], &[7])])),
+    ]);
+    let result = run(list(&config)).unwrap();
+    server.join().unwrap();
+    assert_eq!(result.items.len(), 2);
+    assert!(result.items.iter().all(|item| item.iid == 1));
+    let first = result
+        .items
+        .iter()
+        .find(|item| item.project_id == 9)
+        .unwrap();
+    let second = result
+        .items
+        .iter()
+        .find(|item| item.project_id == 10)
+        .unwrap();
+    assert_eq!(first.roles, ["author", "assignee", "reviewer"]);
+    assert_eq!(second.roles, ["author"]);
+    assert_eq!(first.project_path_with_namespace, "team/sub/app");
+    assert_eq!(second.project_path_with_namespace, "other/mobile");
+    assert_eq!(
+        second.web_url,
+        format!("{}/other/mobile/-/merge_requests/1", config.url)
+    );
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    for request in &requests[1..] {
+        let line = request.lines().next().unwrap();
+        assert!(
+            line.starts_with("GET /gitlab/api/v4/merge_requests?"),
+            "{line}"
+        );
+        assert!(
+            line.contains("state=opened") && line.contains("scope=all"),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn project_namespace_uses_authoritative_references_or_same_instance_web_url_and_rejects_conflicts()
+{
+    let config = Config {
+        url: "https://gitlab.example.test/instance".into(),
+        token: "fixture-secret".into(),
+    };
+    let context = Context::new(&config).unwrap();
+    let identity = decode(user(7)).unwrap();
+    let mut raw = other_project_mr(1, 7, &[], &[]);
+    raw["web_url"] = json!("https://gitlab.example.test/instance/other/mobile/-/merge_requests/1");
+    assert_eq!(
+        decode::<RawMergeRequest>(raw.clone())
+            .unwrap()
+            .summary(&context, &identity, None, false)
+            .unwrap()
+            .project_path_with_namespace,
+        "other/mobile"
+    );
+    raw.as_object_mut().unwrap().remove("references");
+    assert_eq!(
+        decode::<RawMergeRequest>(raw.clone())
+            .unwrap()
+            .summary(&context, &identity, None, false)
+            .unwrap()
+            .project_path_with_namespace,
+        "other/mobile"
+    );
+    for reference in [
+        "other/mobile!2",
+        "other/../mobile!1",
+        "other%2Fmobile!1",
+        "other/app!1",
+    ] {
+        raw["references"] = json!({"full": reference});
+        assert_eq!(
+            decode::<RawMergeRequest>(raw.clone())
+                .unwrap()
+                .summary(&context, &identity, None, false)
+                .unwrap_err()
+                .kind,
+            "invalid_response"
+        );
+    }
+    raw["references"] = json!({"full": "other/mobile!1"});
+    raw["web_url"] = json!("https://other.example.test/other/mobile/-/merge_requests/1");
+    assert!(decode::<RawMergeRequest>(raw)
+        .unwrap()
+        .summary(&context, &identity, None, false)
+        .is_err());
+}
+
+#[test]
+fn global_list_rejects_an_id_that_changes_project_between_role_responses() {
+    let mut collision = other_project_mr(1, 7, &[7], &[]);
+    collision["id"] = json!(101);
+    let (config, _, server) = mock(vec![
+        get("/user", user(7)),
+        get("author_id=7", json!([mr(1, 7, &[7], &[])])),
+        get("assignee_id=7", json!([collision])),
+    ]);
+    assert_eq!(run(list(&config)).unwrap_err().kind, "invalid_response");
+    server.join().unwrap();
 }
 
 #[test]
@@ -323,13 +458,7 @@ fn cached_identity_list_only_requests_three_roles() {
         get("reviewer_id=7", json!([])),
     ]);
     let identity = decode(user(7)).unwrap();
-    let project = Project {
-        id: 9,
-        name: "app".into(),
-        path_with_namespace: "team/sub/app".into(),
-        web_url: String::new(),
-    };
-    assert!(run(list_resolved(&config, &identity, &project))
+    assert!(run(list_resolved(&config, &identity))
         .unwrap()
         .items
         .is_empty());
@@ -343,7 +472,6 @@ fn incomplete_role_schema_and_partial_pagination_never_become_successful_empty_l
     raw.as_object_mut().unwrap().remove("reviewers");
     let (config, _, server) = mock(vec![
         get("/user", user(7)),
-        get("/projects/team%2Fsub%2Fapp", project()),
         get("author_id=7", json!([raw])),
     ]);
     assert_eq!(run(list(&config)).unwrap_err().kind, "unsupported");
@@ -352,7 +480,6 @@ fn incomplete_role_schema_and_partial_pagination_never_become_successful_empty_l
     first.headers.push(("X-Next-Page", "2".into()));
     let (config, _, server) = mock(vec![
         get("/user", user(7)),
-        get("/projects/team%2Fsub%2Fapp", project()),
         first,
         error_step("page=2", 503),
     ]);
@@ -474,11 +601,9 @@ fn status_refresh_skips_version_history_and_invalidates_it_after_revision_change
 }
 
 #[test]
-fn current_project_id_is_checked_before_loading_arbitrary_merge_requests() {
-    let (config, requests, server) = mock(vec![
-        get("/user", user(7)),
-        get("/projects/team%2Fsub%2Fapp", project()),
-    ]);
+fn resolved_project_id_is_checked_before_loading_merge_requests() {
+    let (config, requests, server) =
+        mock(vec![get("/user", user(7)), get("/projects/99", project())]);
     assert_eq!(
         run(detail(&config, 99, 1)).unwrap_err().kind,
         "invalid_config"
@@ -496,7 +621,7 @@ fn version_diff_keeps_pinned_refs_rename_metadata_and_server_truncation() {
         {"old_path": "old.ts", "new_path": "new.ts", "a_mode": "100644", "b_mode": "100644", "diff": "@@ -1 +1 @@\n-before\n+after\n", "new_file": false, "renamed_file": true, "deleted_file": false, "too_large": false, "collapsed": false},
         {"old_path": "large.bin", "new_path": "large.bin", "a_mode": "100644", "b_mode": "100644", "new_file": false, "renamed_file": false, "deleted_file": false, "too_large": true, "collapsed": false}]);
     let (config, requests, server) = mock(vec![
-        get("/projects/team%2Fsub%2Fapp", project()),
+        get("/projects/9", project()),
         get("/merge_requests/1/versions/5", version),
     ]);
     let diff = run(diffs(&config, 9, 1, 5)).unwrap();
@@ -520,7 +645,7 @@ fn discussions_are_paginated_and_keep_resolution_unknown_when_not_returned() {
     let mut first = get("/discussions", json!([discussion("d1")]));
     first.headers.push(("X-Next-Page", "2".into()));
     let (config, _, server) = mock(vec![
-        get("/projects/team%2Fsub%2Fapp", project()),
+        get("/projects/9", project()),
         first,
         get("page=2", json!([discussion("d2")])),
     ]);
@@ -604,6 +729,64 @@ fn merge_sends_reviewed_sha_and_treats_opened_success_as_pending() {
     assert_eq!(body["should_remove_source_branch"], true);
     assert_eq!(body["squash"], false);
     assert!(body.get("auto_merge").is_none());
+}
+
+#[test]
+fn detail_and_merge_route_to_selected_inbox_project_with_a_shared_local_iid() {
+    let request = other_project_mr(1, 7, &[], &[7]);
+    let preflight = || {
+        vec![
+            get("/user", user(7)),
+            get("/projects/10", other_project()),
+            get("/projects/10/merge_requests/1", request.clone()),
+            get(
+                "/projects/10/merge_requests/1/approvals",
+                json!({"approvals_required": 0, "approvals_left": 0}),
+            ),
+            get(
+                "/projects/10/merge_requests/1/versions",
+                json!([version(5)]),
+            ),
+            get(
+                "/projects/10/repository/branches/feature%2Fui",
+                json!({"protected": false, "default": false, "can_push": true}),
+            ),
+        ]
+    };
+    let mut steps = preflight();
+    steps.extend(preflight());
+    let mut merged = request;
+    merged["state"] = json!("merged");
+    steps.push(step("PUT", "/projects/10/merge_requests/1/merge", merged));
+    let (config, requests, server) = mock(steps);
+    let (detail, result) = run(async {
+        let detail = detail(&config, 10, 1).await.unwrap();
+        let result = merge(
+            &config,
+            10,
+            1,
+            SHA,
+            "main",
+            5,
+            &reviewed_refs(),
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        (detail, result)
+    });
+    server.join().unwrap();
+    assert_eq!(detail.summary.project_id, 10);
+    assert_eq!(detail.summary.iid, 1);
+    assert_eq!(detail.summary.project_path_with_namespace, "other/mobile");
+    assert_eq!(result.state, "merged");
+    assert_eq!(result.summary.unwrap().project_id, 10);
+    assert!(requests.lock().unwrap().iter().all(|request| !request
+        .lines()
+        .next()
+        .unwrap()
+        .contains("/projects/9")));
 }
 
 #[test]

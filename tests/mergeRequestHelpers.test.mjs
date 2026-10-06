@@ -1,27 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { gitlabRemote, sameMrRefs, reviewVersion, mrVersionChanged, mrCommitFiles } from '../src/mergeRequestHelpers.ts';
-
-test('only matching GitLab instances are eligible, with origin preferred and SSH ports accepted', () => {
-  const remotes = [{name:'other',url:'git@lab.example:team/other.git'}, {name:'origin',url:'ssh://git@lab.example:2222/team/app.git'}];
-  assert.equal(gitlabRemote(remotes, 'https://lab.example', 'fixture-token'), remotes[1].url);
-  assert.equal(gitlabRemote([{name:'origin',url:'https://other.example/team/app'}], 'https://lab.example', 'fixture-token'), null);
-  assert.equal(gitlabRemote([{name:'origin',url:'https://lab.example:8443/team/app'}], 'https://lab.example', 'fixture-token'), null);
-  assert.equal(gitlabRemote([{name:'origin',url:'https://lab.example/gitlab/team/app.git'}], 'https://lab.example/gitlab', 'fixture-token'), 'https://lab.example/gitlab/team/app.git');
-  assert.equal(gitlabRemote(remotes, 'https://secret@lab.example', 'fixture-token'), null);
-  assert.equal(gitlabRemote([{name:'origin',url:'git@github.com:team/app.git'}], '', 'fixture-token'), null);
-});
-
-test('merge request eligibility requires a saved nonempty GitLab credential', () => {
-  const remotes = [{name:'origin',url:'git@lab.example:team/app.git'}];
-  assert.equal(gitlabRemote(remotes, 'https://lab.example', ''), null);
-  assert.equal(gitlabRemote(remotes, 'https://lab.example', ' \n\t '), null);
-  assert.equal(gitlabRemote(remotes, 'https://lab.example', 'fixture-token'), remotes[0].url);
-  assert.equal(gitlabRemote(remotes, 'https://lab.example', ''), null);
-});
+import { sameMrRefs, reviewVersion, mrVersionChanged, mrCommitFiles } from '../src/mergeRequestHelpers.ts';
 
 const refs = {baseSha:'base',startSha:'start',headSha:'source'};
-const detail = {summary:{sha:'source',targetBranch:'main'},diffRefs:refs,diffVersions:[{id:2,refs:{...refs,baseSha:'other'}},{id:1,refs}]};
+const detail = {summary:{id:501,projectId:10,iid:1,sha:'source',targetBranch:'main'},diffRefs:refs,diffVersions:[{id:2,refs:{...refs,baseSha:'other'}},{id:1,refs}]};
 test('review identity includes all refs and diff version, even when source SHA did not change', () => {
   assert.equal(reviewVersion(detail)?.id, 1);
   assert.equal(sameMrRefs(refs, {...refs,startSha:'changed'}), false);
@@ -29,6 +11,14 @@ test('review identity includes all refs and diff version, even when source SHA d
   assert.equal(mrVersionChanged(detail, {...detail,diffRefs:{...refs,baseSha:'changed'}}), true);
   assert.equal(mrVersionChanged(detail, {...detail,summary:{...detail.summary,targetBranch:'release'}}), true);
   assert.equal(mrVersionChanged(detail, structuredClone(detail)), false);
+});
+
+test('matching local MR numbers in different projects never share a review identity', () => {
+  const otherProject = {...detail,summary:{...detail.summary,id:502,projectId:11}};
+  assert.equal(otherProject.summary.iid, detail.summary.iid);
+  assert.equal(mrVersionChanged(detail, otherProject), true);
+  assert.equal(mrVersionChanged(detail, {...detail,summary:{...detail.summary,id:502}}), true);
+  assert.equal(mrVersionChanged(detail, {...detail,summary:{...detail.summary,projectId:11}}), true);
 });
 
 test('remote diff adapter keeps rename/delete paths and flags unavailable files', () => {

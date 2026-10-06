@@ -2,27 +2,6 @@ import type { CommitFile } from "./App";
 import type { MrDetail, MrDiffRefs, MrDiffVersion, MrDiffVersionInfo } from "./mergeRequestTypes";
 import { tx, translateNativeMessage } from "./i18n.ts";
 
-/** UI eligibility only. The native transport validates the instance again before auth. */
-export function gitlabRemote(remotes: { name: string; url: string }[], instance: string, token: string): string | null {
-  if (!token.trim()) return null;
-  let base: URL;
-  try { base = new URL(instance.trim() || "https://gitlab.com"); } catch { return null; }
-  if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash) return null;
-  const matches = (remote: string) => {
-    try {
-      const url = new URL(remote);
-      if (url.protocol === 'ssh:') return url.hostname.toLowerCase() === base.hostname.toLowerCase() && url.pathname.length > 1;
-      return ['http:', 'https:'].includes(url.protocol) && url.origin === base.origin
-        && url.pathname.startsWith(base.pathname.replace(/\/$/, '') + '/') && url.pathname.length > 1;
-    } catch {
-      const match = remote.match(/^[^@\s]+@([^:\s/]+):(.+)$/);
-      return !!match && match[1].toLowerCase() === base.hostname.toLowerCase();
-    }
-  };
-  return [...remotes].sort((a, b) => Number(b.name === 'origin') - Number(a.name === 'origin'))
-    .find((remote) => matches(remote.url))?.url ?? null;
-}
-
 export function sameMrRefs(left: MrDiffRefs | null | undefined, right: MrDiffRefs | null | undefined): boolean {
   return !!left && !!right && left.baseSha === right.baseSha && left.startSha === right.startSha && left.headSha === right.headSha;
 }
@@ -33,7 +12,9 @@ export function reviewVersion(detail: MrDetail): MrDiffVersionInfo | null {
 
 export function mrVersionChanged(pinned: MrDetail | null, latest: MrDetail | null): boolean {
   if (!pinned || !latest) return false;
-  return pinned.summary.sha !== latest.summary.sha || pinned.summary.targetBranch !== latest.summary.targetBranch
+  return pinned.summary.id !== latest.summary.id || pinned.summary.projectId !== latest.summary.projectId
+    || pinned.summary.iid !== latest.summary.iid
+    || pinned.summary.sha !== latest.summary.sha || pinned.summary.targetBranch !== latest.summary.targetBranch
     || !sameMrRefs(pinned.diffRefs, latest.diffRefs)
     || reviewVersion(pinned)?.id !== reviewVersion(latest)?.id;
 }

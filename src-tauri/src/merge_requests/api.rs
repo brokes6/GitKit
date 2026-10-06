@@ -11,7 +11,6 @@ use std::time::Duration;
 pub struct Config {
     pub url: String,
     pub token: String,
-    pub remote: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -32,18 +31,10 @@ pub struct User {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct Project {
-    pub id: u64,
-    pub name: String,
-    pub path_with_namespace: String,
-    pub web_url: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct Summary {
     pub id: u64,
     pub project_id: u64,
+    pub project_path_with_namespace: String,
     pub iid: u64,
     pub title: String,
     pub state: String,
@@ -64,7 +55,6 @@ pub struct Summary {
 #[serde(rename_all = "camelCase")]
 pub struct ListResult {
     pub user: User,
-    pub project: Project,
     pub items: Vec<Summary>,
 }
 
@@ -192,7 +182,7 @@ impl ApiError {
 fn invalid_config() -> ApiError {
     ApiError::new(
         "invalid_config",
-        "GitLab 地址或仓库远程不匹配，请检查所选账号与当前仓库",
+        "GitLab 地址配置无效，请检查账号的实例地址",
     )
 }
 
@@ -330,7 +320,6 @@ fn clean_segments(path: &str) -> Result<Vec<String>, ApiError> {
 
 struct Context {
     base: Url,
-    project_path: String,
     token: header::HeaderValue,
     client: Client,
 }
@@ -340,6 +329,14 @@ impl Context {
         let text = config.url.trim().trim_end_matches('/');
         if text.is_empty() || unsafe_url_text(&config.url) || !text.contains("://") {
             return Err(invalid_config());
+        }
+        // URL parsing normalizes dot segments. Validate the original instance
+        // path first so a configured subpath cannot silently change scope.
+        if let Some((_, path)) = text
+            .split_once("://")
+            .and_then(|(_, tail)| tail.split_once('/'))
+        {
+            clean_segments(path)?;
         }
         let base = Url::parse(text).map_err(|_| invalid_config())?;
         if !matches!(base.scheme(), "http" | "https")
@@ -361,57 +358,6 @@ impl Context {
                 return Err(invalid_config());
             }
         }
-        let remote = config.remote.trim();
-        if remote.is_empty() || unsafe_url_text(&config.remote) {
-            return Err(invalid_config());
-        }
-        let (remote_url, is_http) = if remote.contains("://") {
-            let parsed = Url::parse(remote).map_err(|_| invalid_config())?;
-            let is_http = matches!(parsed.scheme(), "http" | "https");
-            if !is_http && !matches!(parsed.scheme(), "ssh" | "git") {
-                return Err(invalid_config());
-            }
-            (parsed, is_http)
-        } else {
-            let (authority, path) = if let Some(end) = remote.find("]:") {
-                (&remote[..=end], &remote[end + 2..])
-            } else {
-                remote.split_once(':').ok_or_else(invalid_config)?
-            };
-            if authority.contains('/') || path.starts_with('/') {
-                return Err(invalid_config());
-            }
-            (
-                Url::parse(&format!("ssh://{authority}/{path}")).map_err(|_| invalid_config())?,
-                false,
-            )
-        };
-        if remote_url.host_str() != base.host_str()
-            || remote_url.query().is_some()
-            || remote_url.fragment().is_some()
-            || remote_url.password().is_some()
-            || (is_http
-                && (!remote_url.username().is_empty() || remote_url.origin() != base.origin()))
-        {
-            return Err(invalid_config());
-        }
-        let mut remote_path = remote_url.path().trim_matches('/').to_string();
-        if is_http {
-            let prefix = base.path().trim_matches('/');
-            if !prefix.is_empty() {
-                remote_path = remote_path
-                    .strip_prefix(&format!("{prefix}/"))
-                    .ok_or_else(invalid_config)?
-                    .to_string();
-            }
-        }
-        // SSH clone paths are GitLab namespace/project paths; the HTTP instance
-        // subpath belongs to the web/API URL, not the SSH namespace.
-        let remote_path = remote_path.strip_suffix(".git").unwrap_or(&remote_path);
-        let segments = clean_segments(remote_path)?;
-        if segments.len() < 2 {
-            return Err(invalid_config());
-        }
         let mut token =
             header::HeaderValue::from_str(config.token.trim()).map_err(|_| invalid_config())?;
         if token.is_empty() {
@@ -420,7 +366,6 @@ impl Context {
         token.set_sensitive(true);
         Ok(Self {
             base,
-            project_path: segments.join("/"),
             token,
             client: client()?,
         })
@@ -441,12 +386,12 @@ impl Context {
         Ok(url)
     }
 
-    fn web_url(&self, iid: Option<u64>) -> String {
+    fn web_url(&self, project_path: &str, iid: Option<u64>) -> String {
         let mut url = self.base.clone();
         let path = format!(
             "{}/{}{}",
             self.base.path().trim_end_matches('/'),
-            self.project_path,
+            project_path,
             iid.map(|id| format!("/-/merge_requests/{id}"))
                 .unwrap_or_default()
         );
@@ -560,15 +505,21 @@ impl Context {
         Ok(user)
     }
 
-    async fn project(&self, expected_id: Option<u64>) -> Result<RawProject, ApiError> {
-        let project: RawProject = decode(self.get(&["projects", &self.project_path], &[]).await?)?;
+    async fn project(&self, expected_id: u64) -> Result<RawProject, ApiError> {
+        if expected_id == 0 {
+            return Err(invalid_config());
+        }
+        let project: RawProject = decode(
+            self.get(&["projects", &expected_id.to_string()], &[])
+                .await?,
+        )?;
         if project.id == 0
-            || project.path_with_namespace != self.project_path
-            || expected_id.is_some_and(|id| project.id != id)
+            || project.id != expected_id
+            || !valid_project_path(&project.path_with_namespace)
         {
             return Err(ApiError::new(
                 "invalid_config",
-                "当前 GitLab 项目与仓库远程不一致，请刷新仓库与账号配置",
+                "GitLab 返回的项目与请求不一致，请刷新合并请求列表",
             ));
         }
         Ok(project)
@@ -650,14 +601,50 @@ fn next_page(
 
 pub fn validate_config(config: &Config) -> Result<String, ApiError> {
     let context = Context::new(config)?;
-    Ok(format!(
-        "{}|{}",
-        context.base.as_str().trim_end_matches('/'),
-        context.project_path
-    ))
+    Ok(context.base.as_str().trim_end_matches('/').to_owned())
 }
 
-/// Only a canonical URL for the configured project can reach the browser opener.
+fn valid_project_path(path: &str) -> bool {
+    clean_segments(path).is_ok_and(|segments| segments.len() >= 2 && segments.join("/") == path)
+}
+
+/// Parse only canonical MR URLs on this configured GitLab instance. The
+/// service separately binds project_id and iid to a trusted inbox record.
+fn web_project_path(context: &Context, iid: u64, web_url: &str) -> Result<String, ApiError> {
+    if iid == 0
+        || unsafe_url_text(web_url)
+        || web_url.bytes().any(|b| {
+            matches!(
+                b,
+                b'%' | b'&' | b'|' | b'^' | b'<' | b'>' | b'"' | b'!' | b'(' | b')'
+            )
+        })
+    {
+        return Err(invalid_config());
+    }
+    let parsed = Url::parse(web_url).map_err(|_| invalid_config())?;
+    if parsed.origin() != context.base.origin()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(invalid_config());
+    }
+    let prefix = format!("{}/", context.base.path().trim_end_matches('/'));
+    let namespace = parsed
+        .path()
+        .strip_prefix(&prefix)
+        .and_then(|path| path.strip_suffix(&format!("/-/merge_requests/{iid}")))
+        .filter(|path| valid_project_path(path))
+        .ok_or_else(invalid_config)?;
+    if context.web_url(namespace, Some(iid)) != web_url {
+        return Err(invalid_config());
+    }
+    Ok(namespace.to_owned())
+}
+
+/// Only canonical URLs on the account's configured instance reach the opener.
 pub fn validated_web_url(
     config: &Config,
     project_id: u64,
@@ -668,24 +655,13 @@ pub fn validated_web_url(
         return Err(invalid_config());
     }
     let context = Context::new(config)?;
-    let expected = context.web_url(Some(iid));
-    if web_url != expected
-        || web_url.bytes().any(|b| {
-            matches!(
-                b,
-                b'%' | b'&' | b'|' | b'^' | b'<' | b'>' | b'"' | b'!' | b'(' | b')'
-            )
-        })
-    {
-        return Err(invalid_config());
-    }
-    Ok(expected)
+    let namespace = web_project_path(&context, iid, web_url)?;
+    Ok(context.web_url(&namespace, Some(iid)))
 }
 
 #[derive(Deserialize)]
 struct RawProject {
     id: u64,
-    name: String,
     path_with_namespace: String,
     squash_option: Option<String>,
     remove_source_branch_after_merge: Option<bool>,
@@ -709,10 +685,17 @@ struct RawRefs {
 }
 
 #[derive(Deserialize)]
+struct RawReferences {
+    full: String,
+}
+
+#[derive(Deserialize)]
 struct RawMergeRequest {
     id: u64,
     iid: u64,
     project_id: u64,
+    references: Option<RawReferences>,
+    web_url: Option<String>,
     title: String,
     state: String,
     description: Option<String>,
@@ -747,15 +730,48 @@ impl RawMergeRequest {
         &self,
         context: &Context,
         user: &User,
-        project: &RawProject,
+        project: Option<&RawProject>,
         include_description: bool,
     ) -> Result<Summary, ApiError> {
         if self.id == 0
             || self.iid == 0
-            || self.project_id != project.id
+            || self.project_id == 0
+            || project.is_some_and(|project| self.project_id != project.id)
             || self.author.id == 0
             || self.source_branch.is_empty()
             || self.target_branch.is_empty()
+        {
+            return Err(invalid_response());
+        }
+        let referenced_path = self
+            .references
+            .as_ref()
+            .map(|references| {
+                references
+                    .full
+                    .strip_suffix(&format!("!{}", self.iid))
+                    .filter(|path| valid_project_path(path))
+                    .map(str::to_owned)
+                    .ok_or_else(invalid_response)
+            })
+            .transpose()?;
+        let returned_path = self
+            .web_url
+            .as_ref()
+            .map(|url| web_project_path(context, self.iid, url).map_err(|_| invalid_response()))
+            .transpose()?;
+        let namespace = project
+            .map(|project| project.path_with_namespace.clone())
+            .or_else(|| referenced_path.clone())
+            .or_else(|| returned_path.clone())
+            .ok_or_else(invalid_response)?;
+        if !valid_project_path(&namespace)
+            || referenced_path
+                .as_ref()
+                .is_some_and(|path| path != &namespace)
+            || returned_path
+                .as_ref()
+                .is_some_and(|path| path != &namespace)
         {
             return Err(invalid_response());
         }
@@ -784,6 +800,7 @@ impl RawMergeRequest {
         Ok(Summary {
             id: self.id,
             project_id: self.project_id,
+            project_path_with_namespace: namespace.clone(),
             iid: self.iid,
             title: self.title.clone(),
             state: self.state.clone(),
@@ -800,7 +817,7 @@ impl RawMergeRequest {
             updated_at: self.updated_at.clone(),
             sha: self.sha.clone().filter(|sha| valid_sha(sha)),
             detailed_merge_status: self.detailed_merge_status.clone(),
-            web_url: context.web_url(Some(self.iid)),
+            web_url: context.web_url(&namespace, Some(self.iid)),
             pipeline_status: self.head_pipeline.as_ref().map(|p| p.status.clone()),
         })
     }
@@ -809,41 +826,20 @@ impl RawMergeRequest {
 pub async fn list(config: &Config) -> Result<ListResult, ApiError> {
     let context = Context::new(config)?;
     let user = context.user().await?;
-    let project = context.project(None).await?;
-    list_with_context(&context, user, project).await
+    list_with_context(&context, user).await
 }
 
 /// The caller owns credential-epoch invalidation. Only reuse identities that
-/// list() resolved for the same unchanged account, token, instance and remote.
-pub async fn list_resolved(
-    config: &Config,
-    user: &User,
-    project: &Project,
-) -> Result<ListResult, ApiError> {
+/// list() resolved for the same unchanged account, token and instance.
+pub async fn list_resolved(config: &Config, user: &User) -> Result<ListResult, ApiError> {
     let context = Context::new(config)?;
-    if user.id == 0
-        || user.username.is_empty()
-        || project.id == 0
-        || project.path_with_namespace != context.project_path
-    {
+    if user.id == 0 || user.username.is_empty() {
         return Err(invalid_config());
     }
-    let project = RawProject {
-        id: project.id,
-        name: project.name.clone(),
-        path_with_namespace: project.path_with_namespace.clone(),
-        squash_option: None,
-        remove_source_branch_after_merge: None,
-    };
-    list_with_context(&context, user.clone(), project).await
+    list_with_context(&context, user.clone()).await
 }
 
-async fn list_with_context(
-    context: &Context,
-    user: User,
-    project: RawProject,
-) -> Result<ListResult, ApiError> {
-    let project_id = project.id.to_string();
+async fn list_with_context(context: &Context, user: User) -> Result<ListResult, ApiError> {
     let mut items: BTreeMap<u64, Summary> = BTreeMap::new();
     for filter in ["author_id", "assignee_id", "reviewer_id"] {
         let filters = [
@@ -854,47 +850,39 @@ async fn list_with_context(
             (filter, user.id.to_string()),
         ];
         context
-            .pages(
-                &["projects", &project_id, "merge_requests"],
-                &filters,
-                |values| {
-                    for value in values {
-                        let raw: RawMergeRequest = decode(value)?;
-                        let summary = raw.summary(&context, &user, &project, false)?;
-                        // Filters are a discovery optimization, not an identity boundary.
-                        if summary.state != "opened" || summary.roles.is_empty() {
-                            items.remove(&summary.id);
-                            continue;
-                        }
-                        items.insert(summary.id, summary);
-                        if items.len() > MAX_LIST_ITEMS {
-                            return Err(ApiError::new(
-                                "invalid_response",
-                                "相关合并请求超过读取上限，未替换已有完整列表，请在 GitLab 查看",
-                            ));
-                        }
+            .pages(&["merge_requests"], &filters, |values| {
+                for value in values {
+                    let raw: RawMergeRequest = decode(value)?;
+                    let summary = raw.summary(context, &user, None, false)?;
+                    if items.get(&summary.id).is_some_and(|known| {
+                        known.project_id != summary.project_id || known.iid != summary.iid
+                    }) {
+                        return Err(invalid_response());
                     }
-                    Ok(())
-                },
-            )
+                    // Filters are a discovery optimization, not an identity boundary.
+                    if summary.state != "opened" || summary.roles.is_empty() {
+                        items.remove(&summary.id);
+                        continue;
+                    }
+                    items.insert(summary.id, summary);
+                    if items.len() > MAX_LIST_ITEMS {
+                        return Err(ApiError::new(
+                            "invalid_response",
+                            "相关合并请求超过读取上限，未替换已有完整列表，请在 GitLab 查看",
+                        ));
+                    }
+                }
+                Ok(())
+            })
             .await?;
     }
     let mut items: Vec<_> = items.into_values().collect();
     items.sort_by(|a, b| {
         b.updated_at
             .cmp(&a.updated_at)
-            .then_with(|| b.iid.cmp(&a.iid))
+            .then_with(|| b.id.cmp(&a.id))
     });
-    Ok(ListResult {
-        user,
-        project: Project {
-            id: project.id,
-            name: project.name.clone(),
-            path_with_namespace: project.path_with_namespace,
-            web_url: context.web_url(None),
-        },
-        items,
-    })
+    Ok(ListResult { user, items })
 }
 
 fn unknown_approvals() -> ApprovalState {
@@ -1125,7 +1113,7 @@ async fn load_detail(
         return Err(invalid_config());
     }
     let user = context.user().await?;
-    let project = context.project(Some(project_id)).await?;
+    let project = context.project(project_id).await?;
     let pid = project_id.to_string();
     let iid = iid.to_string();
     let request: RawMergeRequest = decode(
@@ -1133,7 +1121,7 @@ async fn load_detail(
             .get(&["projects", &pid, "merge_requests", &iid], &[])
             .await?,
     )?;
-    let summary = request.summary(context, &user, &project, true)?;
+    let summary = request.summary(context, &user, Some(&project), true)?;
     if request.iid.to_string() != iid {
         return Err(invalid_response());
     }
@@ -1243,7 +1231,7 @@ pub async fn diffs(
         return Err(invalid_config());
     }
     let context = Context::new(config)?;
-    context.project(Some(project_id)).await?;
+    context.project(project_id).await?;
     let value = context
         .get(
             &[
@@ -1337,7 +1325,7 @@ pub async fn discussions(
         return Err(invalid_config());
     }
     let context = Context::new(config)?;
-    context.project(Some(project_id)).await?;
+    context.project(project_id).await?;
     let mut result = Vec::new();
     let mut seen = HashSet::new();
     context
@@ -1457,7 +1445,7 @@ pub async fn merge(
     match value {
         Ok((value, _, _)) => {
             let summary = decode::<RawMergeRequest>(value)
-                .and_then(|request| request.summary(&context, &user, &project, false));
+                .and_then(|request| request.summary(&context, &user, Some(&project), false));
             match summary {
                 Ok(summary) if summary.iid == iid => {
                     let merged =
@@ -1509,7 +1497,7 @@ async fn reconcile_merge(
         .await
     {
         Ok(value) => decode::<RawMergeRequest>(value)
-            .and_then(|request| request.summary(context, user, project, false))
+            .and_then(|request| request.summary(context, user, Some(project), false))
             .ok()
             .filter(|request| request.iid == iid),
         Err(_) => None,

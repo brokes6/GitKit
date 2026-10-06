@@ -1,7 +1,7 @@
 //! One native MR inbox scheduler. It never fetches or changes the local repository.
 pub mod api;
 
-use api::{ApiError, Detail, DiffVersion, Discussion, MergeResult, Project, Summary, User};
+use api::{ApiError, Detail, DiffVersion, Discussion, MergeResult, Summary, User};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -17,12 +17,12 @@ const EVENT: &str = "merge-request-state";
 const COOLDOWN: i64 = 15_000;
 const BACKGROUND: i64 = 300_000;
 const MAX_BACKOFF: i64 = 900_000;
-const MAX_PROJECTS: usize = 16;
+const MAX_ACCOUNTS: usize = 16;
 const MAX_ROWS: usize = 5_000;
 const MAX_DETAILS: usize = 8;
 const MAX_DIFFS: usize = 4;
 const MAX_DIFF_BYTES: usize = 24 * 1024 * 1024;
-const MAX_SEEN_PROJECTS: usize = 64;
+const MAX_SEEN_ACCOUNTS: usize = 64;
 const CACHE_BUDGET: usize = 64 * 1024 * 1024;
 const SUMMARY_BUDGET: usize = 16 * 1024 * 1024;
 const DETAIL_BUDGET: usize = 40 * 1024 * 1024;
@@ -31,17 +31,15 @@ const DETAIL_BUDGET: usize = 40 * 1024 * 1024;
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     account_key: String,
-    repo_path: String,
     url: String,
     token: String,
-    remote: String,
 }
 
 #[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Visibility {
     list_open: bool,
-    detail_iid: Option<u64>,
+    detail_id: Option<u64>,
     online: bool,
 }
 
@@ -51,13 +49,12 @@ pub struct Snapshot {
     revision: u64,
     epoch: u64,
     context_key: Option<String>,
-    repo_path: Option<String>,
+    instance_url: Option<String>,
     user: Option<User>,
-    project: Option<Project>,
     items: Vec<Summary>,
     total: usize,
     new_count: usize,
-    unseen_iids: Vec<u64>,
+    unseen_ids: Vec<u64>,
     last_checked_at: Option<i64>,
     refreshing: bool,
     stale: bool,
@@ -70,7 +67,6 @@ pub struct Snapshot {
 struct Active {
     config: api::Config,
     account_key: String,
-    repo_path: String,
     key: String,
     instance: String,
     fingerprint: String,
@@ -87,7 +83,6 @@ struct Cached<T> {
 struct Cache {
     fingerprint: String,
     user: Option<User>,
-    project: Option<Project>,
     items: Vec<Summary>,
     seen_key: Option<String>,
     checked_at: Option<i64>,
@@ -108,7 +103,8 @@ struct SeenEntry {
 
 #[derive(Default, Deserialize, Serialize)]
 struct SeenStore {
-    projects: HashMap<String, SeenEntry>,
+    #[serde(default, alias = "projects")]
+    accounts: HashMap<String, SeenEntry>,
 }
 
 struct Inner {
@@ -129,7 +125,6 @@ struct Inner {
     detail_retry_after: i64,
     stopped: bool,
     account_stops: HashSet<String>,
-    project_stops: HashSet<String>,
     next_list: i64,
     next_detail: i64,
     list_running: Option<u64>,
@@ -142,9 +137,9 @@ struct Inner {
 struct UiStamp {
     epoch: u64,
     key: Option<String>,
-    repo_path: Option<String>,
+    instance_url: Option<String>,
     data_revision: u64,
-    selected_iid: Option<u64>,
+    selected_id: Option<u64>,
     refreshing: bool,
     stale: bool,
     error: Option<ApiError>,
@@ -170,7 +165,21 @@ struct Context {
     generation: u64,
     key: String,
     config: api::Config,
-    project_id: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Request {
+    project_id: u64,
+    iid: u64,
+}
+
+impl From<&Summary> for Request {
+    fn from(summary: &Summary) -> Self {
+        Self {
+            project_id: summary.project_id,
+            iid: summary.iid,
+        }
+    }
 }
 
 fn now() -> i64 {
@@ -189,12 +198,11 @@ fn digest(value: &str) -> String {
 fn context_key(account: &str, canonical: &str) -> String {
     digest(&format!("{}:{}:{}", account.len(), account, canonical))
 }
-fn seen_key(active: &Active, user: u64, project: u64) -> String {
+fn seen_key(active: &Active, user: u64) -> String {
     digest(&format!(
-        "{}:{}:{}",
+        "account-inbox-v1:{}:{}",
         context_key(&active.account_key, &active.instance),
-        user,
-        project
+        user
     ))
 }
 fn account_stop_key(active: &Active) -> String {
@@ -202,9 +210,6 @@ fn account_stop_key(active: &Active) -> String {
         "{}:{}:{}",
         active.account_key, active.instance, active.fingerprint
     ))
-}
-fn project_stop_key(active: &Active) -> String {
-    digest(&format!("{}:{}", active.key, active.fingerprint))
 }
 
 fn reconcile_seen(entry: &mut SeenEntry, current: &HashSet<u64>, at: i64) -> bool {
@@ -214,7 +219,7 @@ fn reconcile_seen(entry: &mut SeenEntry, current: &HashSet<u64>, at: i64) -> boo
         entry.viewed = current.clone();
         entry.initialized = true;
     } else {
-        entry.viewed.retain(|iid| current.contains(iid));
+        entry.viewed.retain(|mr_id| current.contains(mr_id));
     }
     entry.used_at = at;
     !initialized || before != entry.viewed
@@ -256,6 +261,7 @@ fn refs_bytes(refs: &api::DiffRefs) -> usize {
 }
 fn summary_bytes(row: &Summary) -> usize {
     std::mem::size_of::<Summary>()
+        + row.project_path_with_namespace.len()
         + row.title.len()
         + row.state.len()
         + row.description.as_ref().map_or(0, String::len)
@@ -274,7 +280,20 @@ fn summary_bytes(row: &Summary) -> usize {
         + row.pipeline_status.as_ref().map_or(0, String::len)
 }
 fn validate_summaries(rows: &[Summary], budget: usize) -> Result<(), ApiError> {
-    if rows.len() > MAX_ROWS || rows.iter().map(summary_bytes).sum::<usize>() > budget {
+    let mut ids = HashSet::new();
+    let mut references = HashSet::new();
+    if rows.iter().any(|row| {
+        row.id == 0
+            || row.project_id == 0
+            || row.iid == 0
+            || !ids.insert(row.id)
+            || !references.insert((row.project_id, row.iid))
+    }) {
+        Err(error(
+            "invalid_response",
+            "GitLab 合并请求列表包含无效或重复身份",
+        ))
+    } else if rows.len() > MAX_ROWS || rows.iter().map(summary_bytes).sum::<usize>() > budget {
         Err(error(
             "invalid_response",
             "完整合并请求摘要超过本地缓存上限，保留上次完整列表，请在 GitLab 查看",
@@ -357,12 +376,6 @@ fn cache_bytes(cache: &Cache) -> usize {
         + cache.fingerprint.len()
         + cache.seen_key.as_ref().map_or(0, String::len)
         + cache.user.as_ref().map_or(0, user_bytes)
-        + cache.project.as_ref().map_or(0, |project| {
-            std::mem::size_of::<Project>()
-                + project.name.len()
-                + project.path_with_namespace.len()
-                + project.web_url.len()
-        })
         + cache.items.iter().map(summary_bytes).sum::<usize>()
         + cache
             .details
@@ -438,38 +451,54 @@ impl Inner {
     fn cache(&self) -> Option<&Cache> {
         self.active.as_ref().and_then(|a| self.caches.get(&a.key))
     }
+    fn request(&self, mr_id: u64) -> Result<Request, ApiError> {
+        self.cache()
+            .and_then(|cache| {
+                cache
+                    .items
+                    .iter()
+                    .find(|summary| summary.id == mr_id)
+                    .or_else(|| {
+                        cache
+                            .details
+                            .get(&mr_id)
+                            .map(|cached| &cached.value.summary)
+                    })
+            })
+            .map(Request::from)
+            .ok_or_else(|| error("not_found", "此合并请求不在当前账号的列表"))
+    }
     fn snapshot(&self) -> Snapshot {
         let cache = self.cache();
         let items = cache.map_or_else(Vec::new, |c| c.items.clone());
         let viewed = cache
             .and_then(|c| c.seen_key.as_ref())
-            .and_then(|key| self.seen.projects.get(key));
-        let unseen_iids: Vec<_> = items
+            .and_then(|key| self.seen.accounts.get(key));
+        let unseen_ids: Vec<_> = items
             .iter()
             .filter(|item| {
-                viewed.is_some_and(|entry| entry.initialized && !entry.viewed.contains(&item.iid))
+                viewed.is_some_and(|entry| entry.initialized && !entry.viewed.contains(&item.id))
             })
-            .map(|item| item.iid)
+            .map(|item| item.id)
             .collect();
         Snapshot {
             revision: self.revision,
             epoch: self.epoch,
             context_key: self.active.as_ref().map(|a| a.key.clone()),
-            repo_path: self.active.as_ref().map(|a| a.repo_path.clone()),
+            instance_url: self.active.as_ref().map(|a| a.instance.clone()),
             user: cache.and_then(|c| c.user.clone()),
-            project: cache.and_then(|c| c.project.clone()),
             total: items.len(),
-            new_count: unseen_iids.len(),
+            new_count: unseen_ids.len(),
             items,
-            unseen_iids,
+            unseen_ids,
             last_checked_at: cache.and_then(|c| c.checked_at),
             refreshing: self.list_running == Some(self.epoch),
             stale: cache.is_some_and(|c| c.stale),
             error: cache.and_then(|c| c.error.clone()),
             persistence_error: self.persistence_error.clone(),
-            selected_detail: self.visibility.detail_iid.and_then(|iid| {
+            selected_detail: self.visibility.detail_id.and_then(|mr_id| {
                 cache
-                    .and_then(|c| c.details.get(&iid))
+                    .and_then(|c| c.details.get(&mr_id))
                     .map(|d| d.value.clone())
             }),
         }
@@ -479,9 +508,9 @@ impl Inner {
         let stamp = UiStamp {
             epoch: self.epoch,
             key: self.active.as_ref().map(|active| active.key.clone()),
-            repo_path: self.active.as_ref().map(|active| active.repo_path.clone()),
+            instance_url: self.active.as_ref().map(|active| active.instance.clone()),
             data_revision: self.data_revision,
-            selected_iid: self.visibility.detail_iid,
+            selected_id: self.visibility.detail_id,
             refreshing: self.list_running == Some(self.epoch),
             stale: cache.is_some_and(|cache| cache.stale),
             error: cache.and_then(|cache| cache.error.clone()),
@@ -497,7 +526,7 @@ impl Inner {
     }
     fn context(&self, epoch: u64, allow_paused: bool) -> Result<Context, ApiError> {
         if epoch != self.epoch {
-            return Err(error("stale", "仓库或账号已切换，请重新打开合并请求"));
+            return Err(error("stale", "GitLab 账号已切换，请重新打开合并请求"));
         }
         let active = self
             .active
@@ -520,7 +549,6 @@ impl Inner {
             generation: self.write_generation,
             key: active.key.clone(),
             config: active.config.clone(),
-            project_id: self.cache().and_then(|c| c.project.as_ref()).map(|p| p.id),
         })
     }
     fn accepts(&self, context: &Context) -> bool {
@@ -529,15 +557,15 @@ impl Inner {
             && self.active.as_ref().is_some_and(|a| a.key == context.key)
     }
     fn save_seen(&mut self) {
-        while self.seen.projects.len() > MAX_SEEN_PROJECTS {
+        while self.seen.accounts.len() > MAX_SEEN_ACCOUNTS {
             let key = self
                 .seen
-                .projects
+                .accounts
                 .iter()
                 .min_by_key(|(_, entry)| entry.used_at)
                 .map(|(key, _)| key.clone());
             if let Some(key) = key {
-                self.seen.projects.remove(&key);
+                self.seen.accounts.remove(&key);
             }
         }
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -551,16 +579,16 @@ impl Inner {
         })();
         self.persistence_error = result.err().map(|e| e.to_string());
     }
-    fn mark_viewed(&mut self, iid: u64) -> bool {
+    fn mark_viewed(&mut self, mr_id: u64) -> bool {
         if !self
             .cache()
-            .is_some_and(|cache| cache.items.iter().any(|item| item.iid == iid))
+            .is_some_and(|cache| cache.items.iter().any(|item| item.id == mr_id))
         {
             return false;
         }
         let key = self.cache().and_then(|cache| cache.seen_key.clone());
-        if let Some(entry) = key.and_then(|key| self.seen.projects.get_mut(&key)) {
-            if entry.viewed.insert(iid) {
+        if let Some(entry) = key.and_then(|key| self.seen.accounts.get_mut(&key)) {
+            if entry.viewed.insert(mr_id) {
                 self.data_revision += 1;
                 entry.used_at = now();
                 self.save_seen();
@@ -583,7 +611,7 @@ impl Inner {
                 self.account_stops.insert(account_stop_key(active));
             }
             if failure.kind == "forbidden" {
-                self.project_stops.insert(project_stop_key(active));
+                self.account_stops.insert(account_stop_key(active));
             }
         }
         self.next_list = self.retry_after;
@@ -595,6 +623,16 @@ impl Inner {
         if self.stopped {
             self.write_generation += 1;
         }
+    }
+    fn request_failure(&mut self, context: &Context, failure: ApiError) {
+        // A project's permission/state error must not suspend the account-wide inbox.
+        if matches!(
+            failure.kind.as_str(),
+            "forbidden" | "not_found" | "blocked" | "conflict" | "invalid_response"
+        ) {
+            return;
+        }
+        self.failure(context, failure);
     }
     fn acknowledge_list_success(&mut self, key: &str, at: i64) {
         // Another request may have received Retry-After while this list was in flight.
@@ -617,7 +655,7 @@ impl Inner {
             .sum::<usize>()
             + self
                 .seen
-                .projects
+                .accounts
                 .iter()
                 .map(|(key, entry)| {
                     key.len() + std::mem::size_of::<SeenEntry>() + entry.viewed.len() * 16
@@ -640,7 +678,7 @@ impl Inner {
                 self.caches.remove(&key);
                 continue;
             }
-            let selected = self.visibility.detail_iid;
+            let selected = self.visibility.detail_id;
             let Some(key) = self.active.as_ref().map(|active| active.key.clone()) else {
                 break;
             };
@@ -650,8 +688,8 @@ impl Inner {
             let candidate = cache
                 .details
                 .iter()
-                .filter(|(iid, _)| Some(**iid) != selected)
-                .map(|(iid, cached)| (cached.at, Payload::Detail(*iid)))
+                .filter(|(mr_id, _)| Some(**mr_id) != selected)
+                .map(|(mr_id, cached)| (cached.at, Payload::Detail(*mr_id)))
                 .chain(
                     cache
                         .diffs
@@ -662,21 +700,21 @@ impl Inner {
                     cache
                         .discussions
                         .iter()
-                        .map(|(iid, cached)| (cached.at, Payload::Discussions(*iid))),
+                        .map(|(mr_id, cached)| (cached.at, Payload::Discussions(*mr_id))),
                 )
                 .min_by_key(|(at, _)| *at);
             match candidate {
-                Some((_, Payload::Detail(iid))) => {
-                    cache.details.remove(&iid);
+                Some((_, Payload::Detail(mr_id))) => {
+                    cache.details.remove(&mr_id);
                 }
                 Some((_, Payload::Diff(id))) => {
                     cache.diffs.remove(&id);
                 }
-                Some((_, Payload::Discussions(iid))) => {
-                    cache.discussions.remove(&iid);
+                Some((_, Payload::Discussions(mr_id))) => {
+                    cache.discussions.remove(&mr_id);
                 }
                 None => {
-                    if selected.is_some_and(|iid| cache.details.remove(&iid).is_some()) {
+                    if selected.is_some_and(|mr_id| cache.details.remove(&mr_id).is_some()) {
                         self.data_revision += 1;
                     } else {
                         break;
@@ -685,8 +723,8 @@ impl Inner {
             }
         }
     }
-    fn trim_projects(&mut self) {
-        while self.caches.len() > MAX_PROJECTS {
+    fn trim_accounts(&mut self) {
+        while self.caches.len() > MAX_ACCOUNTS {
             let key = self
                 .caches
                 .iter()
@@ -705,20 +743,20 @@ impl Inner {
         let last = self.cache().and_then(|c| c.checked_at).unwrap_or(0);
         let detail = self
             .visibility
-            .detail_iid
-            .and_then(|iid| self.cache().and_then(|c| c.details.get(&iid)));
+            .detail_id
+            .and_then(|mr_id| self.cache().and_then(|c| c.details.get(&mr_id)));
         let detail_at = detail.map_or(0, |d| d.at);
         let delay = interval(
             self.foreground,
             self.visibility.list_open,
-            self.visibility.detail_iid.is_some(),
+            self.visibility.detail_id.is_some(),
             ci_running(detail.map(|d| &d.value)),
         );
         self.next_list = if immediate && self.foreground {
             at.max(last.saturating_add(COOLDOWN))
         } else {
             at.max(last.saturating_add(if self.foreground {
-                if self.visibility.list_open || self.visibility.detail_iid.is_some() {
+                if self.visibility.list_open || self.visibility.detail_id.is_some() {
                     30_000
                 } else {
                     60_000
@@ -782,7 +820,6 @@ pub fn setup(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             detail_retry_after: 0,
             stopped: false,
             account_stops: HashSet::new(),
-            project_stops: HashSet::new(),
             next_list: now(),
             next_detail: now(),
             list_running: None,
@@ -838,7 +875,7 @@ async fn scheduler(app: tauri::AppHandle, service: Arc<Service>) {
             {
                 None
             } else {
-                let next = if inner.visibility.detail_iid.is_some() {
+                let next = if inner.visibility.detail_id.is_some() {
                     inner.next_list.min(inner.next_detail)
                 } else {
                     inner.next_list
@@ -849,27 +886,27 @@ async fn scheduler(app: tauri::AppHandle, service: Arc<Service>) {
                     inner.next_list <= now(),
                     inner
                         .visibility
-                        .detail_iid
+                        .detail_id
                         .filter(|_| inner.next_detail <= now()),
                 ))
             }
         };
         match plan {
             None => notified.await,
-            Some((due, epoch, list_due, detail_iid)) if due <= now() => {
+            Some((due, epoch, list_due, detail_id)) if due <= now() => {
                 if list_due {
                     let _ = refresh_list(&app, &service, epoch, false, false).await;
                 }
-                if let Some(iid) = detail_iid {
-                    let _ = load_detail(&app, &service, iid, epoch, true, false).await;
+                if let Some(mr_id) = detail_id {
+                    let _ = load_detail(&app, &service, mr_id, epoch, true, false).await;
                 }
-                // A skipped/cached request or an uninitialized project cannot spin the scheduler.
+                // A skipped/cached request or an uninitialized account cannot spin the scheduler.
                 let mut inner = service.lock();
                 if inner.epoch == epoch {
                     if list_due && inner.next_list <= now() {
                         inner.next_list = now().saturating_add(COOLDOWN);
                     }
-                    if detail_iid.is_some() && inner.next_detail <= now() {
+                    if detail_id.is_some() && inner.next_detail <= now() {
                         inner.next_detail = now().saturating_add(COOLDOWN);
                     }
                 }
@@ -911,17 +948,13 @@ async fn refresh_list(
     let identity = {
         let inner = service.lock();
         if inner.accepts(&context) && inner.active.as_ref().is_some_and(|a| a.identity_verified) {
-            inner
-                .cache()
-                .and_then(|cache| cache.user.clone().zip(cache.project.clone()))
+            inner.cache().and_then(|cache| cache.user.clone())
         } else {
             None
         }
     };
     let result = match identity {
-        Some((user, project)) => {
-            read_deadline(api::list_resolved(&context.config, &user, &project)).await
-        }
+        Some(user) => read_deadline(api::list_resolved(&context.config, &user)).await,
         None => read_deadline(api::list(&context.config)).await,
     }
     .and_then(|list| {
@@ -935,7 +968,7 @@ async fn refresh_list(
     if !inner.accepts(&context) {
         inner.publish(app);
         service.changed.notify_one();
-        return Err(error("stale", "检查结果所属仓库或账号已改变"));
+        return Err(error("stale", "合并请求状态或 GitLab 账号已变化，请刷新"));
     }
     let mut failure = None;
     match result {
@@ -944,14 +977,12 @@ async fn refresh_list(
             let key = seen_key(
                 inner.active.as_ref().expect("checked active context"),
                 list.user.id,
-                list.project.id,
             );
-            let current: HashSet<_> = list.items.iter().map(|item| item.iid).collect();
-            let entry = inner.seen.projects.entry(key.clone()).or_default();
+            let current: HashSet<_> = list.items.iter().map(|item| item.id).collect();
+            let entry = inner.seen.accounts.entry(key.clone()).or_default();
             let persist = reconcile_seen(entry, &current, at);
             let changed = inner.cache().is_none_or(|cache| {
                 cache.user.as_ref() != Some(&list.user)
-                    || cache.project.as_ref() != Some(&list.project)
                     || cache.items != list.items
                     || cache.seen_key.as_ref() != Some(&key)
             });
@@ -963,7 +994,6 @@ async fn refresh_list(
                 .get_mut(&context.key)
                 .expect("configured cache");
             cache.user = Some(list.user);
-            cache.project = Some(list.project);
             cache.items = list.items;
             cache.seen_key = Some(key);
             cache.checked_at = Some(at);
@@ -978,7 +1008,7 @@ async fn refresh_list(
             inner.trim_budget(CACHE_BUDGET);
             inner.next_list = at.saturating_add(if !inner.foreground {
                 BACKGROUND
-            } else if inner.visibility.list_open || inner.visibility.detail_iid.is_some() {
+            } else if inner.visibility.list_open || inner.visibility.detail_id.is_some() {
                 30_000
             } else {
                 60_000
@@ -996,36 +1026,45 @@ async fn refresh_list(
     failure.map_or(Ok(snapshot), Err)
 }
 
-fn project(context: &Context) -> Result<u64, ApiError> {
-    context
-        .project_id
-        .ok_or_else(|| error("blocked", "等待首次完整合并请求检查完成"))
-}
-
 async fn load_detail(
     app: &tauri::AppHandle,
     service: &Arc<Service>,
-    iid: u64,
+    mr_id: u64,
     epoch: u64,
     force: bool,
     mark_seen: bool,
 ) -> Result<Detail, ApiError> {
+    load_detail_with_request(app, service, mr_id, epoch, force, mark_seen, None).await
+}
+
+async fn load_detail_with_request(
+    app: &tauri::AppHandle,
+    service: &Arc<Service>,
+    mr_id: u64,
+    epoch: u64,
+    force: bool,
+    mark_seen: bool,
+    trusted_request: Option<Request>,
+) -> Result<Detail, ApiError> {
     let requested_at = now();
     let _gate = service.detail_gate.lock().await;
-    let context = {
+    let (context, request) = {
         let mut inner = service.lock();
         let context = inner.context(epoch, false)?;
-        if let Some(cached) = inner.cache().and_then(|c| c.details.get(&iid)) {
+        let request = inner
+            .request(mr_id)
+            .or_else(|failure| trusted_request.ok_or(failure))?;
+        if let Some(cached) = inner.cache().and_then(|c| c.details.get(&mr_id)) {
             if cached.at >= requested_at || (!force && now() - cached.at < COOLDOWN) {
                 let result = cached.value.clone();
                 if mark_seen {
-                    inner.mark_viewed(iid);
+                    inner.mark_viewed(mr_id);
                     inner.publish(app);
                 }
                 return Ok(result);
             }
         }
-        context
+        (context, request)
     };
     let known = if mark_seen {
         None
@@ -1033,23 +1072,32 @@ async fn load_detail(
         service
             .lock()
             .cache()
-            .and_then(|cache| cache.details.get(&iid))
+            .and_then(|cache| cache.details.get(&mr_id))
             .map(|cached| cached.value.clone())
     };
     let result = match known {
         Some(known) => {
             read_deadline(api::detail_status(
                 &context.config,
-                project(&context)?,
-                iid,
+                request.project_id,
+                request.iid,
                 &known,
             ))
             .await
         }
-        None => read_deadline(api::detail(&context.config, project(&context)?, iid)).await,
+        None => {
+            read_deadline(api::detail(
+                &context.config,
+                request.project_id,
+                request.iid,
+            ))
+            .await
+        }
     }
     .and_then(|detail| {
-        if detail_bytes(&detail) > DETAIL_BUDGET {
+        if detail.summary.id != mr_id || Request::from(&detail.summary) != request {
+            Err(error("invalid_response", "GitLab 详情与所选合并请求不一致"))
+        } else if detail_bytes(&detail) > DETAIL_BUDGET {
             Err(error(
                 "invalid_response",
                 "完整详情超过本地缓存预算，请在 GitLab 查看",
@@ -1060,24 +1108,24 @@ async fn load_detail(
     });
     let mut inner = service.lock();
     if !inner.accepts(&context) {
-        return Err(error("stale", "详情所属仓库或账号已改变"));
+        return Err(error("stale", "合并请求状态或 GitLab 账号已变化，请刷新"));
     }
     match result {
         Ok(detail) => {
             let at = now();
-            let selected = inner.visibility.detail_iid;
+            let selected = inner.visibility.detail_id;
             let cache = inner
                 .caches
                 .get_mut(&context.key)
                 .expect("configured cache");
             let changed = update_summary(cache, detail.summary.clone())
-                || (selected == Some(iid)
+                || (selected == Some(mr_id)
                     && cache
                         .details
-                        .get(&iid)
+                        .get(&mr_id)
                         .is_none_or(|cached| cached.value != detail));
             cache.details.insert(
-                iid,
+                mr_id,
                 Cached {
                     value: detail.clone(),
                     at,
@@ -1088,14 +1136,14 @@ async fn load_detail(
                 inner.data_revision += 1;
             }
             if mark_seen {
-                inner.mark_viewed(iid);
+                inner.mark_viewed(mr_id);
             }
             inner.detail_failures = 0;
             inner.detail_retry_after = 0;
             inner.next_detail = at.saturating_add(interval(
                 inner.foreground,
                 inner.visibility.list_open,
-                inner.visibility.detail_iid.is_some(),
+                inner.visibility.detail_id.is_some(),
                 ci_running(Some(&detail)),
             ));
             inner.trim_budget(CACHE_BUDGET);
@@ -1109,7 +1157,7 @@ async fn load_detail(
             inner.detail_retry_after = inner
                 .detail_retry_after
                 .max(now().saturating_add(backoff(inner.detail_failures, e.retry_after)));
-            inner.failure(&context, e.clone());
+            inner.request_failure(&context, e.clone());
             inner.publish(app);
             drop(inner);
             service.changed.notify_one();
@@ -1121,7 +1169,10 @@ async fn load_detail(
 fn update_summary(cache: &mut Cache, mut summary: Summary) -> bool {
     // Descriptions belong to the on-demand detail, never the lightweight inbox rows.
     summary.description = None;
-    if let Some(index) = cache.items.iter().position(|row| row.iid == summary.iid) {
+    if let Some(index) = cache.items.iter().position(|row| row.id == summary.id) {
+        if Request::from(&cache.items[index]) != Request::from(&summary) {
+            return false;
+        }
         if cache.items[index] == summary {
             return false;
         }
@@ -1151,7 +1202,6 @@ pub fn mr_configure(
             let api_config = api::Config {
                 url: config.url,
                 token: config.token,
-                remote: config.remote,
             };
             let canonical = match api::validate_config(&api_config) {
                 Ok(canonical) => canonical,
@@ -1160,7 +1210,7 @@ pub fn mr_configure(
                     inner.epoch += 1;
                     inner.write_generation += 1;
                     inner.active = None;
-                    inner.visibility.detail_iid = None;
+                    inner.visibility.detail_id = None;
                     inner.visibility.list_open = false;
                     inner.publish(&app);
                     drop(inner);
@@ -1169,16 +1219,11 @@ pub fn mr_configure(
                 }
             };
             let key = context_key(&config.account_key, &canonical);
-            let instance = canonical
-                .rsplit_once('|')
-                .map(|(instance, _)| instance)
-                .unwrap_or(&canonical)
-                .to_string();
+            let instance = canonical;
             let fingerprint = digest(&api_config.token);
             Some(Active {
                 config: api_config,
                 account_key: config.account_key,
-                repo_path: config.repo_path,
                 key,
                 instance,
                 fingerprint,
@@ -1206,7 +1251,7 @@ pub fn mr_configure(
     inner.epoch += 1;
     inner.write_generation += 1;
     inner.active = active;
-    inner.visibility.detail_iid = None;
+    inner.visibility.detail_id = None;
     inner.visibility.list_open = false;
     inner.retry_after = 0;
     inner.failures = 0;
@@ -1221,13 +1266,17 @@ pub fn mr_configure(
         }
         cache.fingerprint = active.fingerprint.clone();
         cache.used_at = now();
-        inner.stopped = inner.account_stops.contains(&account_stop_key(&active))
-            || inner.project_stops.contains(&project_stop_key(&active));
+        inner.stopped = inner.account_stops.contains(&account_stop_key(&active));
         if inner.stopped {
-            let kind = if inner.account_stops.contains(&account_stop_key(&active)) {
-                "unauthorized"
-            } else {
+            let forbidden = inner
+                .caches
+                .get(&active.key)
+                .and_then(|cache| cache.error.as_ref())
+                .is_some_and(|failure| failure.kind == "forbidden");
+            let kind = if forbidden {
                 "forbidden"
+            } else {
+                "unauthorized"
             };
             if let Some(cache) = inner.caches.get_mut(&active.key) {
                 cache.error = Some(error(
@@ -1235,14 +1284,14 @@ pub fn mr_configure(
                     if kind == "unauthorized" {
                         "该 GitLab 账号认证已失效，请更新凭据"
                     } else {
-                        "当前 GitLab 项目权限不足，请检查访问权限"
+                        "GitLab 合并请求读取权限不足，请检查账号权限"
                     },
                 ));
                 cache.stale = true;
             }
         }
     }
-    // Project summaries survive switching; large on-demand payloads do not accumulate across repositories.
+    // Account summaries survive switching; large on-demand payloads do not accumulate across accounts.
     let active_key = inner.active.as_ref().map(|a| a.key.clone());
     for (key, cache) in &mut inner.caches {
         if Some(key) != active_key.as_ref() {
@@ -1251,7 +1300,7 @@ pub fn mr_configure(
             cache.discussions.clear();
         }
     }
-    inner.trim_projects();
+    inner.trim_accounts();
     inner.trim_budget(CACHE_BUDGET);
     inner.replan(true);
     inner.publish(&app);
@@ -1265,13 +1314,15 @@ pub fn mr_configure(
 pub fn mr_visibility(
     app: tauri::AppHandle,
     state: tauri::State<'_, MrState>,
-    visibility: Visibility,
+    mut visibility: Visibility,
 ) -> Snapshot {
     let mut inner = state.0.lock();
+    visibility.detail_id = visibility
+        .detail_id
+        .filter(|mr_id| inner.request(*mr_id).is_ok());
     let wake = !inner.visibility.online && visibility.online;
     let opened = (!inner.visibility.list_open && visibility.list_open)
-        || (visibility.detail_iid.is_some()
-            && inner.visibility.detail_iid != visibility.detail_iid);
+        || (visibility.detail_id.is_some() && inner.visibility.detail_id != visibility.detail_id);
     inner.visibility = visibility;
     if wake {
         inner.resume_after = now().saturating_add(COOLDOWN);
@@ -1299,17 +1350,17 @@ pub async fn mr_refresh(
 pub fn mr_mark_viewed(
     app: tauri::AppHandle,
     state: tauri::State<'_, MrState>,
-    iid: u64,
+    mr_id: u64,
     epoch: u64,
 ) -> Result<Snapshot, ApiError> {
     let mut inner = state.0.lock();
     inner.context(epoch, true)?;
     if !inner.cache().is_some_and(|cache| {
-        cache.items.iter().any(|row| row.iid == iid) || cache.details.contains_key(&iid)
+        cache.items.iter().any(|row| row.id == mr_id) || cache.details.contains_key(&mr_id)
     }) {
         return Err(error("not_found", "此合并请求不在当前列表"));
     }
-    inner.mark_viewed(iid);
+    inner.mark_viewed(mr_id);
     inner.publish(&app);
     Ok(inner.snapshot())
 }
@@ -1318,14 +1369,14 @@ pub fn mr_mark_viewed(
 pub async fn mr_detail(
     app: tauri::AppHandle,
     state: tauri::State<'_, MrState>,
-    iid: u64,
+    mr_id: u64,
     epoch: u64,
     force: Option<bool>,
 ) -> Result<Detail, ApiError> {
     load_detail(
         &app,
         &state.0.clone(),
-        iid,
+        mr_id,
         epoch,
         force.unwrap_or(false),
         true,
@@ -1337,35 +1388,39 @@ pub async fn mr_detail(
 pub async fn mr_diffs(
     app: tauri::AppHandle,
     state: tauri::State<'_, MrState>,
-    iid: u64,
+    mr_id: u64,
     version_id: u64,
     epoch: u64,
 ) -> Result<DiffVersion, ApiError> {
     let service = state.0.clone();
     let _gate = service.diff_gate.lock().await;
-    let context = {
+    let (context, request) = {
         let inner = service.lock();
         let context = inner.context(epoch, false)?;
-        if let Some(cached) = inner.cache().and_then(|c| c.diffs.get(&(iid, version_id))) {
+        let request = inner.request(mr_id)?;
+        if let Some(cached) = inner
+            .cache()
+            .and_then(|c| c.diffs.get(&(mr_id, version_id)))
+        {
             return Ok(cached.value.clone());
         }
-        context
+        (context, request)
     };
     let result = read_deadline(api::diffs(
         &context.config,
-        project(&context)?,
-        iid,
+        request.project_id,
+        request.iid,
         version_id,
     ))
     .await;
     let mut inner = service.lock();
     if !inner.accepts(&context) {
-        return Err(error("stale", "差异所属仓库或账号已改变"));
+        return Err(error("stale", "合并请求状态或 GitLab 账号已变化，请刷新"));
     }
     let result = match result {
         Ok(result) => result,
         Err(failure) => {
-            inner.failure(&context, failure.clone());
+            inner.request_failure(&context, failure.clone());
             inner.publish(&app);
             service.changed.notify_one();
             return Err(failure);
@@ -1376,7 +1431,7 @@ pub async fn mr_diffs(
         .get_mut(&context.key)
         .expect("configured cache");
     cache.diffs.insert(
-        (iid, version_id),
+        (mr_id, version_id),
         Cached {
             value: result.clone(),
             at: now(),
@@ -1391,31 +1446,37 @@ pub async fn mr_diffs(
 pub async fn mr_discussions(
     app: tauri::AppHandle,
     state: tauri::State<'_, MrState>,
-    iid: u64,
+    mr_id: u64,
     epoch: u64,
 ) -> Result<Vec<Discussion>, ApiError> {
     let requested_at = now();
     let service = state.0.clone();
     let _gate = service.discussion_gate.lock().await;
-    let context = {
+    let (context, request) = {
         let inner = service.lock();
         let context = inner.context(epoch, false)?;
-        if let Some(cached) = inner.cache().and_then(|c| c.discussions.get(&iid)) {
+        let request = inner.request(mr_id)?;
+        if let Some(cached) = inner.cache().and_then(|c| c.discussions.get(&mr_id)) {
             if cached.at >= requested_at || now() - cached.at < COOLDOWN {
                 return Ok(cached.value.clone());
             }
         }
-        context
+        (context, request)
     };
-    let result = read_deadline(api::discussions(&context.config, project(&context)?, iid)).await;
+    let result = read_deadline(api::discussions(
+        &context.config,
+        request.project_id,
+        request.iid,
+    ))
+    .await;
     let mut inner = service.lock();
     if !inner.accepts(&context) {
-        return Err(error("stale", "讨论所属仓库或账号已改变"));
+        return Err(error("stale", "合并请求状态或 GitLab 账号已变化，请刷新"));
     }
     let result = match result {
         Ok(result) => result,
         Err(failure) => {
-            inner.failure(&context, failure.clone());
+            inner.request_failure(&context, failure.clone());
             inner.publish(&app);
             service.changed.notify_one();
             return Err(failure);
@@ -1426,7 +1487,7 @@ pub async fn mr_discussions(
         .get_mut(&context.key)
         .expect("configured cache");
     cache.discussions.insert(
-        iid,
+        mr_id,
         Cached {
             value: result.clone(),
             at: now(),
@@ -1441,7 +1502,7 @@ pub async fn mr_discussions(
 pub async fn mr_merge(
     app: tauri::AppHandle,
     state: tauri::State<'_, MrState>,
-    iid: u64,
+    mr_id: u64,
     epoch: u64,
     reviewed_sha: String,
     expected_target_branch: String,
@@ -1455,26 +1516,29 @@ pub async fn mr_merge(
         .mutation_gate
         .try_lock()
         .map_err(|_| error("blocked", "已有合并操作正在进行，请等待结果"))?;
-    let context = {
+    let (context, request) = {
         let mut inner = service.lock();
         let context = inner.context(epoch, false)?;
-        project(&context)?;
+        let request = inner.request(mr_id)?;
         if reviewed_sha.is_empty() {
             return Err(error("blocked", "请先查看并确认本次提交差异"));
         }
         inner.write_generation += 1;
-        Context {
-            generation: inner.write_generation,
-            ..context
-        }
+        (
+            Context {
+                generation: inner.write_generation,
+                ..context
+            },
+            request,
+        )
     };
     // API revalidates server readiness and passes the reviewed SHA to the merge endpoint.
     let result = tokio::time::timeout(
         Duration::from_secs(120),
         api::merge(
             &context.config,
-            project(&context)?,
-            iid,
+            request.project_id,
+            request.iid,
             &reviewed_sha,
             &expected_target_branch,
             reviewed_version_id,
@@ -1489,6 +1553,20 @@ pub async fn mr_merge(
             "uncertain",
             "合并操作结果尚未确认，请到 GitLab 核实，勿重复提交",
         ))
+    })
+    .and_then(|result| {
+        if result
+            .summary
+            .as_ref()
+            .is_some_and(|summary| summary.id != mr_id || Request::from(summary) != request)
+        {
+            Err(error(
+                "uncertain",
+                "GitLab 返回的合并请求身份不一致，请到原项目核实操作结果，勿重复提交",
+            ))
+        } else {
+            Ok(result)
+        }
     });
     {
         let mut inner = service.lock();
@@ -1504,8 +1582,8 @@ pub async fn mr_merge(
         }
         inner.write_generation += 1;
         if let Some(cache) = inner.caches.get_mut(&context.key) {
-            cache.details.remove(&iid);
-            cache.discussions.remove(&iid);
+            cache.details.remove(&mr_id);
+            cache.discussions.remove(&mr_id);
             if let Ok(result) = &result {
                 if let Some(summary) = &result.summary {
                     update_summary(cache, summary.clone());
@@ -1516,7 +1594,7 @@ pub async fn mr_merge(
         inner.publish(&app);
     }
     // Only this MR is re-read. A timed-out mutation is never automatically re-issued.
-    let _ = load_detail(&app, &service, iid, epoch, true, true).await;
+    let _ = load_detail_with_request(&app, &service, mr_id, epoch, true, true, Some(request)).await;
     result.map_err(|failure| {
         if matches!(failure.kind.as_str(), "timeout" | "network") {
             error(
@@ -1530,7 +1608,7 @@ pub async fn mr_merge(
 }
 
 #[tauri::command]
-pub fn mr_open(state: tauri::State<'_, MrState>, iid: u64, epoch: u64) -> Result<(), ApiError> {
+pub fn mr_open(state: tauri::State<'_, MrState>, mr_id: u64, epoch: u64) -> Result<(), ApiError> {
     let inner = state.0.lock();
     let context = inner.context(epoch, true)?;
     let cache = inner
@@ -1539,10 +1617,15 @@ pub fn mr_open(state: tauri::State<'_, MrState>, iid: u64, epoch: u64) -> Result
     let summary = cache
         .items
         .iter()
-        .find(|row| row.iid == iid)
-        .or_else(|| cache.details.get(&iid).map(|d| &d.value.summary))
+        .find(|row| row.id == mr_id)
+        .or_else(|| cache.details.get(&mr_id).map(|d| &d.value.summary))
         .ok_or_else(|| error("not_found", "此合并请求不在当前列表"))?;
-    let url = api::validated_web_url(&context.config, project(&context)?, iid, &summary.web_url)?;
+    let url = api::validated_web_url(
+        &context.config,
+        summary.project_id,
+        summary.iid,
+        &summary.web_url,
+    )?;
     crate::git::open_in_browser(&url).map_err(|message| error("blocked", &message))
 }
 
@@ -1554,14 +1637,12 @@ mod tests {
         let config = api::Config {
             url: "https://gitlab.example".into(),
             token: "fixture-only".into(),
-            remote: "git@gitlab.example:team/project.git".into(),
         };
-        let key = context_key("gitlab", "https://gitlab.example/team/project");
+        let key = context_key("gitlab", "https://gitlab.example");
         let active = Active {
             fingerprint: digest(&config.token),
             config,
             account_key: "gitlab".into(),
-            repo_path: "/fixture".into(),
             key: key.clone(),
             instance: "https://gitlab.example".into(),
             identity_verified: false,
@@ -1589,7 +1670,6 @@ mod tests {
             detail_retry_after: 0,
             stopped: false,
             account_stops: HashSet::new(),
-            project_stops: HashSet::new(),
             next_list: 0,
             next_detail: 0,
             list_running: None,
@@ -1599,11 +1679,12 @@ mod tests {
         }
     }
 
-    fn row(iid: u64, title_bytes: usize) -> Summary {
+    fn row(mr_id: u64, title_bytes: usize) -> Summary {
         Summary {
-            id: iid,
+            id: mr_id,
             project_id: 9,
-            iid,
+            project_path_with_namespace: "team/project".into(),
+            iid: mr_id,
             title: "x".repeat(title_bytes),
             state: "opened".into(),
             description: None,
@@ -1622,6 +1703,178 @@ mod tests {
             web_url: "https://gitlab.example/team/project/-/merge_requests/1".into(),
             pipeline_status: None,
         }
+    }
+
+    fn detail(summary: Summary) -> Detail {
+        Detail {
+            summary,
+            description: "reviewed".into(),
+            pipeline_status: None,
+            approvals: api::ApprovalState {
+                readable: true,
+                approved: None,
+                approvals_required: None,
+                approvals_left: None,
+                approved_by: vec![],
+            },
+            blocking_discussions_resolved: None,
+            can_merge: false,
+            blocked_reasons: vec![],
+            diff_refs: None,
+            diff_versions: vec![],
+            squash_policy: "default_off".into(),
+            squash: false,
+            delete_source_default: false,
+            delete_source_required: false,
+            delete_source_allowed: None,
+        }
+    }
+
+    #[test]
+    fn account_config_needs_no_repository_or_remote() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "accountKey": "gitlab", "url": "https://gitlab.example", "token": "fixture"
+        }))
+        .unwrap();
+        assert_eq!(config.account_key, "gitlab");
+        assert_eq!(config.url, "https://gitlab.example");
+        assert_eq!(
+            fixture().snapshot().instance_url.as_deref(),
+            Some("https://gitlab.example")
+        );
+    }
+
+    #[test]
+    fn legacy_project_seen_records_load_without_reusing_their_iids_as_global_ids() {
+        let mut store: SeenStore = serde_json::from_value(serde_json::json!({
+            "projects": { "old-project": { "initialized": true, "viewed": [7], "used_at": 1 } }
+        }))
+        .unwrap();
+        assert!(store
+            .accounts
+            .get("old-project")
+            .unwrap()
+            .viewed
+            .contains(&7));
+        let active = fixture().active.unwrap();
+        let account = store.accounts.entry(seen_key(&active, 7)).or_default();
+        assert!(reconcile_seen(account, &HashSet::from([101, 202]), 2));
+        assert_eq!(account.viewed, HashSet::from([101, 202]));
+        let persisted = serde_json::to_value(&store).unwrap();
+        assert!(persisted.get("accounts").is_some());
+        assert!(persisted.get("projects").is_none());
+    }
+
+    #[test]
+    fn same_iid_across_projects_keeps_selection_unread_and_updates_independent() {
+        let mut inner = fixture();
+        inner.file = std::env::temp_dir().join(format!(
+            "gitkit-global-mr-seen-{}-{}.json",
+            std::process::id(),
+            now()
+        ));
+        let key = inner.active.as_ref().unwrap().key.clone();
+        let viewed_key = seen_key(inner.active.as_ref().unwrap(), 7);
+        let mut first = row(101, 8);
+        first.iid = 7;
+        let mut second = row(202, 8);
+        second.project_id = 10;
+        second.project_path_with_namespace = "team/other".into();
+        second.iid = 7;
+        let cache = inner.caches.get_mut(&key).unwrap();
+        cache.items = vec![first.clone(), second.clone()];
+        cache.seen_key = Some(viewed_key.clone());
+        cache.details.insert(
+            101,
+            Cached {
+                value: detail(first.clone()),
+                at: 10,
+            },
+        );
+        cache.details.insert(
+            202,
+            Cached {
+                value: detail(second.clone()),
+                at: 20,
+            },
+        );
+        inner.seen.accounts.insert(
+            viewed_key,
+            SeenEntry {
+                initialized: true,
+                viewed: HashSet::from([101]),
+                used_at: 0,
+            },
+        );
+        inner.visibility.detail_id = Some(202);
+        assert_eq!(
+            inner.request(101).unwrap(),
+            Request {
+                project_id: 9,
+                iid: 7
+            }
+        );
+        assert_eq!(
+            inner.request(202).unwrap(),
+            Request {
+                project_id: 10,
+                iid: 7
+            }
+        );
+        assert_eq!(inner.request(7).unwrap_err().kind, "not_found");
+        assert_eq!(inner.snapshot().selected_detail.unwrap().summary, second);
+        assert_eq!(inner.snapshot().unseen_ids, vec![202]);
+        assert!(!inner.mark_viewed(7));
+        assert!(inner.mark_viewed(202));
+        assert_eq!(inner.snapshot().new_count, 0);
+        let cache = inner.caches.get_mut(&key).unwrap();
+        second.state = "merged".into();
+        assert!(update_summary(cache, second));
+        assert_eq!(cache.items, vec![first.clone()]);
+        assert_eq!(inner.request(202).unwrap().project_id, 10); // A viewed/closed detail remains trusted.
+        let mut mismatched = first.clone();
+        mismatched.project_id = 10;
+        assert!(!update_summary(
+            inner.caches.get_mut(&key).unwrap(),
+            mismatched
+        ));
+        assert_eq!(inner.cache().unwrap().items, vec![first]);
+        let _ = std::fs::remove_file(&inner.file);
+    }
+
+    #[test]
+    fn project_permission_failures_do_not_pause_the_account_inbox() {
+        let mut inner = fixture();
+        let context = inner.context(4, false).unwrap();
+        inner.request_failure(&context, error("forbidden", "project unavailable"));
+        inner.request_failure(&context, error("not_found", "project removed"));
+        assert!(!inner.stopped);
+        assert_eq!(inner.retry_after, 0);
+        assert!(inner.context(4, false).is_ok());
+        inner.request_failure(&context, error("unauthorized", "expired"));
+        assert!(inner.stopped);
+        assert_eq!(inner.context(4, false).err().unwrap().kind, "unauthorized");
+    }
+
+    #[test]
+    fn complete_inbox_accepts_more_than_the_account_cache_limit_of_projects() {
+        let rows: Vec<_> = (1..=32)
+            .map(|id| {
+                let mut item = row(id, 8);
+                item.project_id = id;
+                item.iid = 1;
+                item
+            })
+            .collect();
+        assert!(validate_summaries(&rows, SUMMARY_BUDGET).is_ok());
+        let mut duplicated = rows.clone();
+        duplicated.push(rows[0].clone());
+        assert_eq!(
+            validate_summaries(&duplicated, SUMMARY_BUDGET)
+                .unwrap_err()
+                .kind,
+            "invalid_response"
+        );
     }
 
     #[test]
@@ -1659,7 +1912,7 @@ mod tests {
     fn payload_budget_preserves_selected_detail_and_rejects_oversized_summary_before_replacement() {
         let mut inner = fixture();
         let key = inner.active.as_ref().unwrap().key.clone();
-        inner.visibility.detail_iid = Some(1);
+        inner.visibility.detail_id = Some(1);
         let original = vec![row(1, 32)];
         let detail = Detail {
             summary: original[0].clone(),
@@ -1831,37 +2084,32 @@ mod tests {
 
     #[test]
     fn keys_isolate_accounts_instances_and_provider_identity() {
-        let key = context_key("gitlab", "https://gitlab.example/team/project");
-        assert_eq!(
-            key,
-            context_key("gitlab", "https://gitlab.example/team/project")
-        );
-        assert_ne!(
-            key,
-            context_key("other", "https://gitlab.example/team/project")
-        );
-        assert_ne!(
-            key,
-            context_key("gitlab", "https://other.example/team/project")
-        );
+        let key = context_key("gitlab", "https://gitlab.example");
+        assert_eq!(key, context_key("gitlab", "https://gitlab.example"));
+        assert_ne!(key, context_key("other", "https://gitlab.example"));
+        assert_ne!(key, context_key("gitlab", "https://other.example"));
         let active = Active {
             config: api::Config {
                 url: "https://gitlab.example".into(),
                 token: "private".into(),
-                remote: "x".into(),
             },
             account_key: "gitlab".into(),
-            repo_path: "/clone".into(),
             key,
             instance: "https://gitlab.example".into(),
             fingerprint: "x".into(),
             identity_verified: false,
         };
-        assert_ne!(seen_key(&active, 1, 10), seen_key(&active, 2, 10));
-        assert_ne!(seen_key(&active, 1, 10), seen_key(&active, 1, 11));
-        let mut renamed = active.clone();
-        renamed.key = context_key("gitlab", "https://gitlab.example/team/renamed-project");
-        assert_eq!(seen_key(&active, 1, 10), seen_key(&renamed, 1, 10));
+        assert_ne!(seen_key(&active, 1), seen_key(&active, 2));
+        let old_project_key = digest(&format!(
+            "{}:{}:{}",
+            context_key("gitlab", "https://gitlab.example"),
+            1,
+            10
+        ));
+        assert_ne!(seen_key(&active, 1), old_project_key);
+        let mut other_instance = active.clone();
+        other_instance.instance = "https://other.example".into();
+        assert_ne!(seen_key(&active, 1), seen_key(&other_instance, 1));
         assert!(!serde_json::to_string(&SeenStore::default())
             .unwrap()
             .contains("private"));

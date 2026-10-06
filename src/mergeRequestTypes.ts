@@ -1,10 +1,10 @@
 /** Remote GitLab data. These types never describe or mutate the local index. */
 export interface MrUser { id: number; name: string; username: string }
-export interface MrProject { id: number; name: string; pathWithNamespace: string; webUrl: string }
 export type MrRole = "author" | "assignee" | "reviewer";
 export interface MrSummary {
   id: number;
   projectId: number;
+  projectPathWithNamespace: string;
   iid: number;
   title: string;
   state: string;
@@ -92,13 +92,12 @@ export interface MrSnapshot {
   revision: number;
   epoch: number;
   contextKey: string | null;
-  repoPath: string | null;
+  instanceUrl: string | null;
   user: MrUser | null;
-  project: MrProject | null;
   items: MrSummary[];
   total: number;
   newCount: number;
-  unseenIids: number[];
+  unseenIds: number[];
   lastCheckedAt: number | null;
   refreshing: boolean;
   stale: boolean;
@@ -106,5 +105,5 @@ export interface MrSnapshot {
   persistenceError: string | null;
   selectedDetail: MrDetail | null;
 }
-export interface MrConfig { accountKey: string; repoPath: string; url: string; token: string; remote: string }
-export interface MrVisibility { listOpen: boolean; detailIid: number | null; online: boolean }
+export interface MrConfig { accountKey: string; url: string; token: string }
+export interface MrVisibility { listOpen: boolean; detailId: number | null; online: boolean }

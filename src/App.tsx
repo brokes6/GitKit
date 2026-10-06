@@ -1,6 +1,6 @@
 import { tf, tx, translateNativeMessage, getLanguage, getCurrentLanguage, setCurrentLanguage, languageProgress } from "./i18n";
 import type { Language } from "./i18n";
-import { useState, useEffect, useLayoutEffect, useRef, useMemo, useDeferredValue, startTransition, useTransition, createContext, useContext, memo } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useDeferredValue, startTransition, useTransition, createContext, useContext, memo, Fragment } from "react";
 import { createPortal } from "react-dom";
 import { Toaster, toast } from "sonner";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -20,7 +20,7 @@ import {
   Pin, EyeOff, Eye, Folder, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
   Settings, UserPlus, Trash2, Star, Users, Github, Laptop, Sparkles, Languages, RotateCcw, TerminalSquare,
   Tag as TagIcon, Square, DownloadCloud, Pencil, FolderGit2, Search, PanelLeft, MoreHorizontal,
-  CircleDot, ArrowDown, ArrowUp, ExternalLink, Maximize2, History,
+  CircleDot, ArrowDown, ArrowUp, ExternalLink, Maximize2, History, ChevronsUpDown, List, Network,
 } from "lucide-react";
 import {
   invoke, pickRepoFolder, openRepo, initRepo, loadBranches, loadRemotes, loadHistory,
@@ -48,8 +48,9 @@ import { useProjectActivity } from "./useProjectActivity";
 import { applyOverviewToProjects, overviewAttentionCount } from "./projectOverview";
 import { MergeRequestEntry, MergeRequestPopover, MergeRequestDetail } from "./MergeRequests";
 import { useMergeRequests } from "./useMergeRequests";
-import { gitlabRemote, mrCommitFiles } from "./mergeRequestHelpers";
+import { mrCommitFiles } from "./mergeRequestHelpers";
 import type { OverviewTarget } from "./projectOverview";
+import { CommitTopology } from "./CommitTopology";
 export type { WorkingFile } from "./workingStatus";
 
 // ─── theme ────────────────────────────────────────────────────────────────────
@@ -1175,11 +1176,11 @@ function OperationCapsule({ kind, title, context, progress, outcome, settledPhas
   );
 }
 
-function StatusBar({ project, branch, changes, ready, errored, home, checkProgress, checkResult, onShowCheckResult, onShowChanges, onSearch, mrEntry, mrNew }: {
+function StatusBar({ project, branch, changes, ready, errored, home, checkProgress, checkResult, onShowCheckResult, onShowChanges, onSearch, mrEntry }: {
   project?: Project; branch?: Branch; changes: number; ready: boolean; errored: boolean;
   home?: { projects: number; attention: number; refreshing: boolean };
   checkProgress: CheckProgress | null; checkResult: CheckResult | null; onShowCheckResult: () => void; onShowChanges: () => void; onSearch: () => void;
-  mrEntry?: React.ReactNode; mrNew?: boolean;
+  mrEntry?: React.ReactNode;
 }) {
   const t = useTheme();
   const remoteName = branch?.remote?.split("/")[0];
@@ -1212,7 +1213,7 @@ function StatusBar({ project, branch, changes, ready, errored, home, checkProgre
         "--gk-status-border": statusBorder,
       } as React.CSSProperties}>
       <div className="gk-status-context flex items-center gap-1.5 min-w-0" role={checkProgress ? "status" : undefined}>
-        {mrNew ? mrEntry : checkProgress ? (
+        {mrEntry || (checkProgress ? (
           <>
             <span className="truncate tabular-nums" title={checkProgress.project}>{checkProgress.paused ? tx("等待休眠恢复后补查") : tf("已检查 {0} / {1} · 正在检查 {2}", checkProgress.current, checkProgress.total, checkProgress.project)}</span>
             <RefreshCw size={12} className="animate-spin flex-shrink-0" aria-hidden="true" />
@@ -1236,8 +1237,7 @@ function StatusBar({ project, branch, changes, ready, errored, home, checkProgre
               <span className="gk-status-sync-copy ml-1.5 whitespace-nowrap">{syncLabel}</span>
             </span>}
           </>
-        )}
-        {!mrNew && mrEntry}
+        ))}
       </div>
       <div className="flex items-center justify-center min-w-0" role="status">
         {home ? <span className="gk-status-pill px-3">{home.refreshing ? tx("正在刷新状态…") : tf("{0} 个项目需关注", home.attention)}</span>
@@ -1918,6 +1918,7 @@ type DiffRowData = {
   oldNo: number | null; newNo: number | null; text: string;
   change?: { start: number; end: number };
   hunkIndex?: number;
+  skippedLines?: number;
 };
 
 // Parse unified-diff lines into rows carrying old/new line numbers, taken from
@@ -1926,12 +1927,29 @@ type DiffRowData = {
 function parseDiffRows(lines: string[]): DiffRowData[] {
   let oldNo = 1, newNo = 1;
   let hunkIndex = 0;
+  let previousHunkEnd: { old: number; new: number } | null = null;
   const rows: DiffRowData[] = [];
   for (const line of lines) {
     if (line.startsWith("@@")) {
-      const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
-      if (m) { oldNo = parseInt(m[1], 10); newNo = parseInt(m[2], 10); }
-      rows.push({ kind: "hunk", oldNo: null, newNo: null, text: line, hunkIndex: hunkIndex++ });
+      const m = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+      let skippedLines: number | undefined;
+      if (m) {
+        oldNo = Number(m[1]); newNo = Number(m[3]);
+        const oldCount = m[2] === undefined ? 1 : Number(m[2]);
+        const newCount = m[4] === undefined ? 1 : Number(m[4]);
+        // Empty ranges point after their line; nonempty ranges start at it.
+        const oldStart = oldNo - (oldCount === 0 ? 0 : 1);
+        const newStart = newNo - (newCount === 0 ? 0 : 1);
+        if (previousHunkEnd) {
+          const oldGap = oldStart - previousHunkEnd.old;
+          const newGap = newStart - previousHunkEnd.new;
+          if (oldGap > 0 && oldGap === newGap) skippedLines = oldGap;
+        }
+        previousHunkEnd = { old: oldStart + oldCount, new: newStart + newCount };
+      } else {
+        previousHunkEnd = null;
+      }
+      rows.push({ kind: "hunk", oldNo: null, newNo: null, text: line, hunkIndex: hunkIndex++, skippedLines });
     } else if (line.startsWith("\\")) {           // "\ No newline at end of file"
       rows.push({ kind: "meta", oldNo: null, newNo: null, text: line });
     } else if (line.startsWith("+")) {
@@ -2062,7 +2080,15 @@ function DiffRows({ lines, filePath, activeHunk }: { lines: string[]; filePath: 
   const tokens = syntaxResult?.key === syntaxKey ? syntaxResult.tokens : null;
   const maxNo = rows.reduce((m, r) => Math.max(m, r.oldNo ?? 0, r.newNo ?? 0), 0);
   const gutterW = Math.max(String(maxNo).length, 2) * 8 + 22;
-  return <>{rows.map((r, i) => <DiffRow key={i} row={r} gutterW={gutterW} tokens={tokens?.[i]} activeHunk={activeHunk} />)}</>;
+  return <>{rows.map((r, i) => <Fragment key={i}>
+    {r.skippedLines !== undefined && <div data-diff-skipped={r.skippedLines}
+      className="flex items-center justify-center gap-1.5 min-h-7 px-4 py-1 text-[11px] select-none"
+      style={{ color: t.textSec, background: t.inputBg, borderBlock: `0.5px solid ${t.border}` }}>
+      <ChevronsUpDown size={13} aria-hidden="true" className="flex-shrink-0" style={{ color: t.textMuted }} />
+      <span className="tabular-nums">{r.skippedLines === 1 ? tx("1 行未更改") : tf("{0} 行未更改", r.skippedLines)}</span>
+    </div>}
+    <DiffRow row={r} gutterW={gutterW} tokens={tokens?.[i]} activeHunk={activeHunk} />
+  </Fragment>)}</>;
 }
 
 function DiffSkeleton() {
@@ -6230,6 +6256,9 @@ export default function App() {
   const [selectedCommit, setSelectedCommit]   = useState<Commit | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [smartMerge, setSmartMerge] = useState(() => localStorage.getItem("gitkit.smartMerge") !== "0");
+  const [historyMode, setHistoryMode] = useState<"list" | "topology">(() =>
+    localStorage.getItem("gitkit.historyMode") === "topology" ? "topology" : "list");
+  useEffect(() => { localStorage.setItem("gitkit.historyMode", historyMode); }, [historyMode]);
   const [expandedSmartRows, setExpandedSmartRows] = useState<Set<string>>(() => new Set());
   useEffect(() => { localStorage.setItem("gitkit.smartMerge", smartMerge ? "1" : "0"); }, [smartMerge]);
   const [selectedFile, setSelectedFile]       = useState<CommitFile | null>(null);
@@ -6667,7 +6696,7 @@ export default function App() {
       : buildSmartMergeCommits(scopedCommits, currentBranch),
     [focusActive, scopedCommits, currentBranch],
   );
-  const smartMergeActive = smartMerge && !focusActive && smartMergeResult.mergedGroups > 0;
+  const smartMergeActive = historyMode === "list" && smartMerge && !focusActive && smartMergeResult.mergedGroups > 0;
   const effectiveScopedCommits = smartMergeActive ? smartMergeResult.commits : scopedCommits;
   const displayCommits = effectiveScopedCommits;
   const displayGraph = useMemo(() => {
@@ -6675,12 +6704,14 @@ export default function App() {
     const set = new Set(displayCommits.map((c) => c.fullHash));
     return computeGraph(displayCommits.map((c) => ({ ...c, parents: c.parents.filter((p) => set.has(p)) })));
   }, [smartMergeActive, isReal, focusActive, timelineHiddenBranches.length, graphRows, displayCommits]);
+  const topologyGraph = useMemo(() => historyMode === "topology" ? computeGraph(scopedCommits) : [],
+    [historyMode, scopedCommits]);
 
   // Raw topology can place another branch's whole lane above the current HEAD.
   // When Smart Merge is switched off, anchor the viewport to the checked-out
   // branch so users can inspect the truth without having to hunt for it.
   useEffect(() => {
-    if (smartMergeActive || focusActive || !dataReady) return;
+    if (historyMode === "topology" || smartMergeActive || focusActive || !dataReady) return;
     const head = branches.find((branch) => branch.current)?.head;
     if (!head) return;
     const frame = requestAnimationFrame(() => {
@@ -6688,7 +6719,7 @@ export default function App() {
       row?.scrollIntoView({ block: "center" });
     });
     return () => cancelAnimationFrame(frame);
-  }, [smartMergeActive, focusActive, dataReady, branches]);
+  }, [historyMode, smartMergeActive, focusActive, dataReady, branches]);
 
   // Busiest lane index across the visible graph — drives a SINGLE global lane step
   // so vertical lane lines stay aligned row-to-row.
@@ -7718,9 +7749,8 @@ export default function App() {
   const [checkFocused, setCheckFocused] = useState(false);
   const [credentialRevision, setCredentialRevision] = useState(0);
   const mrConnection = loadGitlab();
-  const mrRemote = dataReady && gitAvailable ? gitlabRemote(remotes, mrConnection.url, mrConnection.token) : null;
-  const mr = useMergeRequests({repoPath: activeProject?.path ?? null, remote: mrRemote,
-    url: mrConnection.url, token: mrConnection.token, credentialRevision});
+  const mr = useMergeRequests({url: mrConnection.url, token: mrConnection.token, credentialRevision});
+  const hasMergeRequests = mr.enabled && (mr.snapshot?.total ?? 0) > 0;
   const mrFiles = useMemo(() => mr.diffVersion ? mrCommitFiles(mr.diffVersion) : [], [mr.diffVersion, language]);
   const checkRevisionRef = useRef(-1);
   const completedCheckRef = useRef(0);
@@ -8419,6 +8449,7 @@ export default function App() {
   };
 
   const handleSelectProject = (id: string) => {
+    mr.backWorkspace();
     overviewActionRef.current++;
     setOverviewIntent(null);
     setActiveProjectId(id);
@@ -8426,6 +8457,7 @@ export default function App() {
   };
 
   const handleShowHome = () => {
+    mr.backWorkspace();
     overviewActionRef.current++;
     setOverviewIntent(null);
     setSearchOpen(false);
@@ -8730,13 +8762,13 @@ export default function App() {
                 ])}
                 onAdd={handleOpenNew} onClone={() => setCloneOpen(true)} />
             </div>
-          {workspaceView === "home" ? <ProjectOverview theme={theme} projects={projects} entries={overview.entries}
+          {workspaceView === "home" && mr.selectedId === null ? <ProjectOverview theme={theme} projects={projects} entries={overview.entries}
             refreshing={overview.refreshing} remoteBusy={checkBusy} activity={activity}
             remoteCheckedAt={checkSnapshot?.result?.completedAt ?? null}
             remoteProgress={checkProgress ? checkProgress.paused ? tx("等待休眠恢复后补查")
               : tf("已检查 {0} / {1} · 正在检查 {2}", checkProgress.current, checkProgress.total, checkProgress.project) : null}
             onOpen={openOverviewProject}
-            onAdd={handleOpenNew} onClone={() => setCloneOpen(true)} /> : !activeProject ? (
+            onAdd={handleOpenNew} onClone={() => setCloneOpen(true)} /> : !activeProject && mr.selectedId === null ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-4" style={{ background: theme.bg }}>
               <FolderOpen size={40} style={{ color: theme.textFaint, opacity: 0.4 }} />
               <div className="flex flex-col items-center gap-1">
@@ -8760,7 +8792,7 @@ export default function App() {
           ) : (
           <div className="gk-workspace-card flex flex-1 min-w-0 overflow-hidden"
             style={{ background: theme.bgPanel, boxShadow: theme.shadowEl }}>
-            {mr.selectedIid !== null && <MergeRequestDetail key={`${mr.key}:${mr.selectedIid}`}
+            {mr.selectedId !== null && <MergeRequestDetail key={`${mr.key}:${mr.selectedId}`}
               theme={theme} detail={mr.detail} latest={mr.latest} snapshot={mr.snapshot}
               loading={mr.loading} error={mr.error} files={mrFiles} diffVersion={mr.diffVersion}
               diffLoading={mr.diffLoading} diffError={mr.diffError} discussions={mr.discussions}
@@ -8769,9 +8801,9 @@ export default function App() {
               onBackList={mr.backList} onBackWorkspace={mr.backWorkspace} onTabChange={mr.onTabChange}
               renderDiff={(files, selected, onSelect, sourceKey) => <FileDiffView files={files} selectedFile={selected}
                 onFileSelect={onSelect} repoPath="" sourceKey={sourceKey} compact />} />}
-            <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden" aria-hidden={mr.selectedIid !== null}
-              ref={(element) => { if (element) element.inert = mr.selectedIid !== null; }}
-              style={{display:mr.selectedIid !== null ? "none" : "flex"}}>
+            <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden" aria-hidden={mr.selectedId !== null}
+              ref={(element) => { if (element) element.inert = mr.selectedId !== null; }}
+              style={{display:mr.selectedId !== null ? "none" : "flex"}}>
             <Sidebar branches={branches} remotes={remotes} stashes={stashes}
               currentBranch={currentBranch} focusBranch={focusBranch}
               hidden={hiddenBranches} setHidden={updateHiddenBranches}
@@ -8827,7 +8859,20 @@ export default function App() {
               <div className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5"
                 style={{ borderBottom: `0.5px solid ${theme.border}`, background: "transparent" }}>
                 <span className="text-xs font-medium" style={{ color: theme.textSec }}>{tx("提交历史")}</span>
-                {!focusActive && smartMergeResult.mergedGroups > 0 && (
+                <div className="gk-history-mode" role="group" aria-label={tx("提交历史视图")}
+                  style={{ "--gk-mode-border": theme.inputBorder, "--gk-mode-bg": theme.inputBg,
+                    "--gk-mode-muted": theme.textSec, "--gk-mode-text": theme.text,
+                    "--gk-mode-accent-fg": theme.accentFg, "--gk-mode-accent-bg": theme.accentBg } as React.CSSProperties}>
+                  <button type="button" aria-pressed={historyMode === "list"}
+                    onClick={() => startTransition(() => setHistoryMode("list"))}>
+                    <List size={12} aria-hidden="true" />{tx("列表")}
+                  </button>
+                  <button type="button" aria-pressed={historyMode === "topology"}
+                    onClick={() => startTransition(() => setHistoryMode("topology"))}>
+                    <Network size={12} aria-hidden="true" />{tx("拓扑图")}
+                  </button>
+                </div>
+                {historyMode === "list" && !focusActive && smartMergeResult.mergedGroups > 0 && (
                   <button type="button" aria-pressed={smartMerge}
                     title={tx("仅合并相同变更的展示，不会修改 Git 历史")}
                     onClick={() => startTransition(() => setSmartMerge((on) => !on))}
@@ -8885,7 +8930,7 @@ export default function App() {
                   </button>
                 </div>
               )}
-              <div ref={timelineScrollRef} className="flex-1 overflow-y-auto"
+              <div ref={timelineScrollRef} className={`flex-1 min-h-0 ${historyMode === "topology" ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}
                 aria-busy={!dataReady || switching || branchViewLoading}
                 style={{ overscrollBehaviorY: "none" }}>
                 {errored ? (
@@ -8927,6 +8972,24 @@ export default function App() {
                       className="gk-shell-button px-3 py-2 text-xs cursor-pointer"
                       style={{ color: theme.accentFg, background: theme.accentBg, borderRadius: R - 2 }}>{tx("查看工作区")}</button>
                   </div>
+                ) : historyMode === "topology" ? (
+                  <CommitTopology key={`${activeProject?.path}:${focusBranch}:${timelineHiddenBranches.join("\u0000")}`}
+                    commits={scopedCommits} graph={topologyGraph} theme={theme} hoverBranch={hoverBranch}
+                    selectedHash={detailOpen && !viewChanges ? selectedStash
+                      ? scopedCommits.find(commit => commit.isStash && commit.stashIndex === selectedStash.index)?.fullHash ?? null
+                      : selectedCommit?.fullHash ?? null : null}
+                    onSelect={commit => {
+                      if (commit.isStash) openStash({ index: commit.stashIndex ?? 0, message: commit.message,
+                        branch: commit.stashBranch ?? "", date: commit.date });
+                      else openTimelineCommit(commit);
+                    }}
+                    onContextMenu={(event, commit) => openCtx(event, commit.isStash ? [
+                      { label: tx("应用到工作区"), Icon: RotateCcw, onClick: () => doStashApply(commit.stashIndex ?? 0) },
+                      { label: tx("删除储藏"), Icon: Trash2, danger: true, onClick: () => doStashDrop(commit.stashIndex ?? 0) },
+                    ] : [
+                      { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(commit.fullHash).catch(() => {}); } },
+                      ...(isReal ? [{ label: tx("Cherry-pick 到当前分支"), Icon: GitCommit, onClick: () => requestCherryPick(commit) } as CtxItem] : []),
+                    ])} />
                 ) : (
                   <div key={`${activeProject?.path}:${timelineHiddenBranches.join("\u0000")}`} className="gk-reveal">
                     {/* A branch sitting exactly on its base has no commits of its
@@ -9116,8 +9179,7 @@ export default function App() {
           )}
           </div>
           <StatusBar project={activeProject} branch={branches.find((b) => b.current)} changes={changesCount}
-            mrNew={!!mrRemote && (mr.snapshot?.newCount ?? 0) > 0}
-            mrEntry={mrRemote ? <MergeRequestEntry theme={theme} snapshot={mr.snapshot} open={mr.listOpen}
+            mrEntry={hasMergeRequests ? <MergeRequestEntry theme={theme} snapshot={mr.snapshot} open={mr.listOpen}
               anchorRef={mr.anchorRef} onToggle={mr.toggleList} /> : undefined}
             home={workspaceView === "home" ? { projects: projects.length, attention: attentionCount, refreshing: overview.refreshing } : undefined}
             ready={dataReady} errored={errored}
@@ -9125,9 +9187,9 @@ export default function App() {
             onShowCheckResult={() => { if (!pullBusy && checkSnapshot?.result) void openCheckResult(checkSnapshot.result); }}
             onShowChanges={() => { mr.backWorkspace(); setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
             onSearch={() => { if (workspaceView === "home") document.getElementById("overview-search")?.focus(); else setSearchOpen(true); }} />
-          <MergeRequestPopover theme={theme} snapshot={mr.snapshot} open={!!mrRemote && mr.listOpen}
+          <MergeRequestPopover theme={theme} snapshot={mr.snapshot} open={hasMergeRequests && mr.listOpen}
             configured={mr.enabled} error={mr.error} anchorRef={mr.anchorRef} onClose={mr.closeList}
-            onSelect={(iid) => { setDiffExpanded(false); void mr.select(iid); }} onRefresh={mr.refresh}
+            onSelect={(mrId) => { setDiffExpanded(false); void mr.select(mrId); }} onRefresh={mr.refresh}
             onConfigure={() => { mr.closeList(); setSettingsSection("gitlab"); setSettingsOpen(true); }} />
         </div>
 
