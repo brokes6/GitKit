@@ -1,6 +1,6 @@
-import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, MouseEvent, PointerEvent } from "react";
-import { Check, Crosshair, GitBranch, GitMerge, Layers, Maximize2, Minus, Plus } from "lucide-react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, MouseEvent, PointerEvent, RefObject } from "react";
+import { Crosshair, GitBranch, GitMerge, Layers, Maximize2, Minus, Plus } from "lucide-react";
 import { tf, tx } from "./i18n";
 import type { Commit, GraphRowInfo, ThemeColors } from "./App";
 import { buildCommitTopology } from "./commitTopologyLayout";
@@ -13,12 +13,22 @@ interface Props {
   theme: ThemeColors;
   selectedHash: string | null;
   hoverBranch: string | null;
+  detailPanelRef: RefObject<HTMLDivElement>;
+  detailFullWidth: boolean;
+  pulseActive: boolean;
   onSelect: (commit: Commit) => void;
   onContextMenu: (event: MouseEvent, commit: Commit) => void;
 }
 
 const MAX_ZOOM = 1.6;
 const MIN_ZOOM = 0.01;
+export const TOPOLOGY_DETAIL_CONTEXT_WIDTH = 300;
+export const TOPOLOGY_DETAIL_MIN_WIDTH = 760;
+const FLOW_LAYERS = [
+  { name: "trail", pixels: 14, width: 4 },
+  { name: "body", pixels: 5, width: 2.5 },
+  { name: "head", pixels: 1, width: 3 },
+] as const;
 
 const TopologyCommit = memo(function TopologyCommit({ node, selected, highlight, compact, zoom, onSelect, onContextMenu }: {
   node: TopologyNode; selected: boolean; highlight: boolean; compact: boolean; zoom: number;
@@ -44,19 +54,31 @@ const TopologyCommit = memo(function TopologyCommit({ node, selected, highlight,
     </span>}
     <span className="gk-topology-dot">{merge && <span />}</span>
     {!compact && <span className="gk-topology-label">
-      {selected && <Check className="gk-topology-selected-mark" size={12} strokeWidth={2.5} aria-hidden="true" />}
       <span className="gk-topology-hash">{commit.hash}</span>
       <span className="gk-topology-subject">{commit.message}</span>
     </span>}
   </button>;
 });
 
-export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranch, onSelect, onContextMenu }: Props) {
+export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranch, detailPanelRef, detailFullWidth, pulseActive, onSelect, onContextMenu }: Props) {
   const layout = useMemo(() => buildCommitTopology(commits, graph), [commits, graph]);
+  const branchLegend = useMemo(() => {
+    const branches = new Map<string, { name: string; color: string }>();
+    for (const node of layout.nodes) {
+      const name = node.commit.branchLabel;
+      if (!node.commit.isStash && name && !branches.has(name)) {
+        branches.set(name, { name, color: node.color });
+      }
+    }
+    return [...branches.values()];
+  }, [layout]);
   const viewportRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
-  const previousSelectionRef = useRef(selectedHash);
   const scrollRef = useRef({ left: 0, top: 0 });
+  const restoreViewRef = useRef<{ zoom: number; left: number; top: number } | null>(null);
+  const [focusCamera, setFocusCamera] = useState({ x: 0, y: 0, visible: false, animate: true });
+  const focusGeometryRef = useRef<{ hash: string; width: number; height: number; fullWidth: boolean } | null>(null);
+  const [pulseInView, setPulseInView] = useState(true);
   const [zoom, setZoom] = useState(1);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
   const zoomRef = useRef(1);
@@ -156,27 +178,81 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
   }, [zoom, layout, initialNode, viewportSize]);
 
   useLayoutEffect(() => {
-    // Restoring a selection on mount is static. Only a new selected hash plays;
-    // zoom, hover, resize and scrolling never restart the relationship feedback.
-    if (previousSelectionRef.current === selectedHash) return;
-    previousSelectionRef.current = selectedHash;
-    if (!selectedHash || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const svg = svgRef.current;
-    if (!svg) return;
-    const animations: Animation[] = [];
-    svg.querySelectorAll<SVGPathElement>(".gk-topology-edge-flow").forEach(path => {
-      const forward = path.dataset.direction === "forward";
-      animations.push(path.animate([
-        { strokeDashoffset: forward ? "18" : "-100", opacity: 0 },
-        { strokeDashoffset: "-41", opacity: 0.9, offset: 0.5 },
-        { strokeDashoffset: forward ? "-100" : "18", opacity: 0 },
-      ], { duration: 560, delay: 40, easing: "cubic-bezier(0.22, 0.68, 0.24, 1)" }));
+    const viewport = viewportRef.current;
+    if (!selectedNode || !viewport) {
+      focusGeometryRef.current = null;
+      const restore = restoreViewRef.current;
+      restoreViewRef.current = null;
+      if (restore && viewport) {
+        if (zoom !== restore.zoom) {
+          const offset = offsetAt(restore.zoom);
+          anchorRef.current = {
+            x: (restore.left + viewport.clientWidth / 2 - offset.x) / restore.zoom,
+            y: (restore.top + viewport.clientHeight / 2 - offset.y) / restore.zoom,
+          };
+          zoomRef.current = restore.zoom;
+          setZoom(restore.zoom);
+        }
+        viewport.scrollLeft = restore.left;
+        viewport.scrollTop = restore.top;
+        syncSvgViewport();
+      }
+      setFocusCamera(current => current.x === 0 && current.y === 0 && !current.visible && current.animate
+        ? current : { x: 0, y: 0, visible: false, animate: true });
+      return;
+    }
+    if (!restoreViewRef.current) restoreViewRef.current = {
+      zoom: zoomRef.current, left: viewport.scrollLeft, top: viewport.scrollTop,
+    };
+    const center = () => {
+      const panel = detailPanelRef.current;
+      const parent = panel?.offsetParent;
+      if (!panel || !(parent instanceof HTMLElement) || viewport.clientWidth === 0 || viewport.clientHeight === 0) return;
+      // offsetLeft ignores the panel's entrance/exit transform: aim at its
+      // settled left edge rather than chasing the sliding animation.
+      const left = parent.getBoundingClientRect().left + panel.offsetLeft;
+      const width = detailFullWidth ? 0
+        : Math.max(0, Math.min(viewport.clientWidth, left - viewport.getBoundingClientRect().left));
+      // Retain the same focus position while the full-width detail hides the
+      // graph, so resizing back to a split view reveals an already centered node.
+      const focusWidth = width || TOPOLOGY_DETAIL_CONTEXT_WIDTH;
+      const offset = offsetAt(zoom);
+      const x = focusWidth / 2 - (offset.x + selectedNode.x * zoom - viewport.scrollLeft);
+      const y = viewport.clientHeight / 2 - (offset.y + selectedNode.y * zoom - viewport.scrollTop);
+      const visible = width > 0;
+      const previous = focusGeometryRef.current;
+      const changedNode = previous?.hash !== selectedNode.commit.fullHash;
+      const resized = !!previous && (previous.width !== viewport.clientWidth
+        || previous.height !== viewport.clientHeight || previous.fullWidth !== detailFullWidth);
+      focusGeometryRef.current = { hash: selectedNode.commit.fullHash, width: viewport.clientWidth,
+        height: viewport.clientHeight, fullWidth: detailFullWidth };
+      setFocusCamera(current => {
+        // Resizing moves the stage itself. Snap the matching camera correction
+        // before paint; only node selection and returning should animate.
+        const animate = changedNode ? true : resized ? false : current.animate;
+        return current.x === x && current.y === y && current.visible === visible && current.animate === animate
+          ? current : { x, y, visible, animate };
+      });
+    };
+    center();
+    const observer = new ResizeObserver(center);
+    observer.observe(viewport);
+    // The sibling detail panel's ref is attached after child layout effects.
+    const frame = requestAnimationFrame(() => {
+      if (detailPanelRef.current) observer.observe(detailPanelRef.current);
+      center();
     });
-    const ring = svg.querySelector(".gk-topology-node-pulse");
-    if (ring) animations.push(ring.animate([{ opacity: 0 }, { opacity: 0.7 }, { opacity: 0 }],
-      { duration: 400, easing: "ease-out" }));
-    return () => animations.forEach(animation => animation.cancel());
-  }, [selectedHash]);
+    return () => { cancelAnimationFrame(frame); observer.disconnect(); };
+  }, [selectedNode, zoom, viewportSize, detailPanelRef, detailFullWidth]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const node = viewport?.querySelector<HTMLElement>('.gk-topology-node[data-selected="true"]');
+    if (!viewport || !node) return;
+    const observer = new IntersectionObserver(([entry]) => setPulseInView(entry.isIntersecting), { root: viewport });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [selectedNode]);
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || !event.isPrimary) return;
@@ -208,7 +284,9 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
   };
 
-  return <div className="gk-topology" style={{
+  const cameraTransform = `translate(${focusCamera.x}px, ${focusCamera.y}px)`;
+  return <div className="gk-topology" data-focused={!!selectedNode} data-camera-animated={focusCamera.animate}
+    data-pulse-active={pulseActive && pulseInView && focusCamera.visible} style={{
     "--gk-topology-text": theme.text, "--gk-topology-secondary": theme.textSec,
     "--gk-topology-muted": theme.textMuted, "--gk-topology-surface": theme.bgPanel,
     "--gk-topology-border": theme.border, "--gk-topology-hover": theme.rowHover,
@@ -228,6 +306,7 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
       <button type="button" onClick={() => changeZoom(zoomRef.current * 1.25)} disabled={zoom >= MAX_ZOOM}
         title={tx("放大拓扑图")} aria-label={tx("放大拓扑图")}><Plus size={13} aria-hidden="true" /></button>
     </div>
+    <div className="gk-topology-canvas">
     {layout.nodes.length === 0 ? <div className="gk-topology-empty"><GitBranch size={24} aria-hidden="true" />
       <span>{tx("当前范围没有提交")}</span></div> : <div ref={viewportRef} className="gk-topology-viewport" tabIndex={0}
       role="region" aria-label={tx("提交拓扑图，拖动或使用方向键移动，点击节点查看详情")}
@@ -250,6 +329,7 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
           <svg ref={svgRef} className="gk-topology-lines" width={viewportSize.width} height={viewportSize.height}
             viewBox={`${scrollRef.current.left} ${scrollRef.current.top} ${viewportSize.width || 1} ${viewportSize.height || 1}`}
             aria-hidden="true">
+            <g className="gk-topology-camera" style={{ transform: cameraTransform }}>
             {Array.from({ length: layout.laneCount }, (_, lane) => <line key={lane}
               x1={stageLeft + 32 * zoom} x2={stageLeft + (layout.width - 32) * zoom}
               y1={stageTop + (104 + lane * layout.laneSpacing) * zoom} y2={stageTop + (104 + lane * layout.laneSpacing) * zoom}
@@ -260,14 +340,25 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
               const bend = Math.min(84 * zoom, (cx - px) / 2);
               const d = `M ${px} ${py} C ${px + bend} ${py}, ${cx - bend} ${cy}, ${cx} ${cy}`;
               const related = selectedHash === edge.parent.commit.fullHash || selectedHash === edge.child.commit.fullHash;
+              const forward = selectedHash === edge.parent.commit.fullHash;
+              // Keep lights short in screen space, including long merge edges.
+              const flowUnit = 100 / Math.max(1, Math.hypot(cx - px, cy - py));
+              // Draw each light path outwards from the selected endpoint so
+              // its short trail always follows the head, including on curves.
+              const flowPath = forward ? d : `M ${cx} ${cy} C ${cx - bend} ${cy}, ${px + bend} ${py}, ${px} ${py}`;
               return <g key={`${edge.child.commit.fullHash}:${edge.parent.commit.fullHash}`}>
                 <path d={d} stroke={edge.color} strokeWidth={2} fill="none" strokeLinecap="round"
                   strokeDasharray={edge.child.commit.isStash ? "5 5" : undefined} />
-                {related && <path className="gk-topology-edge-flow" d={d} pathLength={100}
-                  data-direction={selectedHash === edge.parent.commit.fullHash ? "forward" : "reverse"}
-                  style={{ "--gk-edge-color": edge.color } as CSSProperties}
-                  stroke={edge.color} strokeWidth={4} fill="none" strokeLinecap="round"
-                  strokeDasharray={edge.child.commit.isStash ? "3 3 3 3 3 109" : "18 100"} />}
+                {related && <g key={selectedHash}
+                  style={{ "--gk-edge-color": edge.color } as CSSProperties}>
+                  {FLOW_LAYERS.map(layer => {
+                    const length = layer.pixels * Math.min(1, flowUnit);
+                    const start = layer.name === "head" ? length / 2 : length;
+                    return <path key={layer.name} className="gk-topology-edge-flow" data-layer={layer.name} d={flowPath} pathLength={100}
+                      style={{ "--gk-flow-from": start, "--gk-flow-to": start - 100 } as CSSProperties}
+                      strokeWidth={layer.width} fill="none" strokeLinecap="round" strokeDasharray={`${length} ${128 - length}`} />;
+                  })}
+                </g>}
               </g>;
             })}
             {zoom < 0.55 && layout.nodes.map(node => <circle key={node.commit.fullHash}
@@ -276,21 +367,23 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
               stroke={node.color} strokeWidth={1.5} />)}
             {zoom < 0.55 && selectedNode && <g>
               <circle cx={stageLeft + selectedNode.x * zoom} cy={stageTop + selectedNode.y * zoom}
-                r={Math.max(2.8, 8 * zoom) + 4} fill={theme.bgPanel} stroke={theme.accentFg} strokeWidth={2} />
+                r={Math.max(2.8, 8 * zoom) + 3} fill="none" stroke={selectedNode.color} strokeOpacity={0.2} strokeWidth={6} />
               <circle cx={stageLeft + selectedNode.x * zoom} cy={stageTop + selectedNode.y * zoom}
-                r={Math.max(2.8, 8 * zoom)} fill={selectedNode.commit.tags?.includes("HEAD") ? selectedNode.color : theme.bgPanel}
+                r={Math.max(2.8, 8 * zoom)} fill={selectedNode.color}
                 stroke={selectedNode.color} strokeWidth={1.5} />
             </g>}
             {selectedNode && (selectedNode.commit.isStash && zoom >= 0.55 ? <rect
-              className="gk-topology-node-pulse" x={stageLeft + (selectedNode.x - 15) * zoom}
-              y={stageTop + (selectedNode.y - 15) * zoom} width={30 * zoom} height={30 * zoom}
-              rx={6 * zoom} fill="none" stroke={selectedNode.color} strokeWidth={2.5}
+              key={selectedHash} className="gk-topology-node-pulse" x={stageLeft + (selectedNode.x - 11) * zoom}
+              y={stageTop + (selectedNode.y - 11) * zoom} width={22 * zoom} height={22 * zoom}
+              rx={4 * zoom} fill="none" stroke={selectedNode.color} strokeWidth={1} vectorEffect="non-scaling-stroke"
             /> : <circle className="gk-topology-node-pulse"
+              key={selectedHash}
               cx={stageLeft + selectedNode.x * zoom} cy={stageTop + selectedNode.y * zoom}
-              r={zoom < 0.55 ? Math.max(2.8, 8 * zoom) + 6 : 15 * zoom}
-              fill="none" stroke={selectedNode.color} strokeWidth={2.5} />)}
+              r={zoom < 0.55 ? Math.max(2.8, 8 * zoom) + 3 : 11 * zoom}
+              fill="none" stroke={selectedNode.color} strokeWidth={1} vectorEffect="non-scaling-stroke" />)}
+            </g>
           </svg>
-        <div className="gk-topology-stage" style={{ left: stageLeft, top: stageTop,
+        <div className="gk-topology-stage gk-topology-camera" style={{ left: stageLeft, top: stageTop, transform: cameraTransform,
           width: layout.width * zoom, height: layout.height * zoom }}>
           {layout.nodes.map(node => <TopologyCommit key={node.commit.fullHash} node={node}
             selected={selectedHash === node.commit.fullHash}
@@ -299,6 +392,13 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
         </div>
       </div>
     </div>}
+    {branchLegend.length > 0 && <ul className="gk-topology-legend" role="list" aria-label={tx("分支")} tabIndex={0}>
+      {branchLegend.map(branch => <li key={branch.name} title={branch.name}>
+        <span className="gk-topology-legend-dot" style={{ background: branch.color }} aria-hidden="true" />
+        <span className="gk-topology-legend-name">{branch.name}</span>
+      </li>)}
+    </ul>}
+    </div>
     <div className="gk-topology-footer">
       <span>{tx("拖动平移 · 点击节点查看详情")}</span>
       <span className="gk-topology-boundary">{layout.omittedParentCount > 0 ? tx("仅连接当前范围内的提交") : tx("较早 → 较新")}</span>

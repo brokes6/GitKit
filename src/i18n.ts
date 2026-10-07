@@ -33,6 +33,7 @@ const EN: Record<string, string> = {
   "提交历史视图": "Commit history view",
   "列表": "List",
   "拓扑图": "Topology",
+  "返回拓扑图": "Back to topology",
   "查看提交 {0}：{1}": "View commit {0}: {1}",
   "{0} 个合并提交": "Merge commits: {0}",
   "定位 HEAD": "Locate HEAD",

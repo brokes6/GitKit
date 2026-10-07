@@ -97,6 +97,8 @@ select:focus-visible,
 
 .gk-detail-panel { transition: width 0.22s cubic-bezier(0.4, 0, 1, 1); }
 .gk-detail-panel[data-tracing="true"] { transition-duration: 0.28s; transition-timing-function: cubic-bezier(0.32, 0.72, 0, 1); }
+/* Trace navigation shares the list transition; responsive layout changes snap. */
+.gk-detail-panel[data-topology="true"]:not([data-trace-motion="true"]) { transition: none; }
 .gk-detail-icon:hover { background: var(--gk-detail-hover); }
 .gk-detail-panel .gk-trace-record:hover:not([aria-pressed="true"]) { background: var(--gk-detail-hover); }
 .gk-file-trace { container-type: inline-size; }
@@ -239,7 +241,35 @@ select:focus-visible,
   transition: opacity 120ms ease-in, transform 180ms ease-in, visibility 0s linear 180ms;
 }
 .gk-project-sidebar { width: var(--gk-project-width); height: 100%; padding-top: 8px; }
-.gk-branch-sidebar { width: 168px; }
+.gk-history-workspace {
+  --gk-branch-width: 168px;
+  display: grid;
+  grid-template-columns: var(--gk-branch-width) minmax(0, 1fr);
+  transition: grid-template-columns 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.gk-history-workspace[data-history-mode="topology"] {
+  grid-template-columns: 0px minmax(0, 1fr);
+  transition-duration: 200ms;
+}
+.gk-branch-disclosure {
+  visibility: visible;
+  transition: visibility 0s;
+}
+.gk-history-workspace[data-history-mode="topology"] .gk-branch-disclosure {
+  visibility: hidden;
+  pointer-events: none;
+  transition: visibility 0s linear 200ms;
+}
+.gk-branch-sidebar {
+  width: var(--gk-branch-width);
+  height: 100%;
+  transform: translateX(0);
+  transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.gk-history-workspace[data-history-mode="topology"] .gk-branch-sidebar {
+  transform: translateX(-100%);
+  transition-duration: 200ms;
+}
 .gk-workspace-card { margin: 12px 12px 12px 0; border-radius: 14px; }
 
 /* Paused Git operations float below the workspace toolbar without changing
@@ -618,7 +648,7 @@ select:focus-visible,
 
 @media (max-width: 1100px) {
   .gk-workspace { --gk-project-width: 160px; --gk-workspace-gap: 8px; }
-  .gk-branch-sidebar { width: 152px; }
+  .gk-history-workspace { --gk-branch-width: 152px; }
   .gk-workspace-card { margin-top: 8px; margin-right: 8px; margin-bottom: 8px; }
   .gk-toolbar-name { max-width: 88px; }
   .gk-toolbar-branch { max-width: 80px; }
@@ -626,6 +656,9 @@ select:focus-visible,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .gk-history-workspace[data-history-mode],
+  .gk-history-workspace[data-history-mode] .gk-branch-disclosure,
+  .gk-history-workspace[data-history-mode] .gk-branch-sidebar { transition: none; }
   .gk-project-item { transition-duration: 80ms; }
   .gk-project-item[data-project-active] { animation: none; }
   .gk-primary-sweep::after { display: none; }

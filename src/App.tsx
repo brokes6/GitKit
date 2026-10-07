@@ -1,6 +1,6 @@
 import { tf, tx, translateNativeMessage, getLanguage, getCurrentLanguage, setCurrentLanguage } from "./i18n";
 import type { Language } from "./i18n";
-import { useState, useEffect, useLayoutEffect, useRef, useMemo, useDeferredValue, startTransition, useTransition, createContext, useContext, memo, Fragment } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, useDeferredValue, startTransition, useTransition, createContext, useContext, memo, Fragment } from "react";
 import { createPortal } from "react-dom";
 import { Toaster, toast } from "sonner";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -50,7 +50,7 @@ import { MergeRequestEntry, MergeRequestPopover, MergeRequestDetail } from "./Me
 import { useMergeRequests } from "./useMergeRequests";
 import { mrCommitFiles } from "./mergeRequestHelpers";
 import type { OverviewTarget } from "./projectOverview";
-import { CommitTopology } from "./CommitTopology";
+import { CommitTopology, TOPOLOGY_DETAIL_CONTEXT_WIDTH, TOPOLOGY_DETAIL_MIN_WIDTH } from "./CommitTopology";
 export type { WorkingFile } from "./workingStatus";
 import "./styles/settings.css";
 
@@ -6458,13 +6458,46 @@ export default function App() {
   const [diffExpanded, setDiffExpanded] = useState(false);
   const diffExpandTriggerRef = useRef<HTMLButtonElement | null>(null);
   const detailPanelRef = useRef<HTMLDivElement>(null);
-  const openDetail = () => { setFileTrace(null); setDetailClosing(false); setDetailOpen(true); };
-  const closeDetail = () => { setDiffExpanded(false); setDetailOpen(false); setDetailClosing(true); };
+  const [traceMotion, setTraceMotion] = useState(false);
+  const [topologyDetailSplit, setTopologyDetailSplit] = useState(false);
+  const historySizeObserverRef = useRef<ResizeObserver | null>(null);
+  const observeHistoryContent = useCallback((element: HTMLDivElement | null) => {
+    historySizeObserverRef.current?.disconnect();
+    historySizeObserverRef.current = null;
+    if (!element) return;
+    const measure = () => {
+      setTraceMotion(false);
+      const split = element.clientWidth >= TOPOLOGY_DETAIL_CONTEXT_WIDTH + TOPOLOGY_DETAIL_MIN_WIDTH;
+      setTopologyDetailSplit(current => current === split ? current : split);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    historySizeObserverRef.current = observer;
+  }, []);
+  const topologyDetailFullWidth = historyMode === "topology" && !topologyDetailSplit;
+  const topologyCovered = historyMode === "topology" && detailOpen && (topologyDetailFullWidth || !!fileTrace);
+  useLayoutEffect(() => {
+    const panel = detailPanelRef.current;
+    if (topologyCovered && !fileTrace && panel && !panel.contains(document.activeElement)) {
+      panel.querySelector<HTMLButtonElement>("[data-gk-back-topology]")?.focus({ preventScroll: true });
+    }
+  }, [topologyCovered, fileTrace]);
+  const openDetail = () => { setTraceMotion(false); setFileTrace(null); setDetailClosing(false); setDetailOpen(true); };
+  const closeDetail = () => {
+    setTraceMotion(false);
+    setDiffExpanded(false); setDetailOpen(false); setDetailClosing(true);
+    if (historyMode === "topology" && !viewChanges) requestAnimationFrame(() => {
+      const hash = inspectedTopologyCommit?.fullHash;
+      if (hash) timelineScrollRef.current?.querySelector<HTMLElement>(`[data-commit-hash="${hash}"]`)?.focus({ preventScroll: true });
+    });
+  };
   const exitFileTrace = () => {
+    setTraceMotion(historyMode === "topology" && topologyDetailSplit);
     setDiffExpanded(false); setFileTrace(null);
     requestAnimationFrame(() => detailPanelRef.current?.querySelector<HTMLButtonElement>("[data-gk-file-trace]")?.focus());
   };
-  useEffect(() => { setFileTrace(null); setDiffExpanded(false); }, [activeProject?.path, selectedCommit?.fullHash, viewChanges, selectedStash?.index]);
+  useEffect(() => { setTraceMotion(false); setFileTrace(null); setDiffExpanded(false); }, [activeProject?.path, selectedCommit?.fullHash, viewChanges, selectedStash?.index]);
   const openExpandedDiff = (trigger: HTMLButtonElement) => {
     diffExpandTriggerRef.current = trigger;
     setDiffExpanded(true);
@@ -6647,6 +6680,8 @@ export default function App() {
       if ((e.target as Element | null)?.closest?.(".gk-expanded-diff-overlay")) return;
       if ((e.target as Element | null)?.closest?.(".gk-operation-capsule, .gk-repo-operation")) return;
       if ((e.target as Element | null)?.closest?.(".gk-project-sidebar")) return;
+      if (historyMode === "topology" && (e.target as Element | null)?.closest?.("[data-gk-project-toggle]")) return;
+      if (historyMode === "topology" && (e.target as Element | null)?.closest?.(".gk-topology-node")) return;
       e.preventDefault();
       e.stopPropagation();
       closeDetail();
@@ -6657,7 +6692,7 @@ export default function App() {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("mousedown", onMouseDown, true);
     };
-  }, [detailOpen, settingsOpen, diffExpanded, fileTrace]);
+  }, [detailOpen, settingsOpen, diffExpanded, fileTrace, historyMode, selectedCommit?.fullHash, selectedStash?.index, viewChanges]);
 
   // Data belongs to the active project only when its path matches. On a tab
   // switch this flips false on the very first (urgent) render, so the target
@@ -6817,6 +6852,10 @@ export default function App() {
   }, [smartMergeActive, isReal, focusActive, timelineHiddenBranches.length, graphRows, displayCommits]);
   const topologyGraph = useMemo(() => historyMode === "topology" ? computeGraph(scopedCommits) : [],
     [historyMode, scopedCommits]);
+  const inspectedTopologyIndex = !viewChanges ? scopedCommits.findIndex(commit => selectedStash
+    ? commit.isStash && commit.stashIndex === selectedStash.index
+    : commit.fullHash === selectedCommit?.fullHash) : -1;
+  const inspectedTopologyCommit = scopedCommits[inspectedTopologyIndex];
 
   // Raw topology can place another branch's whole lane above the current HEAD.
   // When Smart Merge is switched off, anchor the viewport to the checked-out
@@ -8759,7 +8798,7 @@ export default function App() {
           <div className="gk-action-bar gk-toolbar-shell flex items-center gap-1.5 px-3 flex-shrink-0 select-none"
             style={{ borderBottom: `0.5px solid ${theme.border}`, background: workspaceView === "home" ? theme.bgPanel : theme.bg,
               color: theme.textSec, "--gk-shell-hover": theme.rowHover } as React.CSSProperties}>
-            <button type="button" onClick={() => setProjectSidebarOpen((open) => !open)}
+            <button type="button" data-gk-project-toggle onClick={() => setProjectSidebarOpen((open) => !open)}
               className="gk-shell-button flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer"
               aria-label={projectSidebarOpen ? tx("收起项目栏") : tx("展开项目栏")}
               title={projectSidebarOpen ? tx("收起项目栏") : tx("展开项目栏")}
@@ -8916,9 +8955,12 @@ export default function App() {
               onBackList={mr.backList} onBackWorkspace={mr.backWorkspace} onTabChange={mr.onTabChange}
               renderDiff={(files, selected, onSelect, sourceKey) => <FileDiffView files={files} selectedFile={selected}
                 onFileSelect={onSelect} repoPath="" sourceKey={sourceKey} compact />} />}
-            <div className="flex flex-1 min-w-0 min-h-0 overflow-hidden" aria-hidden={mr.selectedId !== null}
+            <div className="gk-history-workspace flex-1 min-w-0 min-h-0 overflow-hidden" data-history-mode={historyMode}
+              aria-hidden={mr.selectedId !== null}
               ref={(element) => { if (element) element.inert = mr.selectedId !== null; }}
-              style={{display:mr.selectedId !== null ? "none" : "flex"}}>
+              style={{ display: mr.selectedId !== null ? "none" : undefined }}>
+            <div className="gk-branch-disclosure min-w-0 min-h-0 overflow-hidden" aria-hidden={historyMode === "topology"}
+              ref={(element) => { if (element) element.inert = historyMode === "topology"; }}>
             <Sidebar branches={branches} remotes={remotes} stashes={stashes}
               currentBranch={currentBranch} focusBranch={focusBranch}
               hidden={hiddenBranches} setHidden={updateHiddenBranches}
@@ -8965,12 +9007,14 @@ export default function App() {
                 { label: tx("删除储藏"), Icon: Trash2, danger: true, onClick: () => doStashDrop(s.index) },
               ])}
               selectedStashIndex={detailOpen && selectedStash ? selectedStash.index : null} />
+            </div>
 
-            {/* Content area: full-width timeline with the detail as a sliding
-                overlay on the right — the list never reflows, so opening detail
-                animates smoothly and the left ~380px stays visible & clickable. */}
-            <div className="relative flex-1 overflow-hidden">
-            <div className="absolute inset-0 flex flex-col overflow-hidden">
+            {/* Keep the history mounted underneath the detail so its scroll
+                position and topology camera survive full-width inspection. */}
+            <div ref={observeHistoryContent} className="relative flex-1 min-w-0 overflow-hidden">
+            <div className="absolute inset-0 flex flex-col overflow-hidden" aria-hidden={topologyCovered}
+              ref={element => { if (element) element.inert = topologyCovered; }}
+              style={{ visibility: topologyCovered && !traceMotion ? "hidden" : undefined }}>
               <div className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5"
                 style={{ borderBottom: `0.5px solid ${theme.border}`, background: "transparent" }}>
                 <span className="text-xs font-medium" style={{ color: theme.textSec }}>{tx("提交历史")}</span>
@@ -9065,9 +9109,9 @@ export default function App() {
                 ) : historyMode === "topology" ? (
                   <CommitTopology key={`${activeProject?.path}:${focusBranch}:${timelineHiddenBranches.join("\u0000")}`}
                     commits={scopedCommits} graph={topologyGraph} theme={theme} hoverBranch={hoverBranch}
-                    selectedHash={detailOpen && !viewChanges ? selectedStash
-                      ? scopedCommits.find(commit => commit.isStash && commit.stashIndex === selectedStash.index)?.fullHash ?? null
-                      : selectedCommit?.fullHash ?? null : null}
+                    detailPanelRef={detailPanelRef} detailFullWidth={topologyDetailFullWidth || !!fileTrace}
+                    pulseActive={appForeground && mr.selectedId === null && !settingsOpen && !diffExpanded && !fileTrace && !topologyCovered}
+                    selectedHash={detailOpen && !viewChanges ? inspectedTopologyCommit?.fullHash ?? null : null}
                     onSelect={commit => {
                       if (commit.isStash) openStash({ index: commit.stashIndex ?? 0, message: commit.message,
                         branch: commit.stashBranch ?? "", date: commit.date });
@@ -9167,22 +9211,45 @@ export default function App() {
             {(detailOpen || detailClosing) && dataReady && (
               <div ref={detailPanelRef} className={`gk-detail-panel absolute top-0 bottom-0 right-0 flex flex-col overflow-hidden ${detailOpen ? "gk-panel-in" : "gk-panel-out"}`}
                 data-tracing={!!fileTrace}
-                onAnimationEnd={() => { if (!detailOpen) { setDetailClosing(false); setFileTrace(null); } }}
-                style={{ width: fileTrace ? "100%" : "min(100%, max(760px, calc(100% - clamp(240px, 18vw, 300px))))", background: theme.bgPanel,
+                data-topology={historyMode === "topology"}
+                data-trace-motion={traceMotion}
+                onTransitionEnd={event => {
+                  if (event.target === event.currentTarget && event.propertyName === "width") setTraceMotion(false);
+                }}
+                onAnimationEnd={event => {
+                  if (event.target === event.currentTarget && event.animationName === "gk-panel-out" && !detailOpen) {
+                    setDetailClosing(false); setFileTrace(null);
+                  }
+                }}
+                style={{ width: fileTrace || topologyDetailFullWidth ? "100%" : historyMode === "topology"
+                    ? `calc(100% - ${TOPOLOGY_DETAIL_CONTEXT_WIDTH}px)`
+                    : "min(100%, max(760px, calc(100% - clamp(240px, 18vw, 300px))))", background: theme.bgPanel,
                   "--gk-detail-hover": theme.rowHover,
                   // Above the timeline's hover popovers (ref chips use z-index 50),
                   // so an expanded branch-ref overlay never bleeds over the panel.
                   zIndex: 60,
-                  borderTopLeftRadius: 14,
-                  borderBottomLeftRadius: 14,
-                  borderLeft: `0.5px solid ${theme.border}`,
-                  boxShadow: theme.isDark ? "-12px 0 34px rgba(0,0,0,0.32)" : "-12px 0 34px rgba(0,0,0,0.10)" } as React.CSSProperties}>
+                  borderTopLeftRadius: topologyDetailFullWidth ? 0 : 14,
+                  borderBottomLeftRadius: topologyDetailFullWidth ? 0 : 14,
+                  borderLeft: topologyDetailFullWidth ? "none" : `0.5px solid ${theme.border}`,
+                  boxShadow: topologyDetailFullWidth ? "none" : theme.isDark ? "-12px 0 34px rgba(0,0,0,0.32)" : "-12px 0 34px rgba(0,0,0,0.10)" } as React.CSSProperties}>
                 <div className="flex-shrink-0 flex items-center gap-1 px-2.5 py-2"
                   style={{ borderBottom: `0.5px solid ${theme.border}`, ...glassStyle(theme) }}>
                   {fileTrace ? <>
                     <button type="button" data-gk-exit-trace onClick={exitFileTrace} className="gk-detail-icon flex items-center gap-1.5 px-2 py-1 text-xs cursor-pointer" style={{ color: theme.textMuted, borderRadius: R - 3 }}>
                       <ChevronLeft size={14} />{tx("退出追溯")}
                     </button><span className="text-xs font-medium ml-2" style={{ color: theme.text }}>{tx("文件追溯")}</span>
+                  </> : topologyDetailFullWidth ? <>
+                    <button type="button" data-gk-back-topology {...press(closeDetail)} className="gk-detail-icon flex items-center gap-1.5 px-2 py-1 text-xs cursor-pointer"
+                      style={{ color: theme.textMuted, borderRadius: R - 3 }}>
+                      <ChevronLeft size={14} aria-hidden="true" />{tx("返回拓扑图")}
+                    </button>
+                    {inspectedTopologyCommit && <span className="text-[11px] flex items-center gap-2 min-w-0 ml-2" style={{ color: theme.textSec }}>
+                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" aria-hidden="true"
+                        style={{ background: topologyGraph[inspectedTopologyIndex]?.colors?.dot ?? "#8A857C" }} />
+                      <span className="truncate">{inspectedTopologyCommit.branchLabel ?? inspectedTopologyCommit.stashBranch}</span>
+                      <span aria-hidden="true" style={{ color: theme.textFaint }}>/</span>
+                      <code className="flex-shrink-0" style={{ color: theme.textMuted }}>{inspectedTopologyCommit.hash}</code>
+                    </span>}
                   </> : selectedCommit && !viewChanges && !selectedStash ? <span className="text-xs px-2 py-1" style={{ color: theme.textMuted }}>{tx("提交详情")}</span> : <button {...press(closeDetail)}
                     className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium cursor-pointer"
                     style={{ color: theme.textMuted, borderRadius: R - 3 }}
@@ -9242,6 +9309,7 @@ export default function App() {
                       repoPath={isReal ? path ?? "" : ""}
                       onRevealFile={isReal ? revealCommitFile : undefined}
                       onTrace={isReal && selectedFile ? () => {
+                        setTraceMotion(historyMode === "topology" && topologyDetailSplit);
                         setDiffExpanded(false); setFileTrace({ anchor: selectedCommit.fullHash, file: selectedFile.path });
                         requestAnimationFrame(() => detailPanelRef.current?.querySelector<HTMLButtonElement>("[data-gk-exit-trace]")?.focus());
                       } : undefined}
