@@ -1,5 +1,5 @@
 import type { CommitFile } from "./App";
-import type { MrDetail, MrDiffRefs, MrDiffVersion, MrDiffVersionInfo } from "./mergeRequestTypes";
+import type { MrDetail, MrDiffRefs, MrDiffVersion, MrDiffVersionInfo, MrUser } from "./mergeRequestTypes";
 import { tx, translateNativeMessage } from "./i18n.ts";
 
 export function sameMrRefs(left: MrDiffRefs | null | undefined, right: MrDiffRefs | null | undefined): boolean {
@@ -17,6 +17,21 @@ export function mrVersionChanged(pinned: MrDetail | null, latest: MrDetail | nul
     || pinned.summary.sha !== latest.summary.sha || pinned.summary.targetBranch !== latest.summary.targetBranch
     || !sameMrRefs(pinned.diffRefs, latest.diffRefs)
     || reviewVersion(pinned)?.id !== reviewVersion(latest)?.id;
+}
+
+/** Only the authenticated viewer and the latest remote roles authorize these controls. */
+export function mrViewerActions(detail: MrDetail | null, user: MrUser | null | undefined) {
+  const opened = detail?.summary.state === "opened";
+  const author = !!user && detail?.summary.author.id === user.id;
+  const reviewer = !!user && !!detail?.summary.roles.includes("reviewer");
+  const approved = !!user && !!detail?.approvals.approvedBy.some(approver => approver.id === user.id);
+  return {
+    showCancel: opened && author,
+    canCancel: opened && author && detail?.canClose === true,
+    showApprove: opened && reviewer && !author,
+    canApprove: opened && reviewer && !author && !approved && detail?.canApprove === true,
+    approved,
+  };
 }
 
 /** GitLab version diffs are already hunk text; never read the local checkout here. */

@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import type { Project, ThemeColors } from "./App";
 import { ToolbarText } from "./ToolbarText";
+import { Skeleton } from "./Skeleton";
 import { WorkspaceActivity } from "./WorkspaceActivity";
 import type { useProjectActivity } from "./useProjectActivity";
 import { getCurrentLanguage, tf, tx } from "./i18n";
@@ -38,10 +39,13 @@ export function WorkbenchActionBar({ theme, total, attention, reading, refreshin
   return <div className="gk-workbench-toolbar" style={{
     "--gko-text": theme.text, "--gko-secondary": theme.textSec, "--gko-border": theme.border,
     "--gko-accent": theme.accentFg, "--gko-accent-bg": theme.accentBg,
+    "--gko-hover": theme.rowHover,
     "--gk-action-accent": theme.accentFg, "--gk-action-active-bg": theme.accentBg,
   } as CSSProperties}>
     <h1 className="gk-workbench-title"><ToolbarText>{tx("工作台")}</ToolbarText></h1>
-    <span className="gk-workbench-summary" title={summary}>{summary}</span>
+    <span className="gk-workbench-summary" title={summary} aria-busy={reading}>
+      {reading ? <><Skeleton width={145} height={11} /><span className="sr-only">{summary}</span></> : summary}
+    </span>
     <div className="gk-workbench-actions" role="group" aria-label={tx("工作台操作")}>
       <button className="gk-overview-button gk-shell-button gk-git-action" onClick={onRefresh} disabled={refreshing || !total}
         data-running={refreshing || undefined} aria-busy={refreshing || undefined}
@@ -208,6 +212,7 @@ const OverviewRow = memo(function OverviewRow({ project, entry, showLocation, on
   language: string;
 }) {
   const summary = entry?.summary ?? null;
+  const loading = !summary && !!entry?.checking && !entry.error && !entry.remoteError;
   const state = overviewState(entry);
   const Icon = STATE_ICONS[state];
   const otherBranches = summary?.behindBranches.filter((branch) => !branch.current && branch.name !== summary.currentBranch) ?? [];
@@ -216,7 +221,7 @@ const OverviewRow = memo(function OverviewRow({ project, entry, showLocation, on
   const label = actionLabel(state);
   const parentFolder = project.path.replace(/[\\/]+$/, "").split(/[\\/]/).slice(-2, -1)[0];
   return (
-    <li className="gk-overview-row" data-tone={STATE_TONES[state]}>
+    <li className="gk-overview-row" data-tone={STATE_TONES[state]} aria-busy={loading}>
       <div className="gk-overview-project">
         <div className="gk-overview-project-icon" style={{ color: project.color }}><FolderGit2 size={17} aria-hidden="true" /></div>
         <div className="gk-overview-identity">
@@ -224,18 +229,21 @@ const OverviewRow = memo(function OverviewRow({ project, entry, showLocation, on
             aria-label={tf("进入项目：{0}", project.name)}>{project.name}</button>
           <div className="gk-overview-branch" title={summary?.currentBranch ?? ""}>
             <GitBranch size={11} aria-hidden="true" />
-            <span>{summary?.currentBranch || (summary?.detached ? tx("分离 HEAD") : tx("分支待确认"))}</span>
+            {loading ? <Skeleton width={72} height={8} />
+              : <span>{summary?.currentBranch || (summary?.detached ? tx("分离 HEAD") : tx("分支待确认"))}</span>}
             {showLocation && parentFolder && <span className="gk-overview-location" title={project.path}>{parentFolder}</span>}
           </div>
         </div>
       </div>
       <div className="gk-overview-condition">
-        <div className="gk-overview-state" data-tone={STATE_TONES[state]}>
+        {loading ? <><Skeleton width={108} height={18} /><span className="sr-only">{tx("正在读取状态")}</span></>
+          : <div className="gk-overview-state" data-tone={STATE_TONES[state]}>
           <Icon size={14} aria-hidden="true" className={state === "unknown" && entry?.checking ? "gk-overview-spin" : undefined} />
           <span>{stateTitle(state, entry)}</span>
           {entry?.checking && summary && <span className="gk-overview-checking">{tx("更新中")}</span>}
-        </div>
-        {!entry?.error && <SummaryDetails summary={summary} state={state} />}
+        </div>}
+        {loading ? <div className="gk-overview-facts"><Skeleton width={160} height={8} /></div>
+          : !entry?.error && <SummaryDetails summary={summary} state={state} />}
         {entry?.error && summary && <div className="gk-overview-facts">{tf("上次读取于 {0}，当前状态未确认", timestamp(summary.checkedAt))}</div>}
         {errors.length > 0 && <details className="gk-overview-errors">
           <summary><CircleAlert size={11} aria-hidden="true" /><span>{entry?.error ? tx("查看读取错误") : tx("远程检查失败")}</span></summary>
@@ -278,7 +286,11 @@ export function ProjectOverview({ theme, projects, entries, refreshing, remoteBu
   })).filter((group) => group.projects.length > 0);
   const snapshots = projects.map((project) => entries[project.id]?.error ? null : entries[project.id]?.summary?.checkedAt).filter((value): value is number => !!value);
   const localCheckedAt = snapshots.length ? Math.min(...snapshots) : null;
-  const loading = refreshing && !snapshots.length;
+  const pendingProjects = projects.filter((project) => {
+    const entry = entries[project.id];
+    return entry?.checking && !entry.summary && !entry.error && !entry.remoteError;
+  });
+  const loading = pendingProjects.length > 0;
   const emptyHealthy = filter === "attention" && !query.trim() && !loading && counts.attention === 0;
   const style = {
     background: theme.bgPanel, color: theme.text, border: `0.5px solid ${theme.border}`,
@@ -304,7 +316,9 @@ export function ProjectOverview({ theme, projects, entries, refreshing, remoteBu
           <div className="gk-overview-filters" role="group" aria-label={tx("事项筛选")}>
             {FILTER_ORDER.map((value) => <button key={value} onClick={() => setFilter(value)} aria-pressed={filter === value}
               className={`gk-overview-filter${value === "attention" || value === "all" ? " gk-overview-scope" : ""}${value === "conflicts" ? " gk-overview-filter-divider" : ""}`}>
-              <span>{tx(FILTER_LABELS[value])}</span><span className="gk-overview-filter-count">{counts[value]}</span></button>)}
+              <span>{tx(FILTER_LABELS[value])}</span><span className="gk-overview-filter-count">
+                {loading && value !== "all" ? <Skeleton width={12} height={9} /> : counts[value]}
+              </span></button>)}
           </div>
           <div className="gk-overview-search">
             <Search size={13} aria-hidden="true" />
@@ -336,7 +350,11 @@ export function ProjectOverview({ theme, projects, entries, refreshing, remoteBu
           <ul className="gk-overview-list">{group.projects.map((project) => <OverviewRow key={project.id} project={project}
             entry={entries[project.id]} showLocation={duplicateNames.has(project.name)} onOpen={onOpen} language={getCurrentLanguage()} />)}</ul>
         </section>)
-          : <div className="gk-overview-empty">
+          : loading ? <div className="gk-overview-section" role="status" aria-label={tx("正在读取状态")}>
+            <div className="gk-overview-section-heading"><Skeleton width={74} height={10} /></div>
+            <ul className="gk-overview-list">{pendingProjects.map((project) => <OverviewRow key={project.id} project={project}
+              entry={entries[project.id]} showLocation={duplicateNames.has(project.name)} onOpen={onOpen} language={getCurrentLanguage()} />)}</ul>
+          </div> : <div className="gk-overview-empty">
             {emptyHealthy ? <CheckCheck size={24} strokeWidth={1.5} aria-hidden="true" /> : <Search size={24} strokeWidth={1.5} aria-hidden="true" />}
             <h2>{emptyHealthy ? tx("当前没有待处理事项") : query.trim() ? tx("没有找到匹配的项目") : tx("这个筛选下没有项目")}</h2>
             <p>{emptyHealthy ? tx("可查看全部项目，或检查远程是否有新更新。") : query.trim() ? tx("试试项目名称、路径或当前分支。") : tx("选择其他筛选查看项目状态。")}</p>
@@ -345,7 +363,8 @@ export function ProjectOverview({ theme, projects, entries, refreshing, remoteBu
       </div>
       </div>
       {projects.length > 0 && <footer className="gk-overview-footer">
-        <span>{tf("显示 {0} / {1} 个仓库", shown.length, projects.length)}</span>
+        <span>{loading && !shown.length ? <Skeleton width={110} height={9} />
+          : tf("显示 {0} / {1} 个仓库", shown.length, projects.length)}</span>
         <span>{tx("提交比较基于本地上游记录")}</span>
       </footer>}
     </main>

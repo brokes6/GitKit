@@ -67,6 +67,8 @@ struct Step {
     value: Value,
     headers: Vec<(&'static str, String)>,
     drop_response: bool,
+    raw_body: Option<Vec<u8>>,
+    declared_length: Option<usize>,
 }
 
 fn step(method: &'static str, target: &'static str, value: Value) -> Step {
@@ -77,6 +79,8 @@ fn step(method: &'static str, target: &'static str, value: Value) -> Step {
         value,
         headers: Vec::new(),
         drop_response: false,
+        raw_body: None,
+        declared_length: None,
     }
 }
 
@@ -193,20 +197,26 @@ fn mock(steps: Vec<Step>) -> (Config, Arc<Mutex<Vec<String>>>, thread::JoinHandl
                 request.lines().next().unwrap().contains(step.target),
                 "{request}"
             );
-            assert!(request
-                .to_ascii_lowercase()
-                .contains("private-token: fixture-secret"));
+            let auth = if step.target.contains("/api/graphql") {
+                "authorization: bearer fixture-secret"
+            } else {
+                "private-token: fixture-secret"
+            };
+            assert!(request.to_ascii_lowercase().contains(auth));
             recorded.lock().unwrap().push(request);
             if step.drop_response {
                 continue;
             }
-            let body = serde_json::to_string(&step.value).unwrap();
+            let body = step
+                .raw_body
+                .unwrap_or_else(|| serde_json::to_vec(&step.value).unwrap());
             let extra = step
                 .headers
                 .into_iter()
                 .map(|(name, value)| format!("{name}: {value}\r\n"))
                 .collect::<String>();
-            write!(stream, "HTTP/1.1 {} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n{}", step.status, body.len(), extra, body).unwrap();
+            write!(stream, "HTTP/1.1 {} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{}\r\n", step.status, step.declared_length.unwrap_or(body.len()), extra).unwrap();
+            stream.write_all(&body).unwrap();
         }
     });
     (
@@ -247,6 +257,344 @@ fn merge_preflight(request: Value) -> Vec<Step> {
     let mut steps = preflight(request);
     steps.insert(4, get("/versions", json!([version(5)])));
     steps
+}
+
+fn download_preflight(request: Value, revision: Value) -> Vec<Step> {
+    vec![
+        get("/gitlab/api/v4/user", user(7)),
+        get("/gitlab/api/v4/projects/9", project()),
+        get("/gitlab/api/v4/projects/9/merge_requests/1", request),
+        get("/merge_requests/1/versions", json!([revision])),
+    ]
+}
+
+fn raw_diff_step(bytes: &[u8]) -> Step {
+    let mut response = get("/merge_requests/1/raw_diffs", Value::Null);
+    response.raw_body = Some(bytes.to_vec());
+    response
+}
+
+fn download_postflight(request: Value, revision: Value) -> Vec<Step> {
+    vec![
+        get("/gitlab/api/v4/projects/9/merge_requests/1", request),
+        get("/merge_requests/1/versions", json!([revision])),
+    ]
+}
+
+#[test]
+fn raw_diff_download_preserves_original_bytes_and_pins_revision() {
+    let bytes = b"diff --git a/old b/new\nsimilarity index 100%\nrename from old\nrename to new\ndiff --git a/image.png b/image.png\nBinary files a/image.png and b/image.png differ\ndiff --git a/README b/README\n--- a/README\n+++ b/README\n@@ -1 +1 @@\n-old\n+new\xff\n";
+    let mut revision = version(5);
+    revision["real_size"] = json!("3");
+    let request = mr(1, 7, &[], &[]);
+    let mut steps = download_preflight(request.clone(), revision.clone());
+    steps.push(raw_diff_step(bytes));
+    steps.extend(download_postflight(request, revision));
+    let (config, requests, server) = mock(steps);
+    let result = run(download_diff(&config, 101, 9, 1, "main", 5, &reviewed_refs())).unwrap();
+    server.join().unwrap();
+    assert_eq!(result.bytes, bytes);
+    assert_eq!(result.version_id, 5);
+    assert_eq!(result.refs, reviewed_refs());
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 7);
+    assert!(requests[4].to_ascii_lowercase().contains("accept: text/plain"));
+    assert!(requests.iter().all(|request| request.starts_with("GET ")));
+}
+
+#[test]
+fn raw_diff_download_rejects_revision_changes_after_transfer() {
+    for change in ["head", "base", "target", "version"] {
+        let request = mr(1, 7, &[], &[]);
+        let mut current = request.clone();
+        let mut revision = version(5);
+        match change {
+            "head" => current["sha"] = json!(BASE),
+            "base" => current["diff_refs"]["base_sha"] = json!(START),
+            "target" => current["target_branch"] = json!("release"),
+            "version" => revision["id"] = json!(6),
+            _ => unreachable!(),
+        }
+        let mut steps = download_preflight(request, version(5));
+        steps.push(raw_diff_step(b"diff --git a/README b/README\n"));
+        steps.extend(download_postflight(current, revision));
+        let (config, _, server) = mock(steps);
+        let result = run(download_diff(&config, 101, 9, 1, "main", 5, &reviewed_refs()));
+        server.join().unwrap();
+        assert_eq!(result.err().unwrap().kind, "conflict", "{change}");
+    }
+}
+
+#[test]
+fn raw_diff_download_checks_global_identity_before_export() {
+    let mut request = mr(1, 7, &[], &[]);
+    request["id"] = json!(999);
+    let mut steps = download_preflight(request, version(5));
+    steps.pop();
+    let (config, requests, server) = mock(steps);
+    let result = run(download_diff(&config, 101, 9, 1, "main", 5, &reviewed_refs()));
+    server.join().unwrap();
+    assert_eq!(result.err().unwrap().kind, "invalid_response");
+    assert_eq!(requests.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn raw_diff_download_rejects_unready_or_unmeasurable_diff_before_transfer() {
+    for change in ["processing", "overflow", "missing_count", "limited_count", "patch_pending", "version"] {
+        let mut revision = version(5);
+        match change {
+            "processing" | "overflow" => revision["state"] = json!(change),
+            "missing_count" => { revision.as_object_mut().unwrap().remove("real_size"); }
+            "limited_count" => revision["real_size"] = json!("1000+"),
+            "patch_pending" => revision["patch_id_sha"] = Value::Null,
+            "version" => revision["id"] = json!(6),
+            _ => unreachable!(),
+        }
+        let (config, requests, server) = mock(download_preflight(mr(1, 7, &[], &[]), revision));
+        let result = run(download_diff(&config, 101, 9, 1, "main", 5, &reviewed_refs()));
+        server.join().unwrap();
+        assert!(result.is_err(), "{change}");
+        assert_eq!(requests.lock().unwrap().len(), 4);
+    }
+}
+
+#[test]
+fn raw_diff_download_rejects_limited_or_unexpected_raw_response() {
+    for bytes in [b"<html>Sign in</html>".as_slice(), b"".as_slice(), b"diff --git a/one b/one\ndiff --git a/two b/two\n".as_slice()] {
+        let request = mr(1, 7, &[], &[]);
+        let mut steps = download_preflight(request.clone(), version(5));
+        steps.push(raw_diff_step(bytes));
+        steps.extend(download_postflight(request, version(5)));
+        let (config, _, server) = mock(steps);
+        let result = run(download_diff(&config, 101, 9, 1, "main", 5, &reviewed_refs()));
+        server.join().unwrap();
+        assert_eq!(result.err().unwrap().kind, "invalid_response");
+    }
+}
+
+#[test]
+fn raw_diff_download_bounds_response_and_redacts_failures() {
+    for status in [200, 401, 403, 404, 405, 429, 501] {
+        let mut response = error_step("/merge_requests/1/raw_diffs", status);
+        if status == 200 {
+            response.declared_length = Some(MAX_RAW_DIFF_BYTES + 1);
+        }
+        if status == 429 {
+            response.headers.push(("Retry-After", "90".into()));
+        }
+        let mut steps = download_preflight(mr(1, 7, &[], &[]), version(5));
+        steps.push(response);
+        let (config, _, server) = mock(steps);
+        let result = run(download_diff(&config, 101, 9, 1, "main", 5, &reviewed_refs()));
+        server.join().unwrap();
+        let failure = result.err().unwrap();
+        assert!(!failure.message.contains("fixture-secret"));
+        assert!(!failure.message.contains("http"));
+        if status == 429 {
+            assert_eq!(failure.retry_after, Some(90));
+        }
+    }
+}
+
+#[test]
+fn raw_diff_download_accepts_an_empty_comparison_only_when_confirmed_empty() {
+    let mut revision = version(5);
+    revision["real_size"] = json!("0");
+    let request = mr(1, 7, &[], &[]);
+    let mut steps = download_preflight(request.clone(), revision.clone());
+    steps.push(raw_diff_step(b""));
+    steps.extend(download_postflight(request, revision));
+    let (config, _, server) = mock(steps);
+    let result = run(download_diff(&config, 101, 9, 1, "main", 5, &reviewed_refs())).unwrap();
+    server.join().unwrap();
+    assert!(result.bytes.is_empty());
+}
+
+fn message_summary(config: &Config) -> Summary {
+    let context = Context::new(config).unwrap();
+    let request: RawMergeRequest = decode(mr(1, 7, &[], &[])).unwrap();
+    request
+        .summary(
+            &context,
+            &decode(user(7)).unwrap(),
+            Some(&decode(project()).unwrap()),
+            true,
+        )
+        .unwrap()
+}
+
+fn graphql_messages() -> Value {
+    json!({"data": {
+        "currentUser": {"id": "gid://gitlab/User/7"},
+        "project": {"id": "gid://gitlab/Project/9", "fullPath": "team/sub/app", "mergeRequest": {
+            "id": "gid://gitlab/MergeRequest/101", "iid": "1", "diffHeadSha": SHA,
+            "sourceBranch": "feature/ui", "targetBranch": "main", "title": "MR 1",
+            "description": "Only loaded for details", "updatedAt": "2026-10-06T00:00:00.000Z",
+            "defaultMergeCommitMessage": "Release: MR 1\n\nCloses #42\n\nProject template footer",
+            "defaultSquashCommitMessage": "Custom squash title\n\nCommit details from GitLab",
+        }},
+    }})
+}
+
+#[test]
+fn default_messages_use_graphql_named_fields_and_preserve_expanded_project_templates() {
+    let (config, requests, server) = mock(vec![step(
+        "POST",
+        "/gitlab/api/graphql",
+        graphql_messages(),
+    )]);
+    let known = message_summary(&config);
+    let result = run(commit_messages(&config, &known, 7)).unwrap();
+    server.join().unwrap();
+    assert_eq!(result.mr_id, 101);
+    assert_eq!(result.project_id, 9);
+    assert_eq!(result.iid, 1);
+    assert_eq!(result.sha, SHA);
+    assert_eq!(result.target_branch, "main");
+    assert_eq!(
+        result.merge_commit_message,
+        "Release: MR 1\n\nCloses #42\n\nProject template footer"
+    );
+    assert_eq!(
+        result.squash_commit_message,
+        "Custom squash title\n\nCommit details from GitLab"
+    );
+    let request = requests.lock().unwrap().last().unwrap().clone();
+    assert!(request.starts_with("POST /gitlab/api/graphql "));
+    assert!(!request.to_ascii_lowercase().contains("private-token:"));
+    let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let query = body["query"].as_str().unwrap();
+    assert!(query.contains("query GitKitCommitMessages"));
+    assert!(query.contains("defaultMergeCommitMessage"));
+    assert!(query.contains("defaultSquashCommitMessage"));
+    assert!(!query.contains("WithDescription"));
+    assert!(!query.contains("mutation"));
+    assert_eq!(
+        body["variables"],
+        json!({"projectPath": "team/sub/app", "iid": "1"})
+    );
+    assert!(!body.to_string().contains("fixture-secret"));
+}
+
+#[test]
+fn default_messages_reject_changed_server_identity_or_revision() {
+    for change in [
+        "user",
+        "project",
+        "path",
+        "mr",
+        "iid",
+        "sha",
+        "source",
+        "target",
+        "title",
+        "description",
+        "updated",
+    ] {
+        let mut value = graphql_messages();
+        match change {
+            "user" => value["data"]["currentUser"]["id"] = json!("gid://gitlab/User/8"),
+            "project" => value["data"]["project"]["id"] = json!("gid://gitlab/Project/10"),
+            "path" => value["data"]["project"]["fullPath"] = json!("other/app"),
+            _ => {
+                let request = &mut value["data"]["project"]["mergeRequest"];
+                let (field, value) = match change {
+                    "mr" => ("id", "gid://gitlab/MergeRequest/201"),
+                    "iid" => ("iid", "2"),
+                    "sha" => ("diffHeadSha", BASE),
+                    "source" => ("sourceBranch", "other/source"),
+                    "target" => ("targetBranch", "release"),
+                    "title" => ("title", "Updated title"),
+                    "description" => ("description", "Updated body"),
+                    "updated" => ("updatedAt", "2026-10-06T00:01:00Z"),
+                    _ => unreachable!(),
+                };
+                request[field] = json!(value);
+            }
+        }
+        let (config, requests, server) = mock(vec![step("POST", "/gitlab/api/graphql", value)]);
+        let error = run(commit_messages(&config, &message_summary(&config), 7)).unwrap_err();
+        server.join().unwrap();
+        assert!(matches!(
+            error.kind.as_str(),
+            "stale" | "invalid_response" | "conflict"
+        ));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn unavailable_graphql_default_messages_reject_partial_errors_nulls_and_oversized_text() {
+    for change in [
+        "errors",
+        "project",
+        "mr",
+        "merge",
+        "squash",
+        "blank",
+        "oversized",
+    ] {
+        let mut value = graphql_messages();
+        match change {
+            "errors" => {
+                value["errors"] = json!([{"message": "fixture-secret internal details", "data": "valid fields must not be used"}])
+            }
+            "project" => value["data"]["project"] = Value::Null,
+            "mr" => value["data"]["project"]["mergeRequest"] = Value::Null,
+            _ => {
+                let request = &mut value["data"]["project"]["mergeRequest"];
+                match change {
+                    "merge" => request["defaultMergeCommitMessage"] = Value::Null,
+                    "squash" => request["defaultSquashCommitMessage"] = Value::Null,
+                    "blank" => request["defaultMergeCommitMessage"] = json!("  \n"),
+                    "oversized" => {
+                        request["defaultMergeCommitMessage"] =
+                            json!("x".repeat(MAX_COMMIT_MESSAGE_BYTES + 1))
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+        let (config, requests, server) = mock(vec![step("POST", "/gitlab/api/graphql", value)]);
+        let error = run(commit_messages(&config, &message_summary(&config), 7)).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.kind, "unsupported");
+        assert!(!error.message.contains("fixture-secret"));
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn default_message_reads_can_be_explicitly_retried_without_automatic_replay() {
+    let mut lost = step("POST", "/gitlab/api/graphql", Value::Null);
+    lost.drop_response = true;
+    let (config, requests, server) = mock(vec![
+        lost,
+        step("POST", "/gitlab/api/graphql", graphql_messages()),
+    ]);
+    let known = message_summary(&config);
+    run(async {
+        assert!(commit_messages(&config, &known, 7).await.is_err());
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert!(commit_messages(&config, &known, 7).await.is_ok());
+    });
+    server.join().unwrap();
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn graphql_default_reads_do_not_follow_authenticated_redirects() {
+    let mut redirected = step("POST", "/gitlab/api/graphql", Value::Null);
+    redirected.status = 302;
+    redirected
+        .headers
+        .push(("Location", "https://other.example.test/api/graphql".into()));
+    let (config, requests, server) = mock(vec![redirected]);
+    let error = run(commit_messages(&config, &message_summary(&config), 7)).unwrap_err();
+    server.join().unwrap();
+    assert_eq!(error.kind, "invalid_config");
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert!(!error.message.contains("fixture-secret"));
 }
 
 #[test]
@@ -508,12 +856,18 @@ fn authenticated_redirects_are_not_followed() {
 fn status_errors_are_redacted_and_merge_permission_401_does_not_stop_account() {
     let mut headers = header::HeaderMap::new();
     headers.insert(header::RETRY_AFTER, header::HeaderValue::from_static("137"));
-    assert_eq!(status_error(429, &headers, false).retry_after, Some(137));
-    assert_eq!(status_error(401, &headers, false).kind, "unauthorized");
-    assert_eq!(status_error(401, &headers, true).kind, "forbidden");
-    assert_eq!(status_error(403, &headers, false).kind, "forbidden");
-    assert_eq!(status_error(404, &headers, false).kind, "not_found");
-    assert_eq!(status_error(409, &headers, true).kind, "conflict");
+    assert_eq!(
+        status_error(429, &headers, false, false).retry_after,
+        Some(137)
+    );
+    assert_eq!(
+        status_error(401, &headers, false, false).kind,
+        "unauthorized"
+    );
+    assert_eq!(status_error(401, &headers, true, false).kind, "forbidden");
+    assert_eq!(status_error(403, &headers, false, false).kind, "forbidden");
+    assert_eq!(status_error(404, &headers, false, false).kind, "not_found");
+    assert_eq!(status_error(409, &headers, true, false).kind, "conflict");
     let future = chrono::Utc::now() + chrono::Duration::seconds(130);
     assert!(retry_after(Some(&future.to_rfc2822())).is_some_and(|seconds| seconds >= 128));
     assert_eq!(retry_after(Some("invalid")), None);
@@ -669,6 +1023,8 @@ fn merge_preflight_rejects_changed_sha_or_target_without_put() {
             &reviewed_refs(),
             false,
             false,
+            None,
+            None,
         ))
         .unwrap_err();
         assert_eq!(error.kind, "conflict");
@@ -693,7 +1049,10 @@ fn merge_preflight_rejects_changed_base_start_or_version_even_when_source_sha_is
             refs.start_sha = BASE.into();
         }
         let (config, requests, server) = mock(merge_preflight(mr(1, 7, &[], &[])));
-        let error = run(merge(&config, 9, 1, SHA, "main", id, &refs, false, false)).unwrap_err();
+        let error = run(merge(
+            &config, 9, 1, SHA, "main", id, &refs, false, false, None, None,
+        ))
+        .unwrap_err();
         server.join().unwrap();
         assert_eq!(error.kind, "conflict");
         assert!(requests
@@ -719,6 +1078,8 @@ fn merge_sends_reviewed_sha_and_treats_opened_success_as_pending() {
         &reviewed_refs(),
         false,
         true,
+        None,
+        None,
     ))
     .unwrap();
     server.join().unwrap();
@@ -771,6 +1132,8 @@ fn detail_and_merge_route_to_selected_inbox_project_with_a_shared_local_iid() {
             &reviewed_refs(),
             false,
             true,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -810,6 +1173,8 @@ fn lost_merge_response_queries_outcome_once_and_never_replays_put() {
             &reviewed_refs(),
             false,
             false,
+            None,
+            None,
         ))
         .unwrap();
         server.join().unwrap();
@@ -843,6 +1208,8 @@ fn server_sha_race_409_is_redacted_and_not_retried() {
         &reviewed_refs(),
         false,
         false,
+        None,
+        None,
     ))
     .unwrap_err();
     server.join().unwrap();
@@ -857,4 +1224,604 @@ fn server_sha_race_409_is_redacted_and_not_retried() {
             .count(),
         1
     );
+}
+
+fn after_close(request: Value) -> Vec<Step> {
+    let mut steps = merge_preflight(request);
+    // Closed requests do not need source-branch deletion permission.
+    steps.pop();
+    steps
+}
+
+#[test]
+fn author_close_uses_state_event_and_confirms_closed_without_deleting_the_branch() {
+    let mut steps = preflight(mr(1, 7, &[], &[]));
+    let mut closed = mr(1, 7, &[], &[]);
+    closed["state"] = json!("closed");
+    steps.push(step("PUT", "/merge_requests/1", closed.clone()));
+    steps.extend(after_close(closed));
+    let (config, requests, server) = mock(steps);
+    let result = run(close(&config, 101, 9, 1)).unwrap();
+    server.join().unwrap();
+    assert_eq!(result.state, "closed");
+    let detail = result.detail.unwrap();
+    assert_eq!(detail.summary.state, "closed");
+    assert!(!detail.can_close);
+    assert!(!detail.can_approve);
+    let requests = requests.lock().unwrap();
+    let request = requests
+        .iter()
+        .find(|request| request.starts_with("PUT "))
+        .unwrap();
+    let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body, json!({"state_event": "close"}));
+    assert!(requests
+        .iter()
+        .all(|request| !request.starts_with("DELETE ")));
+}
+
+#[test]
+fn close_rejects_non_author_and_wrong_global_identity_before_writing() {
+    for (mr_id, request) in [(101, mr(1, 8, &[], &[7])), (201, mr(1, 7, &[], &[]))] {
+        let (config, requests, server) = mock(preflight(request));
+        let error = run(close(&config, mr_id, 9, 1)).unwrap_err();
+        server.join().unwrap();
+        assert!(matches!(
+            error.kind.as_str(),
+            "blocked" | "invalid_response"
+        ));
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET ")));
+    }
+}
+
+#[test]
+fn detail_actions_follow_current_server_roles_and_personal_approval() {
+    for (author, reviewers, approved, can_close, can_approve) in [
+        (7, vec![7], false, true, false),
+        (8, vec![7], false, false, true),
+        (8, vec![], false, false, false),
+        (8, vec![7], true, false, false),
+    ] {
+        let mut steps = merge_preflight(mr(1, author, &[], &reviewers));
+        if approved {
+            steps[3].value["approved_by"] = json!([{"user": user(7)}]);
+        }
+        let (config, _, server) = mock(steps);
+        let detail = run(detail(&config, 9, 1)).unwrap();
+        server.join().unwrap();
+        assert_eq!(detail.can_close, can_close);
+        assert_eq!(detail.can_approve, can_approve);
+    }
+}
+
+#[test]
+fn reviewer_approval_sends_reviewed_sha_and_reads_confirmed_personal_approval() {
+    let mut steps = merge_preflight(mr(1, 8, &[], &[7]));
+    steps.push(step(
+        "POST",
+        "/merge_requests/1/approve",
+        json!({"approved_by": [{"user": user(7)}]}),
+    ));
+    let mut confirmed = merge_preflight(mr(1, 8, &[], &[7]));
+    confirmed[3].value["approved_by"] = json!([{"user": user(7)}]);
+    steps.extend(confirmed);
+    let (config, requests, server) = mock(steps);
+    let result = run(approve(
+        &config,
+        101,
+        9,
+        1,
+        SHA,
+        "main",
+        5,
+        &reviewed_refs(),
+    ))
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(result.state, "approved");
+    assert!(!result.detail.unwrap().can_approve);
+    let requests = requests.lock().unwrap();
+    let request = requests
+        .iter()
+        .find(|request| request.starts_with("POST "))
+        .unwrap();
+    let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body, json!({"sha": SHA}));
+}
+
+#[test]
+fn approval_rejects_author_unassigned_reviewer_and_changed_review_identity_before_post() {
+    for change in [
+        "author", "reviewer", "sha", "target", "version", "base", "start", "global",
+    ] {
+        let request = match change {
+            "author" => mr(1, 7, &[], &[7]),
+            "reviewer" => mr(1, 8, &[7], &[]),
+            _ => mr(1, 8, &[], &[7]),
+        };
+        let sha = if change == "sha" { BASE } else { SHA };
+        let target = if change == "target" {
+            "release"
+        } else {
+            "main"
+        };
+        let version_id = if change == "version" { 4 } else { 5 };
+        let mr_id = if change == "global" { 201 } else { 101 };
+        let mut refs = reviewed_refs();
+        if change == "base" {
+            refs.base_sha = START.into();
+        }
+        if change == "start" {
+            refs.start_sha = BASE.into();
+        }
+        let (config, requests, server) = mock(merge_preflight(request));
+        let error = run(approve(
+            &config, mr_id, 9, 1, sha, target, version_id, &refs,
+        ))
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(matches!(
+            error.kind.as_str(),
+            "blocked" | "conflict" | "invalid_response"
+        ));
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET ")));
+    }
+}
+
+#[test]
+fn lost_approval_response_reconciles_once_and_never_replays_post() {
+    for (approved, expected) in [(true, "approved"), (false, "uncertain")] {
+        let mut steps = merge_preflight(mr(1, 8, &[], &[7]));
+        let mut lost = step("POST", "/merge_requests/1/approve", Value::Null);
+        lost.drop_response = true;
+        steps.push(lost);
+        let mut confirmed = merge_preflight(mr(1, 8, &[], &[7]));
+        if approved {
+            confirmed[3].value["approved_by"] = json!([{"user": user(7)}]);
+        }
+        steps.extend(confirmed);
+        let (config, requests, server) = mock(steps);
+        let result = run(approve(
+            &config,
+            101,
+            9,
+            1,
+            SHA,
+            "main",
+            5,
+            &reviewed_refs(),
+        ))
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.state, expected);
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.starts_with("POST "))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn approval_sha_race_and_reauthentication_errors_are_redacted_without_retry() {
+    for (status, kind) in [(409, "conflict"), (401, "forbidden"), (400, "blocked")] {
+        let mut steps = merge_preflight(mr(1, 8, &[], &[7]));
+        let mut refused = error_step("/merge_requests/1/approve", status);
+        refused.method = "POST";
+        steps.push(refused);
+        let (config, requests, server) = mock(steps);
+        let error = run(approve(
+            &config,
+            101,
+            9,
+            1,
+            SHA,
+            "main",
+            5,
+            &reviewed_refs(),
+        ))
+        .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.kind, kind);
+        assert!(!error.message.contains("fixture-secret"));
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.starts_with("POST "))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn approval_waits_for_server_sync_and_collected_patch_before_post() {
+    for change in [
+        "checking",
+        "approvals_syncing",
+        "uncollected",
+        "patch_pending",
+    ] {
+        let mut request = mr(1, 8, &[], &[7]);
+        if matches!(change, "checking" | "approvals_syncing") {
+            request["detailed_merge_status"] = json!(change);
+        }
+        let mut steps = merge_preflight(request);
+        if change == "uncollected" {
+            steps[4].value[0]["state"] = json!("without_files");
+        }
+        if change == "patch_pending" {
+            steps[4].value[0]["patch_id_sha"] = Value::Null;
+        }
+        let (config, requests, server) = mock(steps);
+        let error = run(approve(
+            &config,
+            101,
+            9,
+            1,
+            SHA,
+            "main",
+            5,
+            &reviewed_refs(),
+        ))
+        .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.kind, "blocked");
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET ")));
+    }
+}
+
+#[test]
+fn merge_sends_custom_messages_and_omits_squash_message_when_squash_is_disabled() {
+    for squash in [false, true] {
+        let mut steps = merge_preflight(mr(1, 7, &[], &[]));
+        steps.push(step("PUT", "/merge_requests/1/merge", mr(1, 7, &[], &[])));
+        let (config, requests, server) = mock(steps);
+        run(merge(
+            &config,
+            9,
+            1,
+            SHA,
+            "main",
+            5,
+            &reviewed_refs(),
+            squash,
+            false,
+            Some("Custom merge\n\nReviewed change"),
+            Some("Custom squash"),
+        ))
+        .unwrap();
+        server.join().unwrap();
+        let request = requests.lock().unwrap().last().unwrap().clone();
+        let body: Value = serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(
+            body["merge_commit_message"],
+            "Custom merge\n\nReviewed change"
+        );
+        if squash {
+            assert_eq!(body["squash_commit_message"], "Custom squash");
+        } else {
+            assert!(body.get("squash_commit_message").is_none());
+        }
+    }
+}
+
+fn comment_position(old_line: Option<u64>, new_line: Option<u64>) -> DiffCommentPosition {
+    DiffCommentPosition {
+        old_path: "old/name.ts".into(),
+        new_path: "new/name.ts".into(),
+        old_line,
+        new_line,
+    }
+}
+
+fn comment_revision() -> Value {
+    let mut revision = version(5);
+    revision["diffs"] = json!([{
+        "old_path": "old/name.ts", "new_path": "new/name.ts", "a_mode": "100644", "b_mode": "100644",
+        "new_file": false, "renamed_file": true, "deleted_file": false,
+        "diff": "@@ -14,3 +15,3 @@\n context\n-removed\n+added\n after\n",
+    }]);
+    revision
+}
+
+fn comment_preflight(request: Value) -> Vec<Step> {
+    vec![
+        get("/user", user(7)),
+        get("/projects/9", project()),
+        get("/merge_requests/1", request),
+        get("/versions", json!([version(5)])),
+        get("/versions/5", comment_revision()),
+    ]
+}
+
+fn comment_response(position: &DiffCommentPosition) -> Value {
+    json!({"id": "diff-thread", "individual_note": false, "notes": [{
+        "id": 55, "body": "Review this line", "author": user(7), "created_at": "2026-10-08T00:00:00Z",
+        "updated_at": "2026-10-08T00:00:00Z", "system": false, "resolvable": true, "resolved": false,
+        "position": {"position_type": "text", "base_sha": BASE, "start_sha": START, "head_sha": SHA,
+            "old_path": position.old_path, "new_path": position.new_path,
+            "old_line": position.old_line, "new_line": position.new_line}
+    }]})
+}
+
+#[test]
+fn diff_comment_sends_exact_rename_paths_refs_and_line_sides() {
+    for position in [
+        comment_position(None, Some(16)),
+        comment_position(Some(15), None),
+        comment_position(Some(14), Some(15)),
+    ] {
+        let mut steps = comment_preflight(mr(1, 8, &[], &[7]));
+        steps.push(step(
+            "POST",
+            "/projects/9/merge_requests/1/discussions",
+            comment_response(&position),
+        ));
+        let (config, requests, server) = mock(steps);
+        let result = run(create_diff_comment(
+            &config,
+            101,
+            9,
+            1,
+            7,
+            5,
+            &reviewed_refs(),
+            "main",
+            &position,
+            "  Review this line  ",
+            || Ok(()),
+        ))
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.state, "created");
+        let note_position = result.discussion.unwrap().notes[0]
+            .position
+            .clone()
+            .unwrap();
+        assert_eq!(note_position.old_line, position.old_line);
+        assert_eq!(note_position.new_line, position.new_line);
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST "))
+                .count(),
+            1
+        );
+        let body: Value =
+            serde_json::from_str(requests.last().unwrap().split_once("\r\n\r\n").unwrap().1)
+                .unwrap();
+        assert_eq!(body["body"], "Review this line");
+        assert_eq!(body["position"]["old_path"], "old/name.ts");
+        assert_eq!(body["position"]["new_path"], "new/name.ts");
+        assert_eq!(body["position"]["base_sha"], BASE);
+        assert_eq!(body["position"]["start_sha"], START);
+        assert_eq!(body["position"]["head_sha"], SHA);
+        for (key, line) in [
+            ("old_line", position.old_line),
+            ("new_line", position.new_line),
+        ] {
+            if let Some(line) = line {
+                assert_eq!(body["position"][key], line);
+            } else {
+                assert!(body["position"].get(key).is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn diff_comment_rejects_changed_revision_identity_and_target_before_post() {
+    for change in ["head", "base", "start", "target", "version", "global"] {
+        let mut request = mr(1, 8, &[], &[7]);
+        match change {
+            "head" => request["sha"] = json!(BASE),
+            "base" => request["diff_refs"]["base_sha"] = json!(START),
+            "start" => request["diff_refs"]["start_sha"] = json!(BASE),
+            "target" => request["target_branch"] = json!("release"),
+            "global" => request["id"] = json!(999),
+            _ => {}
+        }
+        let mut steps = comment_preflight(request);
+        steps.truncate(if change == "version" { 4 } else { 3 });
+        let (config, requests, server) = mock(steps);
+        let result = run(create_diff_comment(
+            &config,
+            101,
+            9,
+            1,
+            7,
+            if change == "version" { 4 } else { 5 },
+            &reviewed_refs(),
+            "main",
+            &comment_position(None, Some(16)),
+            "Review this line",
+            || Ok(()),
+        ))
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(matches!(
+            result.kind.as_str(),
+            "conflict" | "invalid_response"
+        ));
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET ")));
+    }
+}
+
+#[test]
+fn diff_comment_rejects_line_not_in_patch_or_changed_context_without_post() {
+    for position in [
+        comment_position(Some(14), Some(14)),
+        comment_position(Some(15), Some(16)),
+        comment_position(None, Some(99)),
+    ] {
+        let (config, requests, server) = mock(comment_preflight(mr(1, 8, &[], &[7])));
+        let error = run(create_diff_comment(
+            &config,
+            101,
+            9,
+            1,
+            7,
+            5,
+            &reviewed_refs(),
+            "main",
+            &position,
+            "Review this line",
+            || Ok(()),
+        ))
+        .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.kind, "conflict");
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET ")));
+    }
+    let (config, requests, server) = mock(comment_preflight(mr(1, 8, &[], &[7])));
+    let error = run(create_diff_comment(
+        &config,
+        101,
+        9,
+        1,
+        7,
+        5,
+        &reviewed_refs(),
+        "main",
+        &comment_position(None, Some(16)),
+        "Review this line",
+        || Err(ApiError::new("stale", "account changed")),
+    ))
+    .unwrap_err();
+    server.join().unwrap();
+    assert_eq!(error.kind, "stale");
+    assert!(requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.starts_with("GET ")));
+}
+
+#[test]
+fn diff_comment_rejects_changed_account_identity_without_reading_mr_or_posting() {
+    let (config, requests, server) = mock(vec![get("/user", user(8))]);
+    let error = run(create_diff_comment(
+        &config,
+        101,
+        9,
+        1,
+        7,
+        5,
+        &reviewed_refs(),
+        "main",
+        &comment_position(None, Some(16)),
+        "Review this line",
+        || Ok(()),
+    ))
+    .unwrap_err();
+    server.join().unwrap();
+    assert_eq!(error.kind, "stale");
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn diff_comment_uncertain_write_never_replays_post_or_fabricates_success() {
+    for change in [
+        "disconnect",
+        "server",
+        "invalid_json",
+        "wrong_position",
+        "wrong_author",
+    ] {
+        let position = comment_position(None, Some(16));
+        let mut post = step("POST", "/discussions", comment_response(&position));
+        match change {
+            "disconnect" => post.drop_response = true,
+            "server" => post.status = 500,
+            "invalid_json" => post.raw_body = Some(b"{".to_vec()),
+            "wrong_position" => post.value["notes"][0]["position"]["new_line"] = json!(17),
+            "wrong_author" => post.value["notes"][0]["author"] = user(8),
+            _ => {}
+        }
+        let mut steps = comment_preflight(mr(1, 8, &[], &[7]));
+        steps.push(post);
+        let (config, requests, server) = mock(steps);
+        let result = run(create_diff_comment(
+            &config,
+            101,
+            9,
+            1,
+            7,
+            5,
+            &reviewed_refs(),
+            "main",
+            &position,
+            "Review this line",
+            || Ok(()),
+        ))
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.state, "uncertain");
+        assert!(result.discussion.is_none());
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.starts_with("POST "))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn diff_comment_known_server_rejections_remain_rejections() {
+    for (status, kind) in [(400, "conflict"), (403, "forbidden"), (429, "rate_limit")] {
+        let mut post = step("POST", "/discussions", json!({"message": "fixture-secret"}));
+        post.status = status;
+        let mut steps = comment_preflight(mr(1, 8, &[], &[7]));
+        steps.push(post);
+        let (config, _, server) = mock(steps);
+        let error = run(create_diff_comment(
+            &config,
+            101,
+            9,
+            1,
+            7,
+            5,
+            &reviewed_refs(),
+            "main",
+            &comment_position(None, Some(16)),
+            "Review this line",
+            || Ok(()),
+        ))
+        .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.kind, kind);
+        assert!(!error.message.contains("fixture-secret"));
+    }
 }

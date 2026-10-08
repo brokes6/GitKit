@@ -20,7 +20,7 @@ import {
   Pin, EyeOff, Eye, Folder, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
   Settings, UserPlus, Trash2, Star, Users, Github, Laptop, Sparkles, Languages, RotateCcw, TerminalSquare,
   Tag as TagIcon, Square, DownloadCloud, Pencil, FolderGit2, Search, PanelLeft, MoreHorizontal,
-  CircleDot, ArrowDown, ArrowUp, ExternalLink, Maximize2, History, ChevronsUpDown, List, Network,
+  CircleDot, ArrowDown, ArrowUp, ExternalLink, Maximize2, History, ChevronsUpDown, List, Network, MessageSquare,
 } from "lucide-react";
 import {
   invoke, pickRepoFolder, openRepo, initRepo, loadBranches, loadRemotes, loadHistory,
@@ -37,11 +37,14 @@ import {
 import type { DepInfo, Tag, RepoInfo, CreatedRepo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged, ForcePushPreview, FileHistoryPage, FileTraceDiff, FileBlame, LocalMergePreview, RepositoryOperation } from "./git";
 import { buildSmartMergeCommits, commitBranchName, commitHistoryDate, orderedEquivalentCommits } from "./smartMerge";
 import { highlightDiffRows } from "./diffSyntax";
+import { MergeRequestDiffComment, MergeRequestLineDiscussions, type MrLineCommentActions } from "./MergeRequestDiffComment";
+import { isMrCommentableLine, mrCommentLineKey, mrLineDiscussionIndex } from "./mrDiffCommentHelpers";
 import type { DiffSyntaxToken, DiffSyntaxPalette } from "./diffSyntax";
 import { workingFileKey, workingFileCount, sameWorking, mergeWorkingPaths, shouldRefreshWorkingFile } from "./workingStatus";
 import type { WorkingFile } from "./workingStatus";
 import { ProjectOverview, WorkbenchActionBar } from "./Workbench";
 import { ToolbarText } from "./ToolbarText";
+import { Skeleton, CodeSkeleton } from "./Skeleton";
 import { useProjectOverview } from "./useProjectOverview";
 import { useAppForeground } from "./useAppForeground";
 import { useProjectActivity } from "./useProjectActivity";
@@ -1330,7 +1333,7 @@ function StatusBar({ project, branch, changes, ready, errored, home, checkProgre
       <div className="flex items-center justify-center min-w-0" role="status">
         {home ? <span className="gk-status-pill px-3">{home.refreshing ? tx("正在刷新状态…") : tf("{0} 个项目需关注", home.attention)}</span>
           : errored ? <span className="gk-status-pill px-3">{tx("仓库加载失败")}</span>
-          : project && !ready ? <span className="gk-status-pill px-3">{tx("正在加载仓库…")}</span>
+          : project && !ready ? <span className="gk-status-pill px-3" aria-label={tx("正在加载仓库…")} aria-busy="true"><Skeleton width={90} height={10} color={t.rowHover} /></span>
           : project?.initialized === false ? <span className="gk-status-pill px-3">{tx("点击推送以初始化 Git")}</span>
           : ready ?
           <button onClick={onShowChanges} className="gk-status-pill gk-shell-button flex items-center gap-2 px-3 flex-shrink-0 cursor-pointer tabular-nums"
@@ -2116,8 +2119,9 @@ function markDiffChanges(rows: DiffRowData[]): DiffRowData[] {
   return marked;
 }
 
-function DiffRow({ row, gutterW, tokens, activeHunk }: {
+function DiffRow({ row, gutterW, tokens, activeHunk, commenting = false, onComment }: {
   row: DiffRowData; gutterW: number; tokens?: DiffSyntaxToken[]; activeHunk?: number;
+  commenting?: boolean; onComment?: (event: React.MouseEvent | React.KeyboardEvent) => void;
 }) {
   const t = useTheme();
   const add = row.kind === "add", del = row.kind === "del";
@@ -2126,8 +2130,13 @@ function DiffRow({ row, gutterW, tokens, activeHunk }: {
   return (
     <div className="gk-code-row relative grid min-w-full font-mono text-[12px] leading-[1.65]"
       data-diff-hunk={row.hunkIndex}
+      data-diff-old-line={row.oldNo ?? undefined} data-diff-new-line={row.newNo ?? undefined}
+      data-commenting={commenting || undefined} tabIndex={onComment ? 0 : undefined}
+      onContextMenu={onComment} onKeyDown={onComment ? event => {
+        if (event.key === "ContextMenu" || event.key === "F10" && event.shiftKey) onComment(event);
+      } : undefined}
       style={{ gridTemplateColumns: `${gutterW}px minmax(0, 1fr)`, background,
-        boxShadow: row.kind === "hunk" && row.hunkIndex === activeHunk ? `inset 3px 0 ${t.accent}` : undefined }}>
+        boxShadow: commenting ? `inset 0 0 0 1px ${t.accent}` : row.kind === "hunk" && row.hunkIndex === activeHunk ? `inset 3px 0 ${t.accent}` : undefined }}>
       {(add || del) && <span className="absolute inset-y-0 left-0 w-[3px]"
         style={{ background: add ? t.green : t.red }} aria-hidden="true" />}
       <span className="select-none text-right pr-2 tabular-nums" aria-hidden="true"
@@ -2146,9 +2155,18 @@ function DiffRow({ row, gutterW, tokens, activeHunk }: {
   );
 }
 
-function DiffRows({ lines, filePath, activeHunk }: { lines: string[]; filePath: string; activeHunk?: number }) {
+function DiffRows({ lines, filePath, activeHunk, lineComments }: { lines: string[]; filePath: string; activeHunk?: number; lineComments?: MrLineCommentActions }) {
   const t = useTheme();
   const rows = useMemo(() => markDiffChanges(parseDiffRows(lines)), [lines]);
+  const [commentRow, setCommentRow] = useState<number | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; row: number } | null>(null);
+  const rowsRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const discussionsByLine = useMemo(() => lineComments ? mrLineDiscussionIndex(lineComments.discussions, lineComments.refs, lineComments) : new Map(),
+    [lineComments?.discussions, lineComments?.refs, lineComments?.oldPath, lineComments?.newPath]);
+  useEffect(() => { if (menu) menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus(); }, [menu]);
+  const focusRow = (index: number) => rowsRef.current?.querySelectorAll<HTMLDivElement>(".gk-code-row")[index]?.focus();
+  const closeMenu = () => { if (menu) focusRow(menu.row); setMenu(null); };
   const palette = useMemo<DiffSyntaxPalette>(() => ({
     name: `gitkit-${t.accent}-${t.isDark ? "dark" : "light"}`,
     dark: t.isDark, text: t.textSec, muted: t.textMuted,
@@ -2168,32 +2186,37 @@ function DiffRows({ lines, filePath, activeHunk }: { lines: string[]; filePath: 
   const tokens = syntaxResult?.key === syntaxKey ? syntaxResult.tokens : null;
   const maxNo = rows.reduce((m, r) => Math.max(m, r.oldNo ?? 0, r.newNo ?? 0), 0);
   const gutterW = Math.max(String(maxNo).length, 2) * 8 + 22;
-  return <>{rows.map((r, i) => <Fragment key={i}>
+  return <div ref={rowsRef}>{rows.map((r, i) => <Fragment key={i}>
     {r.skippedLines !== undefined && <div data-diff-skipped={r.skippedLines}
       className="flex items-center justify-center gap-1.5 min-h-7 px-4 py-1 text-[11px] select-none"
       style={{ color: t.textSec, background: t.inputBg, borderBlock: `0.5px solid ${t.border}` }}>
       <ChevronsUpDown size={13} aria-hidden="true" className="flex-shrink-0" style={{ color: t.textMuted }} />
       <span className="tabular-nums">{r.skippedLines === 1 ? tx("1 行未更改") : tf("{0} 行未更改", r.skippedLines)}</span>
     </div>}
-    <DiffRow row={r} gutterW={gutterW} tokens={tokens?.[i]} activeHunk={activeHunk} />
-  </Fragment>)}</>;
+    <DiffRow row={r} gutterW={gutterW} tokens={tokens?.[i]} activeHunk={activeHunk} commenting={commentRow === i || menu?.row === i}
+      onComment={lineComments && !lineComments.disabledReason && isMrCommentableLine(r) ? event => {
+        event.preventDefault(); event.stopPropagation();
+        const bounds = event.currentTarget.getBoundingClientRect();
+        setMenu({ row: i, x: "clientX" in event ? event.clientX : bounds.left + gutterW, y: "clientY" in event ? event.clientY : bounds.bottom });
+      } : undefined} />
+    {lineComments && isMrCommentableLine(r) && <>
+      {!!discussionsByLine.get(mrCommentLineKey({ oldLine: r.oldNo, newLine: r.newNo }))?.length && <MergeRequestLineDiscussions discussions={discussionsByLine.get(mrCommentLineKey({ oldLine: r.oldNo, newLine: r.newNo }))!} />}
+      {commentRow === i && <MergeRequestDiffComment actions={lineComments} position={{ oldPath: lineComments.oldPath, newPath: lineComments.newPath, oldLine: r.oldNo, newLine: r.newNo }}
+        onClose={() => { setCommentRow(null); focusRow(i); }} />}
+    </>}
+  </Fragment>)}
+  {menu && createPortal(<div ref={menuRef}><ContextMenu x={menu.x} y={menu.y} onClose={closeMenu} items={[{ label: tx("评论"), Icon: MessageSquare, onClick: () => {
+    if (commentRow !== null && commentRow !== menu.row) {
+      toast.message(tx("请先添加或取消当前行评论"));
+      rowsRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
+    } else { setCommentRow(menu.row); rowsRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus(); }
+  } }]} /></div>, document.body)}
+  </div>;
 }
 
 function DiffSkeleton() {
   const t = useTheme();
-  return (
-    <div role="status" aria-label={tx("正在读取差异…")}>
-      {[72, 54, 81, 64, 76, 58, 69, 47].map((width, index) => (
-        <div key={index} className="flex items-center gap-3 h-6 px-4" aria-hidden="true">
-          <span className="w-5 h-2.5 flex-shrink-0 animate-pulse"
-            style={{ background: t.rowHover, borderRadius: 3, animationDelay: String(index * 55) + "ms" }} />
-          <span className="h-2.5 animate-pulse"
-            style={{ width: String(width) + "%", maxWidth: 520, background: t.rowHover,
-              borderRadius: 3, animationDelay: String(index * 55 + 25) + "ms" }} />
-        </div>
-      ))}
-    </div>
-  );
+  return <CodeSkeleton label={tx("正在读取差异…")} color={t.rowHover} />;
 }
 
 function DetailMenuButton({ label, items }: { label: string; items: CtxItem[] }) {
@@ -2254,7 +2277,7 @@ function DiffStats({ additions = 0, deletions = 0 }: { additions?: number; delet
 
 function CodeDiffSurface({ filePath, diff, additions, deletions, statusLabel, statusColor,
   loading = false, diffError = false, diffNotice, diffTruncated = false, diffExtraNotice,
-  onExpand, onClose, toolbar, scrollRef, onScroll, onWheel, activeHunk, compact = false, fileActions, onTrace }: {
+  onExpand, onClose, toolbar, scrollRef, onScroll, onWheel, activeHunk, compact = false, fileActions, onTrace, lineComments }: {
   filePath: string; diff?: string; additions?: number; deletions?: number;
   statusLabel: string; statusColor: string;
   loading?: boolean; diffError?: boolean;
@@ -2264,6 +2287,7 @@ function CodeDiffSurface({ filePath, diff, additions, deletions, statusLabel, st
   onScroll?: React.UIEventHandler<HTMLDivElement>;
   onWheel?: React.WheelEventHandler<HTMLDivElement>; activeHunk?: number;
   compact?: boolean; fileActions?: React.ReactNode; onTrace?: () => void;
+  lineComments?: MrLineCommentActions;
 }) {
   const t = useTheme();
   const diffLines = useMemo(() => {
@@ -2328,7 +2352,7 @@ function CodeDiffSurface({ filePath, diff, additions, deletions, statusLabel, st
             <FileText size={24} opacity={0.3} aria-hidden="true" />{effectiveDiffNotice}
           </div>
         ) : diffLines.length > 0 ? <>
-          <DiffRows lines={visibleDiffLines} filePath={filePath} activeHunk={activeHunk} />
+          <DiffRows lines={visibleDiffLines} filePath={filePath} activeHunk={activeHunk} lineComments={lineComments} />
           {(diffTruncated || diffLines.length > DIFF_RENDER_CAP) && (
             <div className="px-4 py-3 text-[11px] text-center" style={{ color: t.textFaint }}>
               {tx("差异较长,仅显示前")} {DIFF_RENDER_CAP} {tx("行")}{diffExtraNotice}
@@ -2346,14 +2370,16 @@ function CodeDiffSurface({ filePath, diff, additions, deletions, statusLabel, st
 
 // Shared body for commit- and stash-detail panes: a file list on the left and
 // the selected file's diff on the right. The header above it differs per caller.
-function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, onExpand, repoPath, sourceKey, compact = false, onTrace, emptyHint = tx("无文件更改") }: {
+function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, onExpand, repoPath, sourceKey, compact = false, onTrace, loading = false, emptyHint = tx("无文件更改"), lineComments }: {
   files: CommitFile[]; selectedFile: CommitFile | null;
   onFileSelect: (f: CommitFile | null) => void;
   onRevealFile?: (f: CommitFile) => void;
   onExpand?: (trigger: HTMLButtonElement) => void;
   repoPath: string; sourceKey: string | number;
   emptyHint?: string;
+  loading?: boolean;
   compact?: boolean; onTrace?: () => void;
+  lineComments?: MrLineCommentActions;
 }) {
   const t = useTheme();
   const fss = (s: CommitFile["status"]) => ({
@@ -2363,12 +2389,20 @@ function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, onExpan
     renamed:  { label: "R", color: "#60a5fa" },
   })[s];
   return (
-    <div className="flex flex-1 overflow-hidden">
+    <div className="flex flex-1 overflow-hidden" aria-busy={loading || undefined}>
       {/* File list */}
       <div className="w-[225px] flex-shrink-0 overflow-y-auto"
         style={{ borderRight: `0.5px solid ${t.border}` }}>
         <div className="py-2">
-          {files.length === 0 ? (
+          {loading ? <div role="status" aria-label={tx("正在读取差异…")}>
+            {Array.from({ length: 6 }, (_, index) => <div key={index} className="flex items-center gap-2 px-4 py-3">
+              <Skeleton width={12} height={12} color={t.rowHover} />
+              <div className="flex flex-col gap-2 flex-1 min-w-0">
+                <Skeleton width={`${72 - index % 3 * 12}%`} height={11} color={t.rowHover} />
+                <Skeleton width={`${88 - index % 2 * 18}%`} height={10} color={t.rowHover} />
+              </div>
+            </div>)}
+          </div> : files.length === 0 ? (
             <div className="px-4 py-8 text-center">
               <GitMerge size={22} className="mx-auto mb-2 opacity-20" style={{ color: t.textMuted }} />
               <p className="text-xs" style={{ color: t.textFaint }}>{emptyHint}</p>
@@ -2418,12 +2452,12 @@ function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, onExpan
         </div>
       </div>
 
-      {selectedFile ? (
+      {loading ? <div className="flex-1 min-w-0 pt-4" style={{ background: t.diffBg }}><DiffSkeleton /></div> : selectedFile ? (
         <CodeDiffSurface key={`${repoPath}:${sourceKey}:${selectedFile.path}:${selectedFile.status}`} filePath={selectedFile.path}
           diff={selectedFile.diff} additions={selectedFile.additions} deletions={selectedFile.deletions}
           statusLabel={fss(selectedFile.status).label} statusColor={fss(selectedFile.status).color}
           loading={!!repoPath && selectedFile.diff === undefined && !selectedFile.diffError}
-          diffError={selectedFile.diffError} diffNotice={selectedFile.diffNotice} onExpand={onExpand} compact={compact} onTrace={onTrace}
+          diffError={selectedFile.diffError} diffNotice={selectedFile.diffNotice} onExpand={onExpand} compact={compact} onTrace={onTrace} lineComments={lineComments}
           fileActions={compact && <DetailMenuButton label={tx("更多文件操作")} items={[
             ...(onRevealFile ? [{ label: fileManagerActionLabel(), Icon: FolderOpen, onClick: () => onRevealFile(selectedFile) } as CtxItem] : []),
             { label: tx("复制文件路径"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(selectedFile.path).catch(() => toast.error(tx("无法复制到剪贴板"))); } },
@@ -2594,13 +2628,14 @@ function ExpandedDiffDialog({ files, file, onFileSelect, onClose, repoPath }: {
   );
 }
 
-function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onExpand, onCherryPick, onCheckout, checkoutBranch, repoPath, onTrace }: {
+function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onExpand, onCherryPick, onCheckout, checkoutBranch, repoPath, onTrace, filesLoading = false }: {
   commit: Commit; selectedFile: CommitFile | null; onFileSelect: (f: CommitFile | null) => void;
   onRevealFile?: (f: CommitFile) => void;
   onExpand?: (trigger: HTMLButtonElement) => void;
   onCherryPick?: () => void; onCheckout?: () => void; checkoutBranch?: string | null;
   repoPath: string;
   onTrace?: () => void;
+  filesLoading?: boolean;
 }) {
   const t = useTheme();
 
@@ -2627,8 +2662,10 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onExpa
         <div className="flex items-center gap-3 mt-3 flex-wrap">
           <CommitHashButton hash={commit.fullHash} shortHash={commit.hash} />
           <div className="flex items-center gap-3 ml-auto text-xs">
-            <DiffStats additions={commit.stats.additions} deletions={commit.stats.deletions} />
-            <span style={{ color: t.textMuted }}>{commit.stats.files} {tx("个文件")}</span>
+            {filesLoading ? <Skeleton width={108} height={12} color={t.rowHover} /> : <>
+              <DiffStats additions={commit.stats.additions} deletions={commit.stats.deletions} />
+              <span style={{ color: t.textMuted }}>{commit.stats.files} {tx("个文件")}</span>
+            </>}
           </div>
           <DetailMenuButton label={tx("更多提交操作")} items={[
             ...(onCherryPick ? [{ label: tx("Cherry-pick 到当前分支"), Icon: GitCommit, onClick: onCherryPick } as CtxItem] : []),
@@ -2643,6 +2680,7 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onExpa
         onFileSelect={onFileSelect} onRevealFile={onRevealFile} onExpand={onExpand}
         compact onTrace={onTrace}
         repoPath={repoPath} sourceKey={commit.fullHash}
+        loading={filesLoading}
         emptyHint={tx("合并提交，无直接更改")} />
     </div>
   );
@@ -2840,8 +2878,10 @@ function FileTracePanel({ repoPath, anchor, filePath, branch, expanded, onExpand
               <code className="px-3 whitespace-pre-wrap break-words" style={{ color: t.textSec, overflowWrap: "anywhere" }}>{line.content || " "}</code>
             </div>)}{activeBlame.truncated && <div className="px-4 py-3 text-center text-[11px]" style={{ color: t.textSec }}>{tx("逐行归属较长，仅显示前 2000 行")}</div>}</>}
           </div>}
-        </> : <div className="flex-1 flex items-center justify-center text-xs" style={{ color: t.textSec }} aria-live="polite">
-          {activeHistory ? tx("选择一次改动查看详情") : historyError ? tx("文件历史不可用") : tx("正在读取文件历史…")}
+        </> : !activeHistory && !historyError ? <div className="flex-1 min-w-0 pt-4">
+          <CodeSkeleton label={tx("正在读取文件历史…")} color={t.rowHover} />
+        </div> : <div className="flex-1 flex items-center justify-center text-xs" style={{ color: t.textSec }} aria-live="polite">
+          {activeHistory ? tx("选择一次改动查看详情") : tx("文件历史不可用")}
         </div>}
       </div>
     </div>
@@ -2851,11 +2891,12 @@ function FileTracePanel({ repoPath, anchor, filePath, branch, expanded, onExpand
 
 // Stash-detail pane: a stash-specific header (label / message / date + apply &
 // drop actions) over the shared file+diff body.
-function StashDetail({ stash, files, selectedFile, onFileSelect, onExpand, onApply, onDrop, repoPath }: {
+function StashDetail({ stash, files, selectedFile, onFileSelect, onExpand, onApply, onDrop, repoPath, filesLoading = false }: {
   stash: Stash; files: CommitFile[]; selectedFile: CommitFile | null;
   onFileSelect: (f: CommitFile | null) => void; onApply: () => void; onDrop: () => void;
   onExpand?: (trigger: HTMLButtonElement) => void;
   repoPath: string;
+  filesLoading?: boolean;
 }) {
   const t = useTheme();
   const adds = files.reduce((s, f) => s + f.additions, 0);
@@ -2896,14 +2937,17 @@ function StashDetail({ stash, files, selectedFile, onFileSelect, onExpand, onApp
             <Trash2 size={11} /> <span className="text-[11px] font-medium">{tx("删除")}</span>
           </button>
           <div className="flex items-center gap-3 ml-auto text-xs font-mono">
-            <span style={{ color: t.green + "aa" }}>+{adds}</span>
-            <span style={{ color: t.red + "aa" }}>−{dels}</span>
-            <span style={{ color: t.textFaint }}>{files.length} {tx("个文件")}</span>
+            {filesLoading ? <Skeleton width={108} height={12} color={t.rowHover} /> : <>
+              <span style={{ color: t.green + "aa" }}>+{adds}</span>
+              <span style={{ color: t.red + "aa" }}>−{dels}</span>
+              <span style={{ color: t.textFaint }}>{files.length} {tx("个文件")}</span>
+            </>}
           </div>
         </div>
       </div>
       <FileDiffView files={files} selectedFile={selectedFile} onFileSelect={onFileSelect}
         onExpand={onExpand} repoPath={repoPath} sourceKey={stash.index}
+        loading={filesLoading}
         emptyHint={tx("此储藏没有已跟踪文件的改动")} />
     </div>
   );
@@ -3507,11 +3551,13 @@ const press = (fn: () => void) => ({
 
 type DlgIcon = typeof GitPullRequest;
 
-function Modal({ title, Icon, onClose, width = 480, children, footer, closing = false, onExited }: {
+export function Modal({ title, Icon, onClose, width = 480, children, footer, closing = false, onExited, theme }: {
   title: string; Icon: DlgIcon; onClose: () => void; width?: number;
   children: React.ReactNode; footer?: React.ReactNode; closing?: boolean; onExited?: () => void;
+  theme?: ThemeColors;
 }) {
-  const t = useTheme();
+  const inheritedTheme = useTheme();
+  const t = theme ?? inheritedTheme;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -3526,7 +3572,7 @@ function Modal({ title, Icon, onClose, width = 480, children, footer, closing = 
         onAnimationEnd={(event) => {
           if (closing && event.currentTarget === event.target) onExited?.();
         }}
-        style={{ width, maxHeight: "85vh",
+        style={{ width, maxWidth: "calc(100vw - 32px)", maxHeight: "85vh",
         background: t.dialogBg,
         border: `0.5px solid ${t.glassBorder}`, borderRadius: R + 2, boxShadow: t.shadowWindow, overflow: "hidden" }}>
         <div className="flex-shrink-0 flex items-center gap-2.5 px-5 py-3.5" style={{ borderBottom: `0.5px solid ${t.border}` }}>
@@ -3640,13 +3686,22 @@ function CommitSearchDialog({ commits, ready, errored, onClose, onSelect }: {
             const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : index + (event.key === "ArrowDown" ? 1 : -1);
             buttons[Math.max(0, Math.min(next, buttons.length - 1))]?.focus();
           }}>
-          {errored || !ready || results.length === 0 ? (
+          {!errored && !ready ? <div role="status" aria-label={tx("正在读取提交…")} aria-busy="true" className="py-1">
+            {Array.from({ length: 5 }, (_, index) => <div key={index} className="flex items-start gap-2.5 px-3 py-3">
+              <Skeleton width={15} height={15} color={t.rowHover} circle className="mt-0.5" />
+              <div className="flex flex-col gap-2 min-w-0 flex-1">
+                <Skeleton width={`${76 - index % 3 * 13}%`} height={12} color={t.rowHover} />
+                <Skeleton width="44%" height={10} color={t.rowHover} />
+              </div>
+              <Skeleton width={42} height={10} color={t.rowHover} />
+            </div>)}
+          </div> : errored || results.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center gap-1 text-center px-4" style={{ color: t.textMuted }}>
               <span className="flex items-center justify-center w-8 h-8 mb-1 rounded-md" style={{ background: t.inputBg }}>
                 <Search size={16} aria-hidden="true" />
               </span>
               <span className="text-xs font-medium" style={{ color: t.text }}>
-                {errored ? tx("加载失败") : !ready ? tx("正在读取提交…") : deferredQuery ? tx("没有匹配的提交") : tx("这个仓库还没有提交")}
+                {errored ? tx("加载失败") : deferredQuery ? tx("没有匹配的提交") : tx("这个仓库还没有提交")}
               </span>
               {(errored || (ready && deferredQuery)) && <span className="text-[11px]">
                 {errored ? tx("仓库加载失败，请关闭搜索后重试") : tx("换个关键词再试")}
@@ -3794,8 +3849,14 @@ function ForcePushDialog({ request, onCancel, onConfirm }: {
         <div>{tx("项目")}：<span style={{ color: t.text }}>{request.project}</span></div>
         <div>{tx("当前分支")}：<span style={{ color: t.text }}>{preview?.branch ?? request.branch}</span></div>
       </div>
-      {checking && <div role="status" className="flex items-center gap-2 text-xs" style={{ color: t.textSec }}>
-        <RefreshCw size={13} className="animate-spin" />{tx("正在检查远端分支…")}
+      {checking && <div role="status" aria-label={tx("正在检查远端分支…")} aria-busy="true" className="flex flex-col gap-3">
+        <Skeleton width={68} height={11} color={t.rowHover} />
+        <Skeleton width="58%" height={12} color={t.rowHover} />
+        <Skeleton width="82%" height={10} color={t.rowHover} />
+        <div className="grid grid-cols-2 gap-x-4 gap-y-3">
+          {[72, 76, 58, 62].map((width, index) => <Skeleton key={index} width={`${width}%`} height={11} color={t.rowHover} />)}
+        </div>
+        <div className="rounded-lg px-3 py-3" style={{ background: t.inputBg }}><Skeleton width="88%" height={11} color={t.rowHover} /></div>
       </div>}
       {error && <div role="alert" className="text-xs leading-relaxed space-y-2" style={{ color: t.red }}>
         <div className="whitespace-pre-wrap break-words">{translateNativeMessage(error)}</div>
@@ -4278,7 +4339,14 @@ function TagDialog({ path, currentBranch, busy, onCancel, onConfirm }: {
         <div className="flex flex-col max-h-40 overflow-y-auto"
           style={{ border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 2, background: t.inputBg }}>
           {tags === null ? (
-            <div className="px-3 py-2 text-[11px]" style={{ color: t.textFaint }}>{tx("加载中…")}</div>
+            <div role="status" aria-label={tx("加载中…")} aria-busy="true">
+              {[84, 66, 74, 58].map((width, index) => <div key={index} className="flex items-center gap-2 px-3 py-2">
+                <Skeleton width={11} height={11} color={t.rowHover} />
+                <Skeleton width={width} height={11} color={t.rowHover} />
+                <Skeleton width={58} height={10} color={t.rowHover} />
+                <Skeleton width={52} height={10} color={t.rowHover} className="ml-auto" />
+              </div>)}
+            </div>
           ) : tags.length === 0 ? (
             <div className="px-3 py-2 text-[11px]" style={{ color: t.textFaint }}>{tx("还没有任何标签")}</div>
           ) : tags.map((tg) => (
@@ -4384,7 +4452,13 @@ function LocalMergeDialog({ path, branch, sources, dirty, onCancel, onConfirm, o
         </button>
       </div>
     </div>}
-    {checking && <div role="status" className="flex items-center gap-2 text-xs" style={{ color: t.textSec }}><RefreshCw size={13} className="animate-spin" />{tx("正在预览合并…")}</div>}
+    {checking && <div role="status" aria-label={tx("正在预览合并…")} aria-busy="true" className="flex flex-col gap-3">
+      <Skeleton width="78%" height={12} color={t.rowHover} />
+      <Skeleton width="40%" height={11} color={t.rowHover} />
+      <div className="rounded-lg px-3 py-2.5 flex flex-col gap-2.5" style={{ background: t.inputBg }}>
+        {[76, 58, 68].map((width) => <Skeleton key={width} width={`${width}%`} height={10} color={t.rowHover} />)}
+      </div>
+    </div>}
     {error && <div role="alert" className="text-xs leading-5 space-y-2" style={{ color: t.red }}>
       <p className="whitespace-pre-wrap break-words">{translateNativeMessage(error)}</p>
       <button type="button" disabled={merging} onClick={() => setRetry((n) => n + 1)} className="font-medium underline underline-offset-2 cursor-pointer">{tx("重新检查")}</button>
@@ -4446,7 +4520,12 @@ function OperationContinueDialog({ path, kind, identities, defaultIdentityId, on
   return <Modal title={isCherryPick ? tx("继续 Cherry-pick") : tx("继续合并")} Icon={isCherryPick ? GitCommit : GitMerge} width={540} onClose={close}
     footer={<ModalFooter onCancel={close} onConfirm={submit} confirmLabel={isCherryPick ? tx("确认继续 Cherry-pick") : tx("完成合并提交")}
       disabled={!operation?.canContinue || (!isCherryPick && !message.trim()) || checking} busy={busy} />}>
-    {checking && <p role="status" className="text-xs" style={{ color: t.textSec }}>{tx("正在检查 Git 操作状态…")}</p>}
+    {checking && <div role="status" aria-label={tx("正在检查 Git 操作状态…")} aria-busy="true" className="flex flex-col gap-3">
+      <Skeleton width="82%" height={12} color={t.rowHover} />
+      <div className="rounded-lg px-3 py-2.5 flex flex-col gap-2.5" style={{ background: t.inputBg }}>
+        {[72, 54, 64].map((width) => <Skeleton key={width} width={`${width}%`} height={10} color={t.rowHover} />)}
+      </div>
+    </div>}
     {error && <div role="alert" className="text-xs leading-5 space-y-2" style={{ color: t.red }}>
       <p className="whitespace-pre-wrap break-words">{translateNativeMessage(error)}</p>
       <button type="button" disabled={busy} onClick={() => setRetry((n) => n + 1)} className="underline underline-offset-2 cursor-pointer">{tx("重新检查")}</button>
@@ -4658,9 +4737,10 @@ function CreatePRDialog({ path, branches, currentBranch, defaultTarget, term, on
           </div>
         )}
         {!same && preview.state === "checking" && (
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium"
+          <div role="status" aria-label={tx("正在检测合并冲突…")} aria-busy="true" className="flex items-center gap-1.5 px-2.5 py-1.5 min-h-7"
             style={{ background: t.inputBg, color: t.textMuted, borderRadius: R - 3 }}>
-            <RefreshCw size={12} className="animate-spin flex-shrink-0" /> {tx("正在检测合并冲突…")}
+            <Skeleton width={12} height={12} color={t.rowHover} />
+            <Skeleton width="48%" height={11} color={t.rowHover} />
           </div>
         )}
         {!same && preview.state === "clean" && (
@@ -5034,15 +5114,17 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
   const inputStyle = { background: t.inputBg, color: t.text, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
   const buttonStyle = { color: t.textSec, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 3 } as const;
   const metadata = (
-    <div className="flex flex-col gap-4" aria-busy={loading}>
+    <div className="flex flex-col gap-4" role={initialLoading ? "status" : undefined} aria-label={initialLoading ? tx("读取中…") : undefined} aria-busy={loading}>
       <dl className="gk-token-summary grid grid-cols-3 gap-4 py-4" style={{ borderBottom: `0.5px solid ${t.border}` }}>
         {[
-          { title: tx("Token 名称"), value: info?.name || (initialLoading ? tx("读取中…") : tx("无法确认")), color: t.text },
-          { title: tx("到期时间"), value: initialLoading ? tx("读取中…") : tx(expiry.date), color: t.text },
-          { title: tx("剩余有效期"), value: initialLoading ? tx("读取中…") : inactive ? tx(expiry.expired ? "已过期" : info?.revoked ? "已撤销" : "不可用") : tx(expiry.label), color: inactive ? t.red : expiry.tone === "green" ? t.green : expiry.tone === "amber" ? t.amber : t.textSec },
+          { title: tx("Token 名称"), value: info?.name || tx("无法确认"), color: t.text },
+          { title: tx("到期时间"), value: tx(expiry.date), color: t.text },
+          { title: tx("剩余有效期"), value: inactive ? tx(expiry.expired ? "已过期" : info?.revoked ? "已撤销" : "不可用") : tx(expiry.label), color: inactive ? t.red : expiry.tone === "green" ? t.green : expiry.tone === "amber" ? t.amber : t.textSec },
         ].map(item => <div key={item.title} className="min-w-0 flex flex-col gap-1.5">
           <dt className="text-[11px]" style={{ color: t.textSec }}>{item.title}</dt>
-          <dd className="text-xs font-medium break-words tabular-nums" style={{ color: item.color }}>{item.value}</dd>
+          <dd className="text-xs font-medium break-words tabular-nums" style={{ color: item.color }}>
+            {initialLoading ? <Skeleton width="76%" height={12} color={t.rowHover} /> : item.value}
+          </dd>
         </div>)}
       </dl>
       {infoError && <div role="status" className="flex items-start gap-2 text-[11px] leading-relaxed" style={{ color: t.amber }}>
@@ -5062,8 +5144,8 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
             return <div key={capability.title} className="min-w-0 p-3 flex flex-col gap-2"
               style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 3, background: t.bgPanel }}>
               <span className="text-[11px] font-medium" style={{ color: t.text }}>{tx(capability.title)}</span>
-              <span className="flex items-center gap-1 text-[10px] font-medium" style={{ color }}>
-                <Icon size={12} />{initialLoading ? tx("查询中") : granted ? tx("已拥有") : permission === "denied" ? tx("未授权") : permission === "inactive" ? tx("令牌不可用") : tx("无法确认")}
+              <span className="flex items-center gap-1 text-[10px] font-medium min-h-3" style={{ color }}>
+                {initialLoading ? <Skeleton width={54} height={10} color={t.rowHover} /> : <><Icon size={12} />{granted ? tx("已拥有") : permission === "denied" ? tx("未授权") : permission === "inactive" ? tx("令牌不可用") : tx("无法确认")}</>}
               </span>
               <span className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>{tx(capability.detail)}</span>
             </div>;
@@ -5071,7 +5153,7 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
         </div>
         <div className="flex items-center gap-1.5 flex-wrap text-[10px]" style={{ color: t.textSec }}>
           <span>{tx("原始 scopes")}</span>
-          {info?.scopes?.length ? info.scopes.map(scope => <code key={scope} className="px-1.5 py-0.5 rounded break-all"
+          {initialLoading ? <Skeleton width={96} height={11} color={t.rowHover} /> : info?.scopes?.length ? info.scopes.map(scope => <code key={scope} className="px-1.5 py-0.5 rounded break-all"
             style={{ color: t.text, background: t.inputBg }}>{scope}</code>) : <span>· {info?.granular ? tx("细粒度授权") : info?.scopes ? tx("无") : tx("无法确认")}</span>}
         </div>
         <p className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>
@@ -5097,7 +5179,7 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
             <div className="flex flex-col gap-1 min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs font-semibold break-all" style={{ color: t.text }}>{hostOf(saved.url) || saved.url}</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ color: stateColor, background: inactive ? t.redBg : info?.active ? t.greenBg : t.inputBg }}>{stateLabel}</span>
+                {initialLoading ? <Skeleton width={36} height={14} color={t.rowHover} /> : <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ color: stateColor, background: inactive ? t.redBg : info?.active ? t.greenBg : t.inputBg }}>{stateLabel}</span>}
               </div>
               <span className="text-[11px] font-mono" style={{ color: t.textSec }}>••••••••{saved.token.length > 4 ? saved.token.slice(-4) : ""}</span>
             </div>
@@ -5150,7 +5232,10 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
             {status.kind === "ok" || status.kind === "err" ? <span className="flex items-start gap-1.5 text-[11px] leading-relaxed"
               style={{ color: status.kind === "ok" ? t.green : t.red }}>
               {status.kind === "ok" ? <Check size={14} className="shrink-0 mt-0.5" /> : <AlertTriangle size={14} className="shrink-0 mt-0.5" />}{translateNativeMessage(status.msg ?? "")}
-            </span> : <span className="text-[10px]" style={{ color: t.textSec }}>{loading ? tx("正在检测连接并读取令牌信息…") : tx("检测连接可预览当前令牌的有效期和权限。")}</span>}
+            </span> : loading ? <span role="status" aria-label={tx("正在检测连接并读取令牌信息…")} aria-busy="true" className="inline-flex items-center gap-1.5 min-h-3.5">
+              <Skeleton width={12} height={12} color={t.rowHover} />
+              <Skeleton width="62%" height={10} color={t.rowHover} />
+            </span> : <span className="text-[10px]" style={{ color: t.textSec }}>{tx("检测连接可预览当前令牌的有效期和权限。")}</span>}
           </div>
           <div className="flex items-center gap-2 pt-4" style={{ borderTop: `0.5px solid ${t.border}` }}>
             <button type="button" {...press(runTest)} disabled={!canTest} className="gk-conn-button flex items-center gap-1.5 px-3 py-2 text-[11px] cursor-pointer disabled:opacity-40" style={buttonStyle}>
@@ -5180,7 +5265,7 @@ function GithubTokenDetails({ info, loading, error, now }: {
   const t = useTheme();
   const expiry = githubTokenExpiry(info, now);
   const initialLoading = loading && !info;
-  return <div className="flex flex-col gap-3" aria-busy={loading}>
+  return <div className="flex flex-col gap-3" role={initialLoading ? "status" : undefined} aria-label={initialLoading ? tx("读取中…") : undefined} aria-busy={loading}>
     <dl className="grid grid-cols-3 gap-3 py-3" style={{ borderBottom: `0.5px solid ${t.border}` }}>
       {[
         { title: tx("认证账号"), value: info ? `@${info.login}` : tx("无法确认"), color: t.text },
@@ -5188,7 +5273,9 @@ function GithubTokenDetails({ info, loading, error, now }: {
         { title: tx("剩余有效期"), value: tx(expiry.label), color: expiry.tone === "red" ? t.red : expiry.tone === "amber" ? t.amber : expiry.tone === "green" ? t.green : t.textSec },
       ].map(item => <div key={item.title} className="min-w-0 flex flex-col gap-1.5">
         <dt className="text-[10px]" style={{ color: t.textSec }}>{item.title}</dt>
-        <dd className="text-[11px] font-medium break-words tabular-nums" style={{ color: item.color }}>{initialLoading ? tx("读取中…") : item.value}</dd>
+        <dd className="text-[11px] font-medium break-words tabular-nums" style={{ color: item.color }}>
+          {initialLoading ? <Skeleton width="76%" height={11} color={t.rowHover} /> : item.value}
+        </dd>
       </div>)}
     </dl>
     {error && <div role="status" className="flex items-start gap-2 text-[11px] leading-relaxed" style={{ color: t.amber }}>
@@ -5210,15 +5297,15 @@ function GithubTokenDetails({ info, loading, error, now }: {
         return <div key={capability.id} title={tx(capability.detail)} className="min-w-0 px-3 py-2.5 flex flex-col gap-1.5"
           style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 3, background: t.bgPanel }}>
           <span className="text-[11px] font-medium" style={{ color: t.text }}>{tx(capability.title)}</span>
-          <span className="flex items-center gap-1 text-[10px] font-medium" style={{ color }}><Icon size={12} />
-            {initialLoading ? tx("查询中") : permission === "granted" ? tx("已拥有") : permission === "public" ? tx("仅公开仓库") : permission === "denied" ? tx("未授权") : permission === "inactive" ? tx("令牌已过期") : tx("无法确认")}
+          <span className="flex items-center gap-1 text-[10px] font-medium min-h-3" style={{ color }}>
+            {initialLoading ? <Skeleton width={54} height={10} color={t.rowHover} /> : <><Icon size={12} />{permission === "granted" ? tx("已拥有") : permission === "public" ? tx("仅公开仓库") : permission === "denied" ? tx("未授权") : permission === "inactive" ? tx("令牌已过期") : tx("无法确认")}</>}
           </span>
         </div>;
       })}
     </div>
     <div className="flex items-center gap-1.5 flex-wrap text-[10px]" style={{ color: t.textSec }}>
       <span>{tx("原始 scopes")}</span>
-      {info?.scopes?.length ? info.scopes.map(scope => <code key={scope} className="px-1.5 py-0.5 rounded break-all"
+      {initialLoading ? <Skeleton width={96} height={11} color={t.rowHover} /> : info?.scopes?.length ? info.scopes.map(scope => <code key={scope} className="px-1.5 py-0.5 rounded break-all"
         style={{ color: t.text, background: t.inputBg }}>{scope}</code>) : <span>· {info?.scopes ? tx("无（仅公开信息）") : tx("未提供")}</span>}
     </div>
     <p className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>{tx("实际操作仍受仓库角色、保护分支、组织 SSO 及令牌可访问的仓库范围限制。")}</p>
@@ -5368,7 +5455,9 @@ function GithubAccountsSettings() {
                   <span className="text-[11px] font-semibold truncate" style={{ color: t.text }}>{accountLabel(account)}{result?.info && <span className="font-normal ml-2" style={{ color: t.textSec }}>@{result.info.login}</span>}</span>
                   <span className="text-[10px] truncate" style={{ color: t.textSec }}>{hostLabel(account)} · <span className="font-mono">••••{account.token.length > 4 ? account.token.slice(-4) : ""}</span></span>
                 </span>
-                <span className="text-[10px] shrink-0 tabular-nums" style={{ color }}>{stateText}</span>
+                <span className="text-[10px] shrink-0 tabular-nums" style={{ color }} role={loading && !result?.info ? "status" : undefined} aria-label={loading && !result?.info ? tx("读取中…") : undefined}>
+                  {loading && !result?.info ? <Skeleton width={76} height={10} color={t.rowHover} /> : stateText}
+                </span>
                 <ChevronRight size={12} className="shrink-0" style={{ color: active ? t.accent : t.textSec }} />
               </button>
               <button {...press(() => startEdit(account))} disabled={showForm} aria-label={tf("修改账号 {0}", accountLabel(account))} title={tx("修改账号")}
@@ -5406,7 +5495,10 @@ function GithubAccountsSettings() {
         <span id="github-token-hint" className="text-[10px] leading-relaxed" style={{ color: t.textSec }}>{tx("Classic Token 的私有仓库操作需要 repo；细粒度 Token 需选择仓库并授予 Contents / Pull requests 等对应权限。令牌保存在本机。")}</span>
       </div>
       <div className="text-[11px] leading-relaxed" aria-live="polite" style={{ color: draftInfo ? t.green : t.textSec }}>
-        {testing ? tx("正在检测账号并读取 Token 信息…") : draftInfo ? tf("已连接：{0}(@{1})", draftInfo.name ? `${draftInfo.name} ` : "", draftInfo.login) : tx("检测连接可预览当前账号、有效期和权限。")}
+        {testing ? <span role="status" aria-label={tx("正在检测账号并读取 Token 信息…")} aria-busy="true" className="flex items-center gap-1.5 min-h-4">
+          <Skeleton width={12} height={12} color={t.rowHover} />
+          <Skeleton width="62%" height={11} color={t.rowHover} />
+        </span> : draftInfo ? tf("已连接：{0}(@{1})", draftInfo.name ? `${draftInfo.name} ` : "", draftInfo.login) : tx("检测连接可预览当前账号、有效期和权限。")}
       </div>
       {draftError && <p role="alert" className="text-[11px] leading-relaxed" style={{ color: t.red }}>{translateNativeMessage(draftError)}</p>}
       <div className="flex items-center gap-2 pt-3" style={{ borderTop: `0.5px solid ${t.border}` }}>
@@ -5648,9 +5740,15 @@ function DailyCheckSettings({ cfg, setCfg, onRunNow, busy, progress, projectCoun
 function UpdateSettings() {
   const t = useTheme();
   const [version, setVersion] = useState<string>("");
+  const [versionReading, setVersionReading] = useState(true);
   const statusShellRef = useRef<HTMLDivElement>(null);
   const statusContentRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { getAppVersion().then(setVersion).catch(() => {}); }, []);
+  useEffect(() => {
+    let alive = true;
+    getAppVersion().then((value) => { if (alive) setVersion(value); }).catch(() => {})
+      .finally(() => { if (alive) setVersionReading(false); });
+    return () => { alive = false; };
+  }, []);
 
   type UpState =
     | { kind: "idle" | "checking" | "uptodate" }
@@ -5719,7 +5817,8 @@ function UpdateSettings() {
           <div className="flex flex-col min-w-0 flex-1 gap-0.5">
             <span className="gk-heading text-sm font-semibold" style={{ color: t.text }}>GitKit</span>
             <span className="text-xs" style={{ color: t.textMuted }}>
-              {version ? <>{tx("已安装")} <span className="font-mono tabular-nums">v{version}</span></> : tx("正在读取当前版本…")}
+              {versionReading ? <span role="status" aria-label={tx("正在读取当前版本…")} aria-busy="true"><Skeleton width={92} height={12} color={t.rowHover} /></span>
+                : version ? <>{tx("已安装")} <span className="font-mono tabular-nums">v{version}</span></> : tx("无法确认")}
             </span>
           </div>
           <button {...(busy ? {} : press(check))} disabled={busy} aria-busy={up.kind === "checking" || undefined}
@@ -5742,18 +5841,11 @@ function UpdateSettings() {
           <div ref={statusContentRef} className={up.kind === "idle" ? "" : "px-4 py-3.5"}>
             {up.kind !== "idle" && <div key={up.kind} className="gk-update-state">
             {up.kind === "checking" && (
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center gap-2.5">
-                  <RefreshCw size={14} aria-hidden="true" className="gk-update-check-icon flex-shrink-0"
-                    style={{ color: t.accent }} />
-                  <div className="flex flex-col gap-0.5">
-                    <span className="text-xs font-semibold" style={{ color: t.text }}>{tx("正在检查新版本")}</span>
-                    <span className="text-[11px]" style={{ color: t.textMuted }}>{tx("正在连接发布服务器…")}</span>
-                  </div>
-                </div>
-                <div className="gk-update-progress" data-indeterminate="true" aria-hidden="true"
-                  style={{ "--gk-update-accent": t.accent, "--gk-update-track": t.inputBorder } as React.CSSProperties}>
-                  <span />
+              <div role="status" aria-label={tx("正在检查新版本")} aria-busy="true" className="flex items-center gap-2.5">
+                <Skeleton circle width={28} height={28} color={t.rowHover} />
+                <div className="flex flex-col gap-2 min-w-0 flex-1">
+                  <Skeleton width={138} height={12} color={t.rowHover} />
+                  <Skeleton width="62%" height={11} color={t.rowHover} />
                 </div>
               </div>
             )}
@@ -5871,6 +5963,7 @@ function DependencySettings() {
     ksdiff: { label: "Kaleidoscope", summary: tx("可选，用于图形化解决合并冲突"), hint: tx("可选。Cherry-pick/合并冲突时用它图形化解决。安装 Kaleidoscope.app 后，在其菜单执行「Integrations → Install ksdiff」即可。") },
   };
   const names = deps ? deps.map((d) => d.name) : Object.keys(meta);
+  const initialLoading = deps === null && !error;
 
   return (
     <section className="gk-settings-page" style={settingsPageStyle(t)} aria-label={tx("环境依赖")}>
@@ -5883,7 +5976,8 @@ function DependencySettings() {
           <RefreshCw size={13} aria-hidden="true" className={checking ? "animate-spin" : undefined} />{checking ? tx("检测中…") : tx("重新检测")}
         </button>
       </div>
-      <div className="gk-settings-deps-group" aria-busy={checking}>
+      <div className="gk-settings-deps-group" role={initialLoading ? "status" : undefined}
+        aria-label={initialLoading ? tx("检测中…") : undefined} aria-busy={checking || initialLoading}>
         {names.map((name) => {
           const d = deps?.find((item) => item.name === name);
           const m = meta[name] ?? { label: name, summary: "", hint: "" };
@@ -5893,13 +5987,18 @@ function DependencySettings() {
               <div className="gk-settings-dependency-copy">
                 <span className="gk-settings-dependency-name">{m.label}</span>
                 {m.summary && <p className="gk-settings-dependency-summary">{m.summary}</p>}
-                {d?.found && d.version && <span className="gk-settings-dependency-detail">{d.version}</span>}
-                {d?.found && d.path && <span className="gk-settings-dependency-path">{d.path}</span>}
+                {initialLoading ? <>
+                  <Skeleton width={112} height={10} color={t.rowHover} className="my-1" />
+                  <Skeleton width="72%" height={10} color={t.rowHover} />
+                </> : <>
+                  {d?.found && d.version && <span className="gk-settings-dependency-detail">{d.version}</span>}
+                  {d?.found && d.path && <span className="gk-settings-dependency-path">{d.path}</span>}
+                </>}
                 {d && !d.found && m.hint && <p className="gk-settings-dependency-hint">{m.hint}</p>}
               </div>
-              <span className="gk-settings-status-badge" data-state={checking ? "checking" : d ? d.found ? "found" : "missing" : "unknown"}>
-                {checking ? tx("检测中…") : d ? d.found ? tx("已安装") : tx("未找到") : tx("未检测")}
-              </span>
+              {initialLoading ? <Skeleton width={45} height={20} color={t.rowHover} /> : <span className="gk-settings-status-badge" data-state={d ? d.found ? "found" : "missing" : "unknown"}>
+                {d ? d.found ? tx("已安装") : tx("未找到") : tx("未检测")}
+              </span>}
             </div>
           );
         })}
@@ -6364,6 +6463,7 @@ export default function App() {
   useEffect(() => { localStorage.setItem("gitkit.workspaceView", workspaceView); }, [workspaceView]);
 
   const [selectedCommit, setSelectedCommit]   = useState<Commit | null>(null);
+  const [commitFilesReading, setCommitFilesReading] = useState<{ path: string; hash: string; requestId: number } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [smartMerge, setSmartMerge] = useState(() => localStorage.getItem("gitkit.smartMerge") !== "0");
   const [historyMode, setHistoryMode] = useState<"list" | "topology">(() =>
@@ -6392,6 +6492,7 @@ export default function App() {
   // Stash under inspection (with its loaded files) + the file whose diff is shown.
   const [selectedStash, setSelectedStash] = useState<(Stash & { files: CommitFile[] }) | null>(null);
   const [selectedStashFile, setSelectedStashFile] = useState<CommitFile | null>(null);
+  const [stashFilesReading, setStashFilesReading] = useState<{ path: string; index: number } | null>(null);
   const stashDiffRequestRef = useRef(0);
 
   useEffect(() => {
@@ -6897,6 +6998,7 @@ export default function App() {
     setSelectedStash(null); setSelectedStashFile(null);
     setSelectedCommit(commit);
     setSelectedFile(null);
+    setCommitFilesReading(isReal && activeProject ? { path: activeProject.path, hash: commit.fullHash, requestId } : null);
     if (isReal && activeProject) {
       try {
         const files = await loadCommitFiles(activeProject.path, commit.fullHash);
@@ -6904,6 +7006,7 @@ export default function App() {
         const additions = files.reduce((s, f) => s + f.additions, 0);
         const deletions = files.reduce((s, f) => s + f.deletions, 0);
         setSelectedCommit({ ...commit, files, stats: { additions, deletions, files: files.length } });
+        setCommitFilesReading(null);
         // Default to the first readable file's diff so the right pane isn't empty.
         const first = firstReadableFile(files);
         if (first) {
@@ -6917,7 +7020,10 @@ export default function App() {
               setSelectedFile((current) => current?.path === first.path ? { ...current, diffError: true } : current);
           }
         }
-      } catch { /* keep summary without files */ }
+      } catch {
+        if (requestId === commitDiffRequestRef.current) setCommitFilesReading(null);
+        // Keep the summary when the file list is unavailable.
+      }
     }
   };
 
@@ -6959,11 +7065,13 @@ export default function App() {
     setSelectedCommit(null); setSelectedFile(null);
     setSelectedStash({ ...s, files: [] });
     setSelectedStashFile(null);
+    setStashFilesReading({ path: activeProject.path, index: s.index });
     openDetail();
     try {
       const files = await stashFiles(activeProject.path, s.index);
       if (requestId !== stashDiffRequestRef.current) return;
       setSelectedStash({ ...s, files });
+      setStashFilesReading(null);
       const first = firstReadableFile(files) ?? files[0] ?? null;
       if (first) {
         setSelectedStashFile(first);
@@ -6976,7 +7084,10 @@ export default function App() {
             setSelectedStashFile((current) => current?.path === first.path ? { ...current, diffError: true } : current);
         }
       }
-    } catch (e) { toast.error(tf("读取储藏失败：{0}", e)); }
+    } catch (e) {
+      if (requestId === stashDiffRequestRef.current) setStashFilesReading(null);
+      toast.error(tf("读取储藏失败：{0}", e));
+    }
   };
   const selectStashFile = async (file: CommitFile | null) => {
     const requestId = ++stashDiffRequestRef.current;
@@ -7332,36 +7443,48 @@ export default function App() {
       return;
     }
     let cancelled = false;
-    const alive = () => !cancelled;
 
     // Select the newest commit (and load its first readable file). With `open`,
     // also surface it in the detail pane and scroll the timeline to the top —
     // used after a fetch/pull to jump to the latest commit.
     const preselect = async (data: RealData, open = false) => {
       const requestId = ++commitDiffRequestRef.current;
+      // A same-repository refresh can replace this effect while the selected
+      // commit is still loading. Its detail read belongs to the selection.
+      const currentSelection = () => activePathRef.current === path && requestId === commitDiffRequestRef.current;
       if (open) { setViewChanges(false); setDetailClosing(false); setDetailOpen(true); }
       setSelectedFile(null); setSelectedWorkingFile(null);
       const first = data.commits[0] ?? null;
       if (!first) { setSelectedCommit(null); return; }
+      setSelectedCommit(first);
+      setCommitFilesReading({ path, hash: first.fullHash, requestId });
       if (open) requestAnimationFrame(() => timelineScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
       try {
         const files = await loadCommitFiles(path, first.fullHash);
         const additions = files.reduce((s, f) => s + f.additions, 0);
         const deletions = files.reduce((s, f) => s + f.deletions, 0);
-        if (!alive() || requestId !== commitDiffRequestRef.current) return;
+        if (!currentSelection()) return;
         setSelectedCommit({ ...first, files, stats: { additions, deletions, files: files.length } });
+        setCommitFilesReading(null);
         const ff = firstReadableFile(files);
         if (!ff) return;
         setSelectedFile(ff);
         try {
           const diff = await commitFileDiff(path, first.fullHash, ff.path);
-          if (alive() && requestId === commitDiffRequestRef.current)
+          if (currentSelection())
             setSelectedFile((current) => current?.path === ff.path ? { ...current, diff } : current);
         } catch {
-          if (alive() && requestId === commitDiffRequestRef.current)
+          if (currentSelection())
             setSelectedFile((current) => current?.path === ff.path ? { ...current, diffError: true } : current);
         }
-      } catch { if (alive()) setSelectedCommit(first); }
+      } catch {
+        if (currentSelection()) {
+          setSelectedCommit(first);
+          setCommitFilesReading(null);
+        }
+      } finally {
+        setCommitFilesReading((current) => current?.requestId === requestId ? null : current);
+      }
     };
 
     // Default the view to 全部视图 (all branches), detail closed (only on switch /
@@ -7403,7 +7526,7 @@ export default function App() {
       };
       // Switch → defer the big timeline render (no freeze); refresh → urgent.
       if (isSwitch) startSwitch(apply); else apply();
-      return () => { cancelled = true; };  // still guard the async preselect
+      return () => { cancelled = true; };
     }
 
     if (resetView) {
@@ -8951,10 +9074,11 @@ export default function App() {
               loading={mr.loading} error={mr.error} files={mrFiles} diffVersion={mr.diffVersion}
               diffLoading={mr.diffLoading} diffError={mr.diffError} discussions={mr.discussions}
               discussionsLoading={mr.discussionsLoading} discussionsError={mr.discussionsError}
-              onRefresh={mr.refresh} onReviewLatest={mr.reviewLatest} onMerge={mr.merge} onOpenExternal={mr.openExternal}
+              onRefresh={mr.refresh} onReviewLatest={mr.reviewLatest} onDownloadDiff={mr.downloadDiff} onMerge={mr.merge} onCommitMessages={mr.commitMessages} onCancel={mr.close} onApprove={mr.approve} onOpenExternal={mr.openExternal}
               onBackList={mr.backList} onBackWorkspace={mr.backWorkspace} onTabChange={mr.onTabChange}
-              renderDiff={(files, selected, onSelect, sourceKey) => <FileDiffView files={files} selectedFile={selected}
-                onFileSelect={onSelect} repoPath="" sourceKey={sourceKey} compact />} />}
+              onCreateDiffComment={mr.createDiffComment}
+              renderDiff={(files, selected, onSelect, sourceKey, lineComments) => <FileDiffView files={files} selectedFile={selected}
+                onFileSelect={onSelect} repoPath="" sourceKey={sourceKey} compact lineComments={lineComments} />} />}
             <div className="gk-history-workspace flex-1 min-w-0 min-h-0 overflow-hidden" data-history-mode={historyMode}
               aria-hidden={mr.selectedId !== null}
               ref={(element) => { if (element) element.inert = mr.selectedId !== null; }}
@@ -9077,11 +9201,11 @@ export default function App() {
                     {Array.from({ length: 7 }).map((_, i) => (
                       <div key={i} className="flex items-start gap-3 px-4"
                         style={{ height: 74, borderBottom: `0.5px solid ${theme.border}` }}>
-                        <div className="rounded-full mt-3.5 animate-pulse flex-shrink-0"
-                          style={{ width: 12, height: 12, background: theme.rowHover, animationDelay: `${i * 90}ms` }} />
+                        <Skeleton circle width={12} height={12} color={theme.rowHover} className="mt-3.5"
+                          style={{ animationDelay: `${i * 90}ms` }} />
                         <div className="flex-1 flex flex-col gap-2 py-3.5 min-w-0">
-                          <div className="animate-pulse" style={{ height: 12, width: `${68 - i * 6}%`, background: theme.rowHover, borderRadius: 4, animationDelay: `${i * 90}ms` }} />
-                          <div className="animate-pulse" style={{ height: 10, width: "42%", background: theme.rowHover, borderRadius: 4, animationDelay: `${i * 90 + 45}ms` }} />
+                          <Skeleton height={12} width={`${68 - i * 6}%`} color={theme.rowHover} style={{ animationDelay: `${i * 90}ms` }} />
+                          <Skeleton height={10} width="42%" color={theme.rowHover} style={{ animationDelay: `${i * 90 + 45}ms` }} />
                         </div>
                       </div>
                     ))}
@@ -9298,6 +9422,7 @@ export default function App() {
                       selectedFile={selectedStashFile} onFileSelect={selectStashFile}
                       onExpand={openExpandedDiff}
                       repoPath={isReal ? path ?? "" : ""}
+                      filesLoading={!!stashFilesReading && stashFilesReading.path === path && stashFilesReading.index === selectedStash.index}
                       onApply={() => doStashApply(selectedStash.index)}
                       onDrop={() => doStashDrop(selectedStash.index)} />
                   ) : selectedCommit ? (
@@ -9307,6 +9432,7 @@ export default function App() {
                       onFileSelect={selectDetailFile}
                       onExpand={openExpandedDiff}
                       repoPath={isReal ? path ?? "" : ""}
+                      filesLoading={!!commitFilesReading && commitFilesReading.path === path && commitFilesReading.hash === selectedCommit.fullHash}
                       onRevealFile={isReal ? revealCommitFile : undefined}
                       onTrace={isReal && selectedFile ? () => {
                         setTraceMotion(historyMode === "topology" && topologyDetailSplit);

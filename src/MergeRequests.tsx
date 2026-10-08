@@ -1,10 +1,14 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { AlertCircle, ArrowRight, Check, CheckCircle2, ChevronLeft, Clock3, ExternalLink, GitMerge, GitPullRequest, KeyRound, LoaderCircle, RefreshCw, ShieldCheck, X } from "lucide-react";
+import { AlertCircle, ArrowRight, Check, CheckCircle2, ChevronLeft, Clock3, Download, ExternalLink, GitMerge, GitPullRequest, KeyRound, LoaderCircle, RefreshCw, ShieldCheck, X } from "lucide-react";
 import type { CommitFile, ThemeColors } from "./App";
 import { tf, translateNativeMessage, tx } from "./i18n";
-import type { MrDetail, MrDiffVersion, MrDiscussion, MrMergeOptions, MrMergeResult, MrSnapshot, MrSummary } from "./mergeRequestTypes";
-import { mrErrorMessage, mrVersionChanged, reviewVersion, sameMrRefs } from "./mergeRequestHelpers";
+import type { MrActionResult, MrCommitMessages, MrDetail, MrDiffVersion, MrDiscussion, MrDownloadedDiff, MrMergeOptions, MrMergeResult, MrSnapshot, MrSummary } from "./mergeRequestTypes";
+import { mrErrorMessage, mrVersionChanged, mrViewerActions, reviewVersion, sameMrRefs } from "./mergeRequestHelpers";
+import { CodeSkeleton, Skeleton } from "./Skeleton";
+import { MergeRequestDownload } from "./MergeRequestDownload";
+import type { MrLineCommentActions } from "./MergeRequestDiffComment";
+import type { MrDiffCommentPosition, MrDiffCommentResult } from "./mergeRequestTypes";
 import "./styles/mergeRequests.css";
 
 export type MergeRequestTab = "overview" | "changes" | "discussion";
@@ -46,8 +50,54 @@ function Banner({ children, tone = "warning", action }: { children: ReactNode; t
   return <div className={`gkm-banner gkm-banner-${tone}`} role={tone === "error" ? "alert" : "status"}><AlertCircle size={15} aria-hidden="true" /><div>{children}</div>{action}</div>;
 }
 
-function EmptyState({ title, children, action, busy = false }: { title: string; children?: ReactNode; action?: ReactNode; busy?: boolean }) {
-  return <div className="gkm-empty">{busy ? <LoaderCircle className="gkm-spin" size={24} aria-hidden="true" /> : <GitPullRequest size={25} aria-hidden="true" />}<h3>{title}</h3>{children && <p>{children}</p>}{action}</div>;
+function EmptyState({ title, children, action }: { title: string; children?: ReactNode; action?: ReactNode }) {
+  return <div className="gkm-empty"><GitPullRequest size={25} aria-hidden="true" /><h3>{title}</h3>{children && <p>{children}</p>}{action}</div>;
+}
+
+function MergeRequestListSkeleton() {
+  return <div role="status" aria-label={tx("正在同步合并请求")} aria-busy="true">
+    {[0, 1, 2, 3].map(index => <div className="gkm-row" key={index} aria-hidden="true">
+      <div className="gkm-row-top"><Skeleton width={14} height={14} /><Skeleton width={`${76 - index * 7}%`} height={13} /></div>
+      <div className="gkm-skeleton-lines"><Skeleton width="57%" /><Skeleton width="81%" /><div className="gkm-skeleton-inline"><Skeleton width="42%" /><Skeleton width="25%" /></div></div>
+    </div>)}
+  </div>;
+}
+
+function MergeRequestDetailSkeleton() {
+  return <div className="gkm-detail-skeleton" role="status" aria-label={tx("正在加载合并请求")} aria-busy="true">
+    <header className="gkm-detail-head" aria-hidden="true">
+      <div className="gkm-detail-kicker"><Skeleton width={15} height={15} /><Skeleton width="24%" /><Skeleton width={32} /><Skeleton width={38} /></div>
+      <div className="gkm-skeleton-title"><Skeleton width="68%" height={24} /></div>
+      <div className="gkm-detail-branches"><Skeleton width="28%" height={22} /><Skeleton width={13} /><Skeleton width="12%" height={22} /><Skeleton width="18%" /></div>
+    </header>
+    <div className="gkm-tabs gkm-skeleton-tabs" aria-hidden="true">{[0, 1, 2].map(index => <Skeleton key={index} width={36} height={12} />)}</div>
+    <div className="gkm-detail-panels" aria-hidden="true"><div className="gkm-panel gkm-overview">
+      <div className="gkm-description"><Skeleton width={45} height={12} /><div className="gkm-skeleton-lines gkm-skeleton-description">{[94, 86, 97, 63].map(width => <Skeleton key={width} width={`${width}%`} />)}</div>
+        <div className="gkm-author"><Skeleton width={27} height={27} circle /><div className="gkm-skeleton-lines"><Skeleton width={90} /><Skeleton width={130} height={9} /></div></div>
+        <div className="gkm-reviewed"><Skeleton width={70} /><Skeleton width={82} /></div>
+      </div>
+      <aside className="gkm-checks"><Skeleton width={58} height={12} />{[0, 1, 2, 3].map(index => <div className="gkm-check" key={index}><Skeleton width={15} height={15} circle /><div className="gkm-skeleton-lines"><Skeleton width={55} height={9} /><Skeleton width={135} /></div></div>)}</aside>
+    </div></div>
+    <footer className="gkm-detail-foot" aria-hidden="true"><Skeleton width="30%" /><Skeleton width={85} height={32} /></footer>
+  </div>;
+}
+
+function MergeRequestChangesSkeleton() {
+  return <div className="gkm-changes-skeleton" role="status" aria-label={tx("正在加载差异")} aria-busy="true">
+    <aside className="gkm-skeleton-files" aria-hidden="true">{[0, 1, 2, 3, 4, 5, 6].map(index => <div className="gkm-skeleton-file" key={index}>
+      <Skeleton width={10} height={12} /><div className="gkm-skeleton-lines"><Skeleton width={`${70 - index % 3 * 12}%`} height={12} /><Skeleton width="90%" /></div>
+    </div>)}</aside>
+    <div className="gkm-skeleton-code"><div className="gkm-skeleton-code-head" aria-hidden="true"><Skeleton width={12} height={12} /><Skeleton width="48%" height={12} /></div>
+      <div className="gkm-skeleton-code-stats" aria-hidden="true"><Skeleton width={26} /><Skeleton width={20} /></div>
+      <div aria-hidden="true"><CodeSkeleton label={tx("正在加载差异")} rowCount={16} /></div>
+    </div>
+  </div>;
+}
+
+function MergeRequestDiscussionSkeleton() {
+  return <div role="status" aria-label={tx("正在加载讨论")} aria-busy="true">{[0, 1, 2].map(index => <article className="gkm-thread" key={index} aria-hidden="true"><div className="gkm-note">
+    <Skeleton width={27} height={27} circle /><div><div className="gkm-note-meta"><Skeleton width={75} /><Skeleton width={105} height={9} /></div><div className="gkm-skeleton-lines"><Skeleton width={`${85 - index * 8}%`} /><Skeleton width={`${62 + index * 6}%`} /></div></div>
+  </div></article>)}</div>;
 }
 
 export interface MergeRequestEntryProps {
@@ -193,7 +243,7 @@ export function MergeRequestPopover({ theme, snapshot, configured, error, open, 
         {failure && <Banner tone="error" action={authError && onConfigure ? <button className="gkm-text-button" type="button" onClick={onConfigure}>{tx("更新凭据")}</button> : undefined}>{translateNativeMessage(failure)}{hasCache && <small>{tx("正在显示上次同步的结果。")}</small>}</Banner>}
         {snapshot?.stale && !failure && <Banner>{tx("缓存可能已过期，刷新后确认最新状态。")}</Banner>}
         {snapshot?.persistenceError && <Banner>{tx("已读记录保存失败，下次启动可能再次显示新提醒。")}</Banner>}
-        {!hasCache && busy ? <EmptyState title={tx("正在同步合并请求")} busy>{tx("首次同步会建立基线，已有请求不会全部标为新。")}</EmptyState> : !hasCache && failure ? <EmptyState title={tx("暂时无法同步")}>{tx("连接恢复后可以重试。")}{configure}</EmptyState> : visible.length === 0 ? <EmptyState title={filter === "all" ? tx("没有相关的开放请求") : tx("这个角色下暂无请求")}>{filter === "all" ? tx("新请求会在这里出现。") : tx("可以切换到全部，查看其他相关请求。")}</EmptyState> : visible.map(item => <MergeRequestRow key={item.id} item={item} unread={!!snapshot?.unseenIds.includes(item.id)} onSelect={onSelect} />)}
+        {!hasCache && busy ? <MergeRequestListSkeleton /> : !hasCache && failure ? <EmptyState title={tx("暂时无法同步")}>{tx("连接恢复后可以重试。")}{configure}</EmptyState> : visible.length === 0 ? <EmptyState title={filter === "all" ? tx("没有相关的开放请求") : tx("这个角色下暂无请求")}>{filter === "all" ? tx("新请求会在这里出现。") : tx("可以切换到全部，查看其他相关请求。")}</EmptyState> : visible.map(item => <MergeRequestRow key={item.id} item={item} unread={!!snapshot?.unseenIds.includes(item.id)} onSelect={onSelect} />)}
       </>}
     </div>
     <footer className="gkm-list-foot"><span>{busy ? tx("正在同步…") : hasCache ? tf("上次同步 {0}", dateLabel(snapshot!.lastCheckedAt)) : tx("同步所有项目的相关请求")}</span><span>{tx("打开列表不会清除新提醒")}</span></footer>
@@ -230,12 +280,17 @@ export interface MergeRequestDetailProps {
   discussionsError: string | null;
   onRefresh: () => Promise<void>;
   onReviewLatest: () => Promise<void>;
+  onDownloadDiff: (review: MrDetail) => Promise<MrDownloadedDiff | null>;
   onMerge: (options: MrMergeOptions) => Promise<MrMergeResult>;
+  onCommitMessages: () => Promise<MrCommitMessages>;
+  onCancel: () => Promise<MrActionResult>;
+  onApprove: (reviewedSha: string) => Promise<MrActionResult>;
   onOpenExternal: () => void;
   onBackList: () => void;
   onBackWorkspace: () => void;
   onTabChange: (tab: MergeRequestTab) => void;
-  renderDiff: (files: CommitFile[], selected: CommitFile | null, onSelect: (file: CommitFile | null) => void, sourceKey: string) => ReactNode;
+  onCreateDiffComment?: (position: MrDiffCommentPosition, body: string) => Promise<MrDiffCommentResult>;
+  renderDiff: (files: CommitFile[], selected: CommitFile | null, onSelect: (file: CommitFile | null) => void, sourceKey: string, lineComments?: MrLineCommentActions) => ReactNode;
 }
 
 function failureKind(cause: unknown): string | null {
@@ -251,12 +306,28 @@ function CheckRow({ label, children, good, unknown }: { label: string; children:
 }
 
 export function MergeRequestDetail(props: MergeRequestDetailProps) {
-  const { theme, detail, latest, snapshot, loading, error, files, diffVersion, diffLoading, diffError, discussions, discussionsLoading, discussionsError, onRefresh, onReviewLatest, onMerge, onOpenExternal, onBackList, onBackWorkspace, onTabChange, renderDiff } = props;
+  const { theme, detail, latest, snapshot, loading, error, files, diffVersion, diffLoading, diffError, discussions, discussionsLoading, discussionsError, onRefresh, onReviewLatest, onMerge, onCancel, onApprove, onOpenExternal, onBackList, onBackWorkspace, onTabChange, renderDiff } = props;
   const [tab, setTab] = useState<MergeRequestTab>("overview");
+  const [downloadOpen, setDownloadOpen] = useState(false);
   const [selectedPath, setSelectedPath] = useState<string | null | undefined>(undefined);
-  const [view, setView] = useState<"detail" | "confirm" | "result">("detail");
+  const [view, setView] = useState<"detail" | "confirm" | "cancel" | "result">("detail");
   const [squash, setSquash] = useState(false);
   const [deleteSource, setDeleteSource] = useState(false);
+  const [editMessages, setEditMessages] = useState(false);
+  const [mergeMessage, setMergeMessage] = useState("");
+  const [squashMessage, setSquashMessage] = useState("");
+  const [messageDefaults, setMessageDefaults] = useState<MrCommitMessages | null>(null);
+  const [messageDefaultsKey, setMessageDefaultsKey] = useState<string | null>(null);
+  const [messagesLoading, setMessagesLoading] = useState(false);
+  const [messagesError, setMessagesError] = useState<string | null>(null);
+  const [messagesRetry, setMessagesRetry] = useState(0);
+  const [messageEditorHeight, setMessageEditorHeight] = useState(0);
+  const messageEditorRef = useRef<HTMLDivElement>(null);
+  const messagesEditedRef = useRef({ merge: false, squash: false });
+  const commitMessagesRef = useRef(props.onCommitMessages);
+  commitMessagesRef.current = props.onCommitMessages;
+  const [actionResult, setActionResult] = useState<MrActionResult | null>(null);
+  const [pendingAction, setPendingAction] = useState<"cancel" | "approve" | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [reviewing, setReviewing] = useState(false);
@@ -286,16 +357,74 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
   );
   const selectedFile = selectedPath === null ? null : files.find(file => file.path === selectedPath) || files[0] || null;
   const sourceKey = `mr:${summary?.projectId}:${summary?.iid}:${diffVersion?.id ?? "latest"}:${reviewedRefs?.baseSha || ""}:${reviewedRefs?.startSha || ""}:${reviewedSha}`;
-  const diff = useMemo(() => renderDiff(files, selectedFile, file => setSelectedPath(file?.path ?? null), sourceKey), [renderDiff, files, selectedFile, sourceKey]);
-  const remoteState = authoritative?.summary.state;
+  const messagesReviewKey = `${summary?.id}:${diffVersion?.id ?? (detail ? reviewVersion(detail)?.id : "")}:${reviewedRefs?.baseSha || ""}:${reviewedRefs?.startSha || ""}:${reviewedSha}:${summary?.targetBranch || ""}`;
+  const commentFile = diffVersion?.files.find(file => (file.deletedFile ? file.oldPath : file.newPath) === selectedFile?.path);
+  const commentDisabledReason = versionChanged ? tx("合并请求版本已变化，请先查看最新改动。")
+    : loading || diffLoading ? tx("正在读取差异…")
+    : snapshot?.error || snapshot?.stale ? tx("连接或缓存状态异常，请刷新后再评论。") : undefined;
+  const lineComments = useMemo<MrLineCommentActions | undefined>(() => commentFile && diffVersion && props.onCreateDiffComment ? {
+    oldPath: commentFile.oldPath, newPath: commentFile.newPath, refs: diffVersion.refs, discussions,
+    disabledReason: commentDisabledReason, onSubmit: props.onCreateDiffComment, onOpenExternal,
+  } : undefined, [commentFile, diffVersion, discussions, commentDisabledReason, props.onCreateDiffComment, onOpenExternal]);
+  const diff = useMemo(() => renderDiff(files, selectedFile, file => setSelectedPath(file?.path ?? null), sourceKey, lineComments), [renderDiff, files, selectedFile, sourceKey, lineComments]);
+  const remoteState = actionResult?.state === "closed" && !actionResult.detail ? "closed" : authoritative?.summary.state;
   const alreadyMerged = remoteState === "merged";
+  const viewerActions = mrViewerActions(authoritative, snapshot?.user);
+  const alreadyApproved = viewerActions.approved || actionResult?.state === "approved" && !actionResult.detail;
   const connectionBlocked = !!error || !!snapshot?.error || !!snapshot?.stale;
-  const mergeBlocked = !detail || !authoritative?.canMerge || !reviewedSha || !reviewedRefs || !reviewVersion(detail) || versionChanged || connectionBlocked || loading || diffLoading || reviewing || refreshing || needsRecheck || submitting || summary?.draft || remoteState !== "opened" || !!result;
+  const actionBlocked = connectionBlocked || loading || reviewing || refreshing || needsRecheck || submitting || !!result || actionResult?.state === "uncertain";
+  const approvalBlocked = !detail || actionBlocked || alreadyApproved || !viewerActions.canApprove || !reviewedSha || !reviewedRefs || !reviewVersion(detail) || versionChanged || diffLoading;
+  const cancelBlocked = actionBlocked || !viewerActions.canCancel;
+  const mergeBlocked = !detail || !authoritative?.canMerge || !reviewedSha || !reviewedRefs || !reviewVersion(detail) || versionChanged || actionBlocked || diffLoading || summary?.draft || remoteState !== "opened";
+  const downloadUnavailable = versionChanged ? tx("合并请求版本已变化，请先查看最新改动。")
+    : connectionBlocked ? tx("连接或缓存状态异常，请刷新后再下载。")
+    : loading || reviewing || refreshing ? tx("正在加载合并请求")
+    : !detail || !reviewVersion(detail) ? tx("差异版本尚未就绪。") : null;
+  const messagesReady = messageDefaultsKey === messagesReviewKey && messageDefaults?.mrId === summary?.id && messageDefaults?.sha === reviewedSha && messageDefaults?.targetBranch === summary?.targetBranch;
+  const mergeSubmitBlocked = mergeBlocked || editMessages && (!messagesReady || messagesLoading || !!messagesError);
   const policy = authoritative?.squashPolicy || "default_off";
   const effectiveSquash = policy === "always" ? true : policy === "never" ? false : squash;
   const deleteRequired = !!authoritative?.deleteSourceRequired;
   const deleteAllowed = authoritative?.deleteSourceAllowed === true || deleteRequired;
   const effectiveDelete = deleteRequired || deleteAllowed && deleteSource;
+
+  useLayoutEffect(() => {
+    const content = messageEditorRef.current;
+    if (!content) return;
+    const measure = () => setMessageEditorHeight(content.getBoundingClientRect().height);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [summary?.id, view, remoteState]);
+
+  useEffect(() => {
+    if (!detail) return;
+    setSquash(detail.squash);
+    setDeleteSource(detail.deleteSourceDefault);
+    setMergeMessage(detail.mergeCommitMessage || "");
+    setSquashMessage(detail.squashCommitMessage || "");
+    messagesEditedRef.current = { merge: false, squash: false };
+    setMessageDefaults(null);
+    setMessageDefaultsKey(null);
+  }, [detail?.summary.id]);
+
+  useEffect(() => {
+    if (!editMessages || messagesReady) { setMessagesLoading(false); return; }
+    let cancelled = false;
+    setMessagesLoading(true);
+    setMessagesError(null);
+    void commitMessagesRef.current().then(defaults => {
+      if (cancelled) return;
+      setMessageDefaults(defaults);
+      setMessageDefaultsKey(messagesReviewKey);
+      if (!messagesEditedRef.current.merge) setMergeMessage(defaults.mergeCommitMessage);
+      if (!messagesEditedRef.current.squash) setSquashMessage(defaults.squashCommitMessage);
+    }).catch(cause => {
+      if (!cancelled) setMessagesError(mrErrorMessage(cause));
+    }).finally(() => { if (!cancelled) setMessagesLoading(false); });
+    return () => { cancelled = true; };
+  }, [editMessages, messagesReviewKey, messagesReady, messagesRetry]);
 
   useEffect(() => { aliveRef.current = true; return () => { aliveRef.current = false; }; }, []);
   useEffect(() => {
@@ -315,6 +444,9 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
   useEffect(() => {
     if (view === "confirm" && mergeBlocked && !submitting) setView("detail");
   }, [view, mergeBlocked, submitting]);
+  useEffect(() => {
+    if (view === "cancel" && cancelBlocked && !submitting) setView("detail");
+  }, [view, cancelBlocked, submitting]);
 
   function changeTab(value: MergeRequestTab) {
     setTab(value);
@@ -327,7 +459,7 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
     setNotice(null);
     try {
       await onRefresh();
-      if (aliveRef.current) setNeedsRecheck(false);
+      if (aliveRef.current) { setNeedsRecheck(false); setActionResult(null); }
     } catch (cause) {
       if (aliveRef.current) setNotice(mrErrorMessage(cause));
     } finally { if (aliveRef.current) setRefreshing(false); }
@@ -346,20 +478,46 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
   }
 
   function beginMerge() {
-    if (mergeBlocked || !authoritative) return;
-    setSquash(authoritative.squash);
-    setDeleteSource(authoritative.deleteSourceDefault);
+    if (mergeSubmitBlocked || !authoritative) return;
     setView("confirm");
     setNotice(null);
   }
 
+  async function submitAction(action: "cancel" | "approve") {
+    if (submitRef.current || (action === "cancel" ? cancelBlocked : approvalBlocked)) return;
+    submitRef.current = true;
+    setSubmitting(true);
+    setPendingAction(action);
+    setNotice(null);
+    setActionResult(null);
+    try {
+      const next = await (action === "cancel" ? onCancel() : onApprove(reviewedSha));
+      if (aliveRef.current) {
+        setActionResult(next);
+        setNeedsRecheck(next.state === "uncertain" || !next.detail);
+        setView("detail");
+      }
+    } catch (cause) {
+      if (aliveRef.current) {
+        setNotice(mrErrorMessage(cause));
+        setNeedsRecheck(true);
+        setView("detail");
+      }
+    } finally {
+      submitRef.current = false;
+      if (aliveRef.current) { setSubmitting(false); setPendingAction(null); }
+    }
+  }
+
   async function merge() {
-    if (submitRef.current || mergeBlocked) return;
+    if (submitRef.current || mergeSubmitBlocked) return;
     submitRef.current = true;
     setSubmitting(true);
     setNotice(null);
     try {
-      const next = await onMerge({ reviewedSha, squash: effectiveSquash, deleteSource: effectiveDelete });
+      const next = await onMerge({ reviewedSha, squash: effectiveSquash, deleteSource: effectiveDelete,
+        mergeCommitMessage: editMessages && messagesEditedRef.current.merge && mergeMessage.trim() ? mergeMessage : undefined,
+        squashCommitMessage: editMessages && effectiveSquash && messagesEditedRef.current.squash && squashMessage.trim() ? squashMessage : undefined });
       if (aliveRef.current) {
         // Only this submission's confirmed result celebrates; opening or refreshing an already merged request stays still.
         setAnimateMergeCompletion(next.state === "merged" && !window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -376,11 +534,29 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
     } finally { submitRef.current = false; if (aliveRef.current) setSubmitting(false); }
   }
 
-  const backButtons = <><button className="gkm-text-button" type="button" onClick={onBackList} disabled={submitting}><ChevronLeft size={14} aria-hidden="true" />{tx("返回列表")}</button><div className="gkm-head-actions"><button className="gkm-icon-button" type="button" title={tx("在 GitLab 中打开")} aria-label={tx("在 GitLab 中打开")} onClick={onOpenExternal} disabled={!detail}><ExternalLink size={15} aria-hidden="true" /></button><button className="gkm-text-button" type="button" onClick={onBackWorkspace} disabled={submitting}>{tx("返回工作区")}</button></div></>;
-  if (!detail) return <section className="gkm-detail" style={themeStyle(theme)} aria-label={tx("合并请求详情")}><div className="gkm-detail-nav">{backButtons}</div>{error ? <><Banner tone="error">{translateNativeMessage(error)}</Banner><EmptyState title={tx("无法加载合并请求")} action={<button className="gkm-button" type="button" onClick={refresh} disabled={refreshing}>{tx("重试")}</button>} /></> : <EmptyState title={loading ? tx("正在加载合并请求") : tx("选择一条合并请求")} busy={loading} />}</section>;
-  const blockedExplanation = versionChanged ? tx("合并请求版本已变化，请先查看最新改动。") : connectionBlocked ? tx("连接或缓存状态异常，请刷新后再合并。") : needsRecheck ? tx("上次操作失败，请刷新状态后重试。") : !reviewedRefs || !reviewedSha || !reviewVersion(detail) ? tx("差异版本尚未就绪。") : authoritative?.blockedReasons[0] ? translateNativeMessage(authoritative.blockedReasons[0]) : summary!.draft ? tx("草稿暂时无法合并。") : remoteState === "closed" ? tx("这条请求已关闭。") : tx("由 GitLab 校验项目规则与权限");
+  const backButtons = <><button className="gkm-text-button" type="button" onClick={onBackList} disabled={submitting}><ChevronLeft size={14} aria-hidden="true" />{tx("返回列表")}</button><div className="gkm-head-actions"><button className="gkm-button gkm-download-entry" type="button" onClick={() => setDownloadOpen(true)} disabled={!detail || submitting || loading || reviewing || refreshing} aria-haspopup="dialog"><Download size={14} aria-hidden="true" />{tx("下载差异")}</button><button className="gkm-icon-button" type="button" title={tx("在 GitLab 中打开")} aria-label={tx("在 GitLab 中打开")} onClick={onOpenExternal} disabled={!detail}><ExternalLink size={15} aria-hidden="true" /></button><button className="gkm-text-button" type="button" onClick={onBackWorkspace} disabled={submitting}>{tx("返回工作区")}</button></div></>;
+  if (!detail) return <section className="gkm-detail" style={themeStyle(theme)} aria-label={tx("合并请求详情")}><div className="gkm-detail-nav">{backButtons}</div>{error ? <><Banner tone="error">{translateNativeMessage(error)}</Banner><EmptyState title={tx("无法加载合并请求")} action={<button className="gkm-button" type="button" onClick={refresh} disabled={refreshing}>{tx("重试")}</button>} /></> : loading ? <MergeRequestDetailSkeleton /> : <EmptyState title={tx("选择一条合并请求")} />}</section>;
+  const blockedExplanation = versionChanged ? tx("合并请求版本已变化，请先查看最新改动。") : connectionBlocked ? tx("连接或缓存状态异常，请刷新后再合并。") : needsRecheck ? tx(actionResult && actionResult.state !== "uncertain" ? "请刷新最新状态后继续操作。" : "上次操作失败，请刷新状态后重试。") : !reviewedRefs || !reviewedSha || !reviewVersion(detail) ? tx("差异版本尚未就绪。") : authoritative?.blockedReasons[0] ? translateNativeMessage(authoritative.blockedReasons[0]) : summary!.draft ? tx("草稿暂时无法合并。") : remoteState === "closed" ? tx("这条请求已关闭。") : tx("由 GitLab 校验项目规则与权限");
   const tabs: Array<[MergeRequestTab, string]> = [["overview", "概览"], ["changes", "改动"], ["discussion", "讨论"]];
   const successful = alreadyMerged || result?.state === "merged";
+  const controlsDisabled = actionBlocked || versionChanged || remoteState !== "opened";
+  const mergeControls = <div className="gkm-merge-controls">
+    <div className="gkm-merge-options" role="group" aria-label={tx("合并选项")}>
+      <label title={tx(deleteRequired ? "项目要求删除源分支" : !deleteAllowed ? "没有删除源分支的权限" : "合并后删除源分支")}><input type="checkbox" checked={effectiveDelete} disabled={controlsDisabled || deleteRequired || !deleteAllowed} onChange={event => setDeleteSource(event.target.checked)} /><span>{tx("删除源分支")}</span></label>
+      <label title={tx(policy === "always" ? "项目要求压缩提交" : policy === "never" ? "项目禁止压缩提交" : "将本次改动整理为一个提交")}><input type="checkbox" checked={effectiveSquash} disabled={controlsDisabled || policy === "always" || policy === "never"} onChange={event => setSquash(event.target.checked)} /><span>{tx("压缩提交")}</span></label>
+      <label><input type="checkbox" checked={editMessages} disabled={controlsDisabled} aria-controls="gkm-commit-messages" aria-expanded={editMessages} onChange={event => setEditMessages(event.target.checked)} /><span>{tx("编辑提交消息")}</span></label>
+    </div>
+    <div id="gkm-commit-messages" className="gkm-commit-editor" data-open={editMessages} style={{ height: editMessages ? messageEditorHeight : 0 }} aria-hidden={!editMessages} ref={element => { if (element) element.inert = !editMessages; }}>
+      <div ref={messageEditorRef} className="gkm-commit-editor-content">
+      {messagesLoading && <div className="gkm-sha-check" role="status"><LoaderCircle className="gkm-spin" size={13} aria-hidden="true" />{tx("正在读取默认提交消息…")}</div>}
+      {messagesError && <Banner tone="error" action={<button className="gkm-text-button" type="button" onClick={() => setMessagesRetry(value => value + 1)}>{tx("重试")}</button>}>{translateNativeMessage(messagesError)}</Banner>}
+      <div className="gkm-commit-messages" aria-busy={messagesLoading}>
+        <label><span>{tx("合并提交消息")}</span><textarea rows={4} value={mergeMessage} disabled={!editMessages || controlsDisabled || !messagesReady || messagesLoading || !!messagesError} placeholder={tx("留空则使用 GitLab 默认消息")} onChange={event => { messagesEditedRef.current.merge = true; setMergeMessage(event.target.value); }} /></label>
+        {effectiveSquash && <label><span>{tx("压缩提交消息")}</span><textarea rows={4} value={squashMessage} disabled={!editMessages || controlsDisabled || !messagesReady || messagesLoading || !!messagesError} placeholder={tx("留空则使用 GitLab 默认消息")} onChange={event => { messagesEditedRef.current.squash = true; setSquashMessage(event.target.value); }} /></label>}
+      </div>
+      </div>
+    </div>
+  </div>;
   return <section className="gkm-detail" style={themeStyle(theme)} aria-labelledby="gkm-detail-title">
     <div className="gkm-detail-nav">{backButtons}</div>
     <header className="gkm-detail-head"><div className="gkm-detail-kicker"><GitPullRequest size={15} aria-hidden="true" /><span className="gkm-detail-project" title={summary!.projectPathWithNamespace}>{summary!.projectPathWithNamespace}</span><span>!{summary!.iid}</span><span className="gkm-tag">{tx(alreadyMerged ? "已合并" : remoteState === "closed" ? "已关闭" : summary!.draft ? "草稿" : "开放")}</span>{summary!.roles.map(role => <span className="gkm-role" key={role}>{roleLabel(role)}</span>)}</div><h2 ref={titleRef} tabIndex={-1} id="gkm-detail-title">{summary!.title}</h2><div className="gkm-detail-branches"><code title={summary!.sourceBranch}>{summary!.sourceBranch}</code><ArrowRight size={13} aria-hidden="true" /><code title={summary!.targetBranch}>{summary!.targetBranch}</code><span>{tf("由 {0} 发起", summary!.author.name || summary!.author.username)}</span></div></header>
@@ -388,12 +564,15 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
     {snapshot?.error && !error && <Banner tone="error">{translateNativeMessage(snapshot.error.message)}</Banner>}
     {snapshot?.stale && !snapshot.error && <Banner>{tx("缓存可能已过期，刷新后确认最新状态。")}</Banner>}
     {notice && <Banner tone="error">{translateNativeMessage(notice)}</Banner>}
+    {actionResult && <Banner tone={actionResult.state === "uncertain" ? "warning" : "info"} action={actionResult.state === "uncertain" || !actionResult.detail ? <button className="gkm-text-button" type="button" onClick={refresh} disabled={refreshing}>{tx("刷新状态")}</button> : undefined}>{translateNativeMessage(actionResult.message)}</Banner>}
     {versionChanged && !successful && <Banner action={<button className="gkm-text-button" type="button" onClick={reviewLatest} disabled={reviewing || submitting}>{reviewing && <LoaderCircle className="gkm-spin" size={13} />}{tx("查看最新改动")}</button>}>{tx("合并请求有变化，当前差异仍保留你正在查看的版本。")}</Banner>}
-    {view === "confirm" ? <>
+    {view === "cancel" ? <>
+      <div className="gkm-confirm"><div className="gkm-confirm-icon"><X size={24} aria-hidden="true" /></div><h3>{tf("取消合并请求 !{0}？", summary!.iid)}</h3><p>{tx("这条请求将在 GitLab 中关闭，源分支和提交会保留。")}</p><dl className="gkm-confirm-summary"><div><dt>{tx("项目")}</dt><dd>{summary!.projectPathWithNamespace}</dd></div><div><dt>{tx("源分支")}</dt><dd>{summary!.sourceBranch}</dd></div><div><dt>{tx("目标分支")}</dt><dd>{summary!.targetBranch}</dd></div></dl></div>
+      <footer className="gkm-detail-foot"><span>{tx("以 GitLab 实际状态为准")}</span><div className="gkm-foot-actions"><button className="gkm-button" type="button" onClick={() => setView("detail")} disabled={submitting}>{tx("返回详情")}</button><button className="gkm-button gkm-button-danger" type="button" onClick={() => void submitAction("cancel")} disabled={cancelBlocked}>{submitting ? <LoaderCircle className="gkm-spin" size={14} aria-hidden="true" /> : <X size={14} aria-hidden="true" />}{tx(submitting ? "正在取消…" : "确认取消")}</button></div></footer>
+    </> : view === "confirm" ? <>
       <div className="gkm-confirm"><div className="gkm-confirm-icon"><GitMerge size={24} aria-hidden="true" /></div><h3>{tf("将 !{0} 合并到 {1}", summary!.iid, summary!.targetBranch)}</h3><p>{tx("提交后，GitLab 将按项目规则执行合并。")}</p><dl className="gkm-confirm-summary"><div><dt>{tx("项目")}</dt><dd>{summary!.projectPathWithNamespace}</dd></div><div><dt>{tx("源分支")}</dt><dd>{summary!.sourceBranch}</dd></div><div><dt>{tx("目标分支")}</dt><dd>{summary!.targetBranch}</dd></div><div><dt>{tx("当前查看的版本")}</dt><dd><code title={reviewedSha}>{reviewedSha.slice(0, 12)}</code></dd></div></dl>
-        <label className="gkm-option"><input type="checkbox" checked={effectiveSquash} disabled={submitting || policy === "always" || policy === "never"} onChange={event => setSquash(event.target.checked)} /><span>{tx("压缩提交（Squash）")}<small>{tx(policy === "always" ? "项目要求压缩提交" : policy === "never" ? "项目禁止压缩提交" : "将本次改动整理为一个提交")}</small></span></label>
-        <label className="gkm-option"><input type="checkbox" checked={effectiveDelete} disabled={submitting || deleteRequired || !deleteAllowed} onChange={event => setDeleteSource(event.target.checked)} /><span>{tx("合并后删除源分支")}<small>{tx(deleteRequired ? "项目要求删除源分支" : !deleteAllowed ? "没有删除源分支的权限" : "只影响远程源分支，本地分支保持原样")}</small></span></label><div className="gkm-sha-check"><ShieldCheck size={15} aria-hidden="true" />{tx("合并时再次核对源版本与权限")}</div>
-      </div><footer className="gkm-detail-foot"><span>{tx("不会自动更新本地仓库")}</span><div className="gkm-foot-actions"><button className="gkm-button" type="button" onClick={() => setView("detail")} disabled={submitting}>{tx("返回详情")}</button><button className="gkm-button gkm-button-primary" type="button" onClick={merge} disabled={mergeBlocked}>{submitting ? <LoaderCircle className="gkm-spin" size={14} /> : <GitMerge size={14} />}{tx(submitting ? "正在提交…" : "确认合并")}</button></div></footer>
+        {mergeControls}<div className="gkm-sha-check"><ShieldCheck size={15} aria-hidden="true" />{tx("合并时再次核对源版本与权限")}</div>
+      </div><footer className="gkm-detail-foot"><span>{tx("不会自动更新本地仓库")}</span><div className="gkm-foot-actions"><button className="gkm-button" type="button" onClick={() => setView("detail")} disabled={submitting}>{tx("返回详情")}</button><button className="gkm-button gkm-button-primary" type="button" onClick={merge} disabled={mergeSubmitBlocked}>{submitting ? <LoaderCircle className="gkm-spin" size={14} /> : <GitMerge size={14} />}{tx(submitting ? "正在提交…" : "确认合并")}</button></div></footer>
     </> : view === "result" || alreadyMerged ? <>
       <div className={`gkm-result${successful ? " is-success" : ""}`}>
         {successful ? <div className={`gkm-merge-completion${animateMergeCompletion ? " is-arriving" : ""}`} aria-hidden="true" onAnimationEnd={event => {
@@ -420,12 +599,17 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
       }}>{tabs.map(([value, label]) => <button type="button" role="tab" key={value} id={`gkm-tab-${value}`} aria-controls={`gkm-panel-${value}`} aria-selected={tab === value} tabIndex={tab === value ? 0 : -1} onClick={() => changeTab(value)}>{tx(label)}{value === "changes" && files.length > 0 && <span>{files.length}</span>}</button>)}<button className="gkm-icon-button gkm-tabs-refresh" type="button" onClick={refresh} disabled={refreshing || loading} title={tx("刷新状态")} aria-label={tx("刷新状态")}><RefreshCw size={14} className={refreshing || loading ? "gkm-spin" : undefined} aria-hidden="true" /></button></div>
       <div className="gkm-detail-panels">
         <div className="gkm-panel gkm-overview" id="gkm-panel-overview" role="tabpanel" aria-labelledby="gkm-tab-overview" hidden={tab !== "overview"}><div className="gkm-description"><h3>{tx("说明")}</h3>{detail.description ? <div className="gkm-prose">{detail.description}</div> : <p className="gkm-muted">{tx("这条请求没有填写说明。")}</p>}<div className="gkm-author"><span className="gkm-avatar" aria-hidden="true">{(summary!.author.name || summary!.author.username).slice(0, 1)}</span><div>{summary!.author.name || summary!.author.username}<small>{tf("最后更新 {0}", dateLabel(summary!.updatedAt))}</small></div></div><div className="gkm-reviewed">{tx("当前查看的版本")}<code title={reviewedSha}>{reviewedSha ? reviewedSha.slice(0, 12) : tx("尚未就绪")}</code></div></div>
-          <aside className="gkm-checks"><h3>{tx("合并条件")}</h3><CheckRow label={tx("流水线")} good={authoritative?.pipelineStatus === "success"} unknown={!authoritative?.pipelineStatus || ["running", "pending", "preparing", "created", "scheduled"].includes(authoritative.pipelineStatus)}>{statusLabel(authoritative?.pipelineStatus || null)}</CheckRow><CheckRow label={tx("审批")} good={authoritative?.approvals.approved === true || authoritative?.approvals.approvalsRequired === 0} unknown={!authoritative?.approvals.readable || authoritative.approvals.approved === null}>{!authoritative?.approvals.readable ? tx("审批信息不可读") : authoritative.approvals.approvalsLeft && authoritative.approvals.approvalsLeft > 0 ? tf("还需 {0} 次审批", authoritative.approvals.approvalsLeft) : authoritative.approvals.approved === true ? tx("已通过") : authoritative.approvals.approvalsRequired === 0 ? tx("无需审批") : tx("等待审批")}</CheckRow><CheckRow label={tx("讨论")} good={authoritative?.blockingDiscussionsResolved === true} unknown={authoritative?.blockingDiscussionsResolved === null}>{authoritative?.blockingDiscussionsResolved === true ? tx("阻塞讨论已解决") : authoritative?.blockingDiscussionsResolved === false ? tx("仍有未解决的讨论") : tx("讨论状态未知")}</CheckRow><CheckRow label={tx("合并权限与规则")} good={authoritative?.canMerge === true} unknown={!authoritative?.summary.detailedMergeStatus}>{authoritative?.canMerge ? tx("GitLab 允许合并") : tx("暂时无法合并")}</CheckRow>{authoritative?.blockedReasons.length ? <ul className="gkm-blocked-reasons">{authoritative.blockedReasons.map((reason, index) => <li key={index}>{translateNativeMessage(reason)}</li>)}</ul> : null}<p className="gkm-check-note">{tx("权限、审批、CI 和冲突均以 GitLab 为准。")}</p></aside>
+          <aside className="gkm-checks"><h3>{tx("合并条件")}</h3><CheckRow label={tx("流水线")} good={authoritative?.pipelineStatus === "success"} unknown={!authoritative?.pipelineStatus || ["running", "pending", "preparing", "created", "scheduled"].includes(authoritative.pipelineStatus)}>{statusLabel(authoritative?.pipelineStatus || null)}</CheckRow><CheckRow label={tx("审批")} good={authoritative?.approvals.approved === true || authoritative?.approvals.approvalsRequired === 0} unknown={!authoritative?.approvals.readable || authoritative.approvals.approved === null}>{!authoritative?.approvals.readable ? tx("审批信息不可读") : authoritative.approvals.approvalsLeft && authoritative.approvals.approvalsLeft > 0 ? tf("还需 {0} 次审批", authoritative.approvals.approvalsLeft) : authoritative.approvals.approved === true ? tx("已通过") : authoritative.approvals.approvalsRequired === 0 ? tx("无需审批") : tx("等待审批")}</CheckRow><CheckRow label={tx("讨论")} good={authoritative?.blockingDiscussionsResolved === true} unknown={authoritative?.blockingDiscussionsResolved === null}>{authoritative?.blockingDiscussionsResolved === true ? tx("阻塞讨论已解决") : authoritative?.blockingDiscussionsResolved === false ? tx("仍有未解决的讨论") : tx("讨论状态未知")}</CheckRow><CheckRow label={tx("合并权限与规则")} good={authoritative?.canMerge === true && remoteState === "opened"} unknown={!authoritative?.summary.detailedMergeStatus}>{authoritative?.canMerge && remoteState === "opened" ? tx("GitLab 允许合并") : tx("暂时无法合并")}</CheckRow>{authoritative?.blockedReasons.length ? <ul className="gkm-blocked-reasons">{authoritative.blockedReasons.map((reason, index) => <li key={index}>{translateNativeMessage(reason)}</li>)}</ul> : null}<p className="gkm-check-note">{tx("权限、审批、CI 和冲突均以 GitLab 为准。")}</p></aside>
         </div>
-        <div className="gkm-panel gkm-changes" id="gkm-panel-changes" role="tabpanel" aria-labelledby="gkm-tab-changes" hidden={tab !== "changes"}>{diffError && <Banner tone="error" action={<button type="button" className="gkm-text-button" onClick={() => onTabChange("changes")}>{tx("重试")}</button>}>{translateNativeMessage(diffError)}</Banner>}{diffVersion?.truncated && <Banner action={<button className="gkm-text-button" type="button" onClick={onOpenExternal}>{tx("在 GitLab 中查看")}</button>}>{tx("GitLab 未返回完整差异，请在网页中继续查看。")}</Banner>}{diffLoading && files.length === 0 ? <EmptyState title={tx("正在加载差异")} busy /> : files.length ? <div className="gkm-diff">{diff}</div> : !diffError && <EmptyState title={tx("没有可显示的文件差异")} action={<button className="gkm-button" type="button" onClick={onOpenExternal}>{tx("在 GitLab 中查看")}</button>} />}</div>
-        <div className="gkm-panel gkm-discussions" id="gkm-panel-discussion" role="tabpanel" aria-labelledby="gkm-tab-discussion" hidden={tab !== "discussion"}>{discussionsError && <Banner tone="error" action={<button className="gkm-text-button" type="button" onClick={() => onTabChange("discussion")}>{tx("重试")}</button>}>{translateNativeMessage(discussionsError)}</Banner>}{discussionsLoading && discussions.length === 0 ? <EmptyState title={tx("正在加载讨论")} busy /> : discussions.length ? discussions.map(discussion => <article className="gkm-thread" key={discussion.id}>{discussion.notes.map(note => <div key={note.id} className={`gkm-note${note.system ? " is-system" : ""}`}><span className="gkm-avatar" aria-hidden="true">{(note.author.name || note.author.username).slice(0, 1)}</span><div><div className="gkm-note-meta"><strong>{note.author.name || note.author.username}</strong><span>{dateLabel(note.createdAt)}</span>{note.resolvable && <span className={note.resolved ? "gkm-resolved" : "gkm-unresolved"}>{note.resolved ? <Check size={11} aria-hidden="true" /> : <Clock3 size={11} aria-hidden="true" />}{tx(note.resolved ? "已解决" : "未解决")}</span>}{note.system && <span>{tx("系统消息")}</span>}</div><div className="gkm-prose">{note.body}</div></div></div>)}</article>) : !discussionsError && <EmptyState title={tx("暂无讨论")} /> }<p className="gkm-discussion-note">{tx("回复和解决讨论请在 GitLab 中操作。")}<button className="gkm-text-button" type="button" onClick={onOpenExternal}>{tx("在 GitLab 中打开")}<ExternalLink size={12} aria-hidden="true" /></button></p></div>
+        <div className="gkm-panel gkm-changes" id="gkm-panel-changes" role="tabpanel" aria-labelledby="gkm-tab-changes" hidden={tab !== "changes"}>{diffError && <Banner tone="error" action={<button type="button" className="gkm-text-button" onClick={() => onTabChange("changes")}>{tx("重试")}</button>}>{translateNativeMessage(diffError)}</Banner>}{diffVersion?.truncated && <Banner action={<button className="gkm-text-button" type="button" onClick={onOpenExternal}>{tx("在 GitLab 中查看")}</button>}>{tx("GitLab 未返回完整差异，请在网页中继续查看。")}</Banner>}{diffLoading && files.length === 0 ? <MergeRequestChangesSkeleton /> : files.length ? <div className="gkm-diff">{diff}</div> : !diffError && <EmptyState title={tx("没有可显示的文件差异")} action={<button className="gkm-button" type="button" onClick={onOpenExternal}>{tx("在 GitLab 中查看")}</button>} />}</div>
+        <div className="gkm-panel gkm-discussions" id="gkm-panel-discussion" role="tabpanel" aria-labelledby="gkm-tab-discussion" hidden={tab !== "discussion"}>{discussionsError && <Banner tone="error" action={<button className="gkm-text-button" type="button" onClick={() => onTabChange("discussion")}>{tx("重试")}</button>}>{translateNativeMessage(discussionsError)}</Banner>}{discussionsLoading && discussions.length === 0 ? <MergeRequestDiscussionSkeleton /> : discussions.length ? discussions.map(discussion => <article className="gkm-thread" key={discussion.id}>{discussion.notes.map(note => <div key={note.id} className={`gkm-note${note.system ? " is-system" : ""}`}><span className="gkm-avatar" aria-hidden="true">{(note.author.name || note.author.username).slice(0, 1)}</span><div><div className="gkm-note-meta"><strong>{note.author.name || note.author.username}</strong><span>{dateLabel(note.createdAt)}</span>{note.resolvable && <span className={note.resolved ? "gkm-resolved" : "gkm-unresolved"}>{note.resolved ? <Check size={11} aria-hidden="true" /> : <Clock3 size={11} aria-hidden="true" />}{tx(note.resolved ? "已解决" : "未解决")}</span>}{note.system && <span>{tx("系统消息")}</span>}</div><div className="gkm-prose">{note.body}</div></div></div>)}</article>) : !discussionsError && <EmptyState title={tx("暂无讨论")} /> }<p className="gkm-discussion-note">{tx("回复和解决讨论请在 GitLab 中操作。")}<button className="gkm-text-button" type="button" onClick={onOpenExternal}>{tx("在 GitLab 中打开")}<ExternalLink size={12} aria-hidden="true" /></button></p></div>
       </div>
-      <footer className="gkm-detail-foot"><span className="gkm-foot-hint">{mergeBlocked ? <AlertCircle size={13} aria-hidden="true" /> : <ShieldCheck size={13} aria-hidden="true" />}{blockedExplanation}</span><button type="button" className="gkm-button gkm-button-primary" onClick={beginMerge} disabled={mergeBlocked}><GitMerge size={14} aria-hidden="true" />{tx("合并请求")}</button></footer>
+      <footer className="gkm-detail-foot gkm-detail-foot-main">{remoteState === "opened" && mergeControls}<div className="gkm-foot-row"><span className="gkm-foot-hint">{mergeBlocked ? <AlertCircle size={13} aria-hidden="true" /> : <ShieldCheck size={13} aria-hidden="true" />}{blockedExplanation}</span><div className="gkm-foot-actions">
+        {remoteState === "opened" && viewerActions.showCancel && <button type="button" className="gkm-button" onClick={() => { if (!cancelBlocked) { setNotice(null); setView("cancel"); } }} disabled={cancelBlocked} title={tx("取消合并请求")}>{tx("取消")}</button>}
+        {remoteState === "opened" && viewerActions.showApprove && <button type="button" className="gkm-button" onClick={() => void submitAction("approve")} disabled={approvalBlocked} title={alreadyApproved ? tx("你已批准这条请求") : !authoritative?.canApprove ? tx("GitLab 暂不允许当前账号批准，请刷新状态或在 GitLab 中查看。") : versionChanged ? tx("合并请求版本已变化，请先查看最新改动。") : tx("批准当前查看的版本")}>{pendingAction === "approve" ? <LoaderCircle className="gkm-spin" size={14} aria-hidden="true" /> : <Check size={14} aria-hidden="true" />}{tx(pendingAction === "approve" ? "正在批准…" : alreadyApproved ? "已批准" : "批准")}</button>}
+        <button type="button" className="gkm-button gkm-button-primary" onClick={beginMerge} disabled={mergeSubmitBlocked}><GitMerge size={14} aria-hidden="true" />{tx("合并请求")}</button>
+      </div></div></footer>
     </>}
+    {downloadOpen && <MergeRequestDownload theme={theme} style={themeStyle(theme)} detail={detail} unavailable={downloadUnavailable} onDownload={props.onDownloadDiff} onClose={() => setDownloadOpen(false)} />}
   </section>;
 }

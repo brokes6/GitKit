@@ -44,6 +44,18 @@ test("native dynamic errors preserve Chinese paths, branch names and external ou
   }
 });
 
+test("merge request mutations translate native success, rejection and uncertain results", () => {
+  assert.equal(translateNativeMessage("GitLab 已确认取消合并请求"), "GitLab confirmed that the merge request was canceled.");
+  assert.equal(translateNativeMessage("GitLab 已确认批准当前版本"), "GitLab confirmed approval of the reviewed revision.");
+  for (const source of [
+    "批准结果尚未确认；请刷新状态或在 GitLab 核对，请勿重复提交",
+    "取消结果尚未确认；请刷新状态或在 GitLab 核对，请勿重复提交",
+    "操作结果尚未确认，请刷新状态或到 GitLab 核实，勿直接重复提交",
+    "GitLab 拒绝批准，请检查审批规则或在 GitLab 完成重新认证",
+    "已有合并请求操作正在进行，请等待结果",
+  ]) assert.doesNotMatch(translateNativeMessage(source), /[\u3400-\u9fff]/);
+});
+
 test("combined native errors translate both failures and prefer specific HTTP templates", () => {
   assert.equal(translateNativeMessage("当前分支没有未推送的提交；恢复分支失败：无效的提交哈希"),
     "This branch has no unpushed commits.\nCould not restore the branch: The commit hash is invalid.");

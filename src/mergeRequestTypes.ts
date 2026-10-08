@@ -21,6 +21,21 @@ export interface MrSummary {
   pipelineStatus: string | null;
 }
 export interface MrDiffRefs { baseSha: string; startSha: string; headSha: string }
+export interface MrDiffCommentPosition {
+  oldPath: string;
+  newPath: string;
+  oldLine: number | null;
+  newLine: number | null;
+}
+export interface MrDiffNotePosition extends MrDiffCommentPosition, MrDiffRefs {
+  positionType: string;
+}
+export interface MrDiffCommentResult {
+  state: "created" | "uncertain";
+  message: string;
+  discussion: MrDiscussion | null;
+}
+export interface MrDownloadedDiff { fileName: string; versionId: number; refs: MrDiffRefs }
 export interface MrDiffVersionInfo {
   id: number;
   createdAt: string;
@@ -54,6 +69,8 @@ export interface MrDetail {
   };
   blockingDiscussionsResolved: boolean | null;
   canMerge: boolean;
+  canClose: boolean;
+  canApprove: boolean;
   blockedReasons: string[];
   diffRefs: MrDiffRefs | null;
   diffVersions: MrDiffVersionInfo[];
@@ -62,6 +79,8 @@ export interface MrDetail {
   deleteSourceDefault: boolean;
   deleteSourceRequired: boolean;
   deleteSourceAllowed: boolean | null;
+  mergeCommitMessage: string | null;
+  squashCommitMessage: string | null;
 }
 export interface MrDiscussion {
   id: string;
@@ -75,6 +94,7 @@ export interface MrDiscussion {
     system: boolean;
     resolvable: boolean;
     resolved: boolean | null;
+    position?: MrDiffNotePosition | null;
   }>;
 }
 export interface MrMergeResult {
@@ -82,10 +102,30 @@ export interface MrMergeResult {
   message: string;
   summary: MrSummary | null;
 }
-export interface MrMergeOptions { reviewedSha: string; squash: boolean; deleteSource: boolean }
+export interface MrActionResult {
+  state: "closed" | "approved" | "uncertain";
+  message: string;
+  detail: MrDetail | null;
+}
+export interface MrMergeOptions {
+  reviewedSha: string;
+  squash: boolean;
+  deleteSource: boolean;
+  mergeCommitMessage?: string;
+  squashCommitMessage?: string;
+}
+export interface MrCommitMessages {
+  mrId: number;
+  projectId: number;
+  iid: number;
+  sha: string;
+  targetBranch: string;
+  mergeCommitMessage: string;
+  squashCommitMessage: string;
+}
 export interface MrApiError {
   message: string;
-  kind: "unauthorized" | "forbidden" | "not_found" | "rate_limit" | "network" | "timeout" | "server" | "unsupported" | "invalid_config" | "invalid_response" | "blocked" | "conflict" | "stale" | "uncertain";
+  kind: "unauthorized" | "forbidden" | "not_found" | "rate_limit" | "network" | "timeout" | "server" | "unsupported" | "invalid_config" | "invalid_input" | "invalid_response" | "blocked" | "conflict" | "stale" | "uncertain" | "save_failed";
   retryAfter: number | null;
 }
 export interface MrSnapshot {

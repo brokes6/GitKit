@@ -74,6 +74,10 @@ pub struct DiffVersionInfo {
     pub state: String,
     pub real_size: Option<String>,
     pub refs: DiffRefs,
+    // Older servers omit this documented field. A present null value means the
+    // diff is still processing; retain that distinction only inside the service.
+    #[serde(skip)]
+    patch_id_ready: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -95,6 +99,8 @@ pub struct Detail {
     pub approvals: ApprovalState,
     pub blocking_discussions_resolved: Option<bool>,
     pub can_merge: bool,
+    pub can_close: bool,
+    pub can_approve: bool,
     pub blocked_reasons: Vec<String>,
     pub diff_refs: Option<DiffRefs>,
     pub diff_versions: Vec<DiffVersionInfo>,
@@ -103,6 +109,8 @@ pub struct Detail {
     pub delete_source_default: bool,
     pub delete_source_required: bool,
     pub delete_source_allowed: Option<bool>,
+    pub merge_commit_message: Option<String>,
+    pub squash_commit_message: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -143,6 +151,39 @@ pub struct Note {
     pub system: bool,
     pub resolvable: bool,
     pub resolved: Option<bool>,
+    #[serde(default)]
+    pub position: Option<DiffNotePosition>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffCommentPosition {
+    pub old_path: String,
+    pub new_path: String,
+    pub old_line: Option<u64>,
+    pub new_line: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffNotePosition {
+    pub base_sha: String,
+    pub start_sha: String,
+    pub head_sha: String,
+    pub position_type: String,
+    pub old_path: String,
+    pub new_path: String,
+    pub old_line: Option<u64>,
+    pub new_line: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffCommentResult {
+    /// A transport failure never authorizes replaying the non-idempotent POST.
+    pub state: String,
+    pub message: String,
+    pub discussion: Option<Discussion>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -162,12 +203,63 @@ pub struct MergeResult {
     pub summary: Option<Summary>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionResult {
+    /// closed, approved, or uncertain; confirmed by a fresh read after the write.
+    pub state: String,
+    pub message: String,
+    pub detail: Option<Detail>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitMessages {
+    pub mr_id: u64,
+    pub project_id: u64,
+    pub iid: u64,
+    pub sha: String,
+    pub target_branch: String,
+    pub merge_commit_message: String,
+    pub squash_commit_message: String,
+}
+
 const PAGE_SIZE: usize = 100;
 const MAX_PAGES: usize = 200;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COLLECTION_BYTES: usize = 64 * 1024 * 1024;
 const MAX_DIFF_FILES: usize = 10_000;
 const MAX_LIST_ITEMS: usize = 5_000;
+const MAX_RAW_DIFF_BYTES: usize = 64 * 1024 * 1024;
+
+/// Kept in native code; the webview receives only the saved file's metadata.
+pub struct RawDiffDownload {
+    pub bytes: Vec<u8>,
+    pub version_id: u64,
+    pub refs: DiffRefs,
+}
+const MAX_COMMIT_MESSAGE_BYTES: usize = 1024 * 1024;
+
+const COMMIT_MESSAGES_QUERY: &str = r#"
+query GitKitCommitMessages($projectPath: ID!, $iid: String!) {
+  currentUser { id }
+  project(fullPath: $projectPath) {
+    id
+    fullPath
+    mergeRequest(iid: $iid) {
+      id
+      iid
+      diffHeadSha
+      sourceBranch
+      targetBranch
+      title
+      description
+      updatedAt
+      defaultMergeCommitMessage
+      defaultSquashCommitMessage
+    }
+  }
+}"#;
 
 impl ApiError {
     fn new(kind: &str, message: &str) -> Self {
@@ -202,6 +294,46 @@ fn network_error(error: reqwest::Error) -> ApiError {
     }
 }
 
+async fn response_json(
+    mut response: reqwest::Response,
+    is_merge: bool,
+    is_approval: bool,
+) -> Result<(Value, header::HeaderMap, usize), ApiError> {
+    let headers = response.headers().clone();
+    if !response.status().is_success() {
+        return Err(status_error(
+            response.status().as_u16(),
+            &headers,
+            is_merge,
+            is_approval,
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(ApiError::new(
+            "invalid_response",
+            "GitLab 响应超过读取上限，本次数据未完成同步",
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(network_error)? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err(ApiError::new(
+                "invalid_response",
+                "GitLab 响应超过读取上限，本次数据未完成同步",
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((
+        serde_json::from_slice(&bytes).map_err(|_| invalid_response())?,
+        headers,
+        bytes.len(),
+    ))
+}
+
 fn retry_after(value: Option<&str>) -> Option<u64> {
     let value = value?.trim();
     if let Ok(seconds) = value.parse::<u64>() {
@@ -213,11 +345,19 @@ fn retry_after(value: Option<&str>) -> Option<u64> {
     Some(at.saturating_sub(chrono::Utc::now().timestamp()).max(0) as u64)
 }
 
-fn status_error(status: u16, headers: &header::HeaderMap, is_merge: bool) -> ApiError {
+fn status_error(
+    status: u16,
+    headers: &header::HeaderMap,
+    is_merge: bool,
+    is_approval: bool,
+) -> ApiError {
     let mut error = match status {
         // GitLab's merge endpoint uses 401 for an authenticated user's missing
         // accept permission. It must not invalidate an otherwise valid account.
         401 if is_merge => ApiError::new("forbidden", "当前账号无权合并此请求，请检查目标分支权限"),
+        401 if is_approval => {
+            ApiError::new("forbidden", "GitLab 拒绝批准，请检查审批权限与重新认证要求")
+        }
         401 => ApiError::new("unauthorized", "GitLab 认证失效，请重新连接账号"),
         403 => ApiError::new("forbidden", "当前账号无权访问此 GitLab 资源"),
         404 => ApiError::new(
@@ -225,7 +365,13 @@ fn status_error(status: u16, headers: &header::HeaderMap, is_merge: bool) -> Api
             "GitLab 资源不存在或当前账号无权访问，请核对仓库映射",
         ),
         429 => ApiError::new("rate_limit", "GitLab 请求受到限流，将按服务器要求稍后重试"),
-        409 if is_merge => ApiError::new("conflict", "源分支已有新提交，请刷新差异并重新审阅"),
+        409 if is_merge || is_approval => {
+            ApiError::new("conflict", "源分支已有新提交，请刷新差异并重新审阅")
+        }
+        400 | 405 | 406 | 422 if is_approval => ApiError::new(
+            "blocked",
+            "GitLab 拒绝批准，请检查审批规则或在 GitLab 完成重新认证",
+        ),
         405 | 406 | 422 if is_merge => {
             ApiError::new("blocked", "GitLab 拒绝合并，请刷新检查结果后再操作")
         }
@@ -407,6 +553,8 @@ impl Context {
         body: Option<Value>,
     ) -> Result<(Value, header::HeaderMap, usize), ApiError> {
         let is_merge = method == Method::PUT && parts.last() == Some(&"merge");
+        let is_approval = method == Method::POST && parts.last() == Some(&"approve");
+        let is_diff_comment = method == Method::POST && parts.last() == Some(&"discussions");
         let mut request = self
             .client
             .request(method, self.endpoint(parts, query)?)
@@ -415,41 +563,97 @@ impl Context {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let mut response = request.send().await.map_err(network_error)?;
-        let headers = response.headers().clone();
-        if !response.status().is_success() {
-            return Err(status_error(response.status().as_u16(), &headers, is_merge));
-        }
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        let response = request.send().await.map_err(network_error)?;
+        if is_diff_comment
+            && matches!(response.status().as_u16(), 400 | 409 | 422)
         {
             return Err(ApiError::new(
-                "invalid_response",
-                "GitLab 响应超过读取上限，本次数据未完成同步",
+                "conflict",
+                "GitLab 拒绝代码行评论，请刷新差异并确认评论位置后重试",
             ));
         }
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(network_error)? {
-            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-                return Err(ApiError::new(
-                    "invalid_response",
-                    "GitLab 响应超过读取上限，本次数据未完成同步",
-                ));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok((
-            serde_json::from_slice(&bytes).map_err(|_| invalid_response())?,
-            headers,
-            bytes.len(),
+        response_json(response, is_merge, is_approval).await
+    }
+
+    async fn graphql(&self, query: &str, variables: Value) -> Result<Value, ApiError> {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .map_err(|_| invalid_config())?
+            .pop_if_empty()
+            .push("api")
+            .push("graphql");
+        let mut authorization = header::HeaderValue::from_str(&format!(
+            "Bearer {}",
+            self.token.to_str().map_err(|_| invalid_config())?
         ))
+        .map_err(|_| invalid_config())?;
+        authorization.set_sensitive(true);
+        let response = self
+            .client
+            .post(url)
+            .header(header::AUTHORIZATION, authorization)
+            .header(header::ACCEPT, "application/json")
+            .json(&serde_json::json!({"query": query, "variables": variables}))
+            .send()
+            .await
+            .map_err(network_error)?;
+        response_json(response, false, false)
+            .await
+            .map(|(value, _, _)| value)
     }
 
     async fn get(&self, parts: &[&str], query: &[(&str, String)]) -> Result<Value, ApiError> {
         self.request(Method::GET, parts, query, None)
             .await
             .map(|(value, _, _)| value)
+    }
+
+    async fn raw_diff(&self, project: &str, iid: &str) -> Result<Vec<u8>, ApiError> {
+        let mut response = self
+            .client
+            .get(self.endpoint(
+                &["projects", project, "merge_requests", iid, "raw_diffs"],
+                &[],
+            )?)
+            .header("PRIVATE-TOKEN", self.token.clone())
+            .header(header::ACCEPT, "text/plain")
+            .send()
+            .await
+            .map_err(network_error)?;
+        if !response.status().is_success() {
+            if matches!(response.status().as_u16(), 404 | 405 | 501) {
+                return Err(ApiError::new(
+                    "invalid_response",
+                    "此 GitLab 实例不支持文本差异下载或当前账号无权访问，请在 GitLab 下载",
+                ));
+            }
+            return Err(status_error(
+                response.status().as_u16(),
+                response.headers(),
+                false,
+                false,
+            ));
+        }
+        let too_large = || {
+            ApiError::new(
+                "invalid_response",
+                "文本差异超过 64 MiB 下载上限，请在 GitLab 下载",
+            )
+        };
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RAW_DIFF_BYTES as u64)
+        {
+            return Err(too_large());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(network_error)? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_RAW_DIFF_BYTES {
+                return Err(too_large());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     }
 
     async fn pages<F>(
@@ -719,6 +923,8 @@ struct RawMergeRequest {
     should_remove_source_branch: Option<bool>,
     force_remove_source_branch: Option<bool>,
     source_project_id: Option<u64>,
+    merge_commit_message: Option<String>,
+    squash_commit_message: Option<String>,
 }
 
 fn valid_sha(sha: &str) -> bool {
@@ -929,7 +1135,10 @@ async fn approvals(context: &Context, project: &str, iid: &str) -> Result<Approv
     }
     Ok(ApprovalState {
         readable: true,
-        approved: left.map(|left| left == 0),
+        approved: value
+            .get("approved")
+            .and_then(Value::as_bool)
+            .or_else(|| left.map(|left| left == 0)),
         approvals_required: required,
         approvals_left: left,
         approved_by,
@@ -968,6 +1177,19 @@ fn version_info(value: &Value) -> Result<DiffVersionInfo, ApiError> {
                 .or_else(|| value.as_u64().map(|n| n.to_string()))
         }),
         refs,
+        patch_id_ready: value
+            .get("patch_id_sha")
+            .map(|value| value.as_str().is_some_and(valid_sha)),
+    })
+}
+
+fn approval_status_ready(status: Option<&str>) -> bool {
+    !matches!(status, Some("checking" | "approvals_syncing"))
+}
+
+fn approval_diff_ready(versions: &[DiffVersionInfo]) -> bool {
+    versions.first().is_some_and(|version| {
+        version.state == "collected" && version.patch_id_ready != Some(false)
     })
 }
 
@@ -1155,6 +1377,17 @@ async fn load_detail(
         _ => request.squash.unwrap_or(squash_policy == "default_on"),
     };
     let detail = Detail {
+        can_close: summary.state == "opened" && summary.author.id == user.id,
+        can_approve: summary.state == "opened"
+            && summary.author.id != user.id
+            && summary.roles.iter().any(|role| role == "reviewer")
+            && approval_status_ready(summary.detailed_merge_status.as_deref())
+            && (!with_versions || approval_diff_ready(&diff_versions))
+            && approvals.readable
+            && !approvals
+                .approved_by
+                .iter()
+                .any(|approved| approved.id == user.id),
         pipeline_status: summary.pipeline_status.clone(),
         summary,
         description: request.description.unwrap_or_default(),
@@ -1172,6 +1405,8 @@ async fn load_detail(
                 .unwrap_or(project.remove_source_branch_after_merge.unwrap_or(false)),
         delete_source_required,
         delete_source_allowed,
+        merge_commit_message: request.merge_commit_message,
+        squash_commit_message: request.squash_commit_message,
     };
     Ok((detail, user, project))
 }
@@ -1181,6 +1416,158 @@ pub async fn detail(config: &Config, project_id: u64, iid: u64) -> Result<Detail
     load_detail(&context, project_id, iid, true)
         .await
         .map(|(detail, _, _)| detail)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCommitMessages {
+    id: String,
+    iid: String,
+    diff_head_sha: Option<String>,
+    source_branch: String,
+    target_branch: String,
+    title: String,
+    description: Option<String>,
+    updated_at: String,
+    default_merge_commit_message: Option<String>,
+    default_squash_commit_message: Option<String>,
+}
+
+fn unavailable_commit_messages() -> ApiError {
+    ApiError::new(
+        "unsupported",
+        "无法读取 GitLab 默认提交消息，请检查实例版本与权限",
+    )
+}
+
+fn same_timestamp(left: &str, right: &str) -> bool {
+    left == right
+        || chrono::DateTime::parse_from_rfc3339(left)
+            .ok()
+            .zip(chrono::DateTime::parse_from_rfc3339(right).ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
+pub fn same_message_revision(left: &Summary, right: &Summary) -> bool {
+    left.id == right.id
+        && left.project_id == right.project_id
+        && left.iid == right.iid
+        && left.project_path_with_namespace == right.project_path_with_namespace
+        && left.sha == right.sha
+        && left.source_branch == right.source_branch
+        && left.target_branch == right.target_branch
+        && left.title == right.title
+        && left.description == right.description
+        && same_timestamp(&left.updated_at, &right.updated_at)
+}
+
+/// Ask GitLab to expand its own project templates, including user-visible issues
+/// and commit data. Never approximate this with client-side string substitution.
+pub async fn commit_messages(
+    config: &Config,
+    known: &Summary,
+    user_id: u64,
+) -> Result<CommitMessages, ApiError> {
+    if known.id == 0
+        || known.project_id == 0
+        || known.iid == 0
+        || user_id == 0
+        || !valid_project_path(&known.project_path_with_namespace)
+    {
+        return Err(invalid_config());
+    }
+    if known.state != "opened" || known.sha.as_deref().is_none_or(|sha| !valid_sha(sha)) {
+        return Err(ApiError::new(
+            "blocked",
+            "请先加载开放合并请求的有效源提交版本",
+        ));
+    }
+    let context = Context::new(config)?;
+    let value = context
+        .graphql(
+            COMMIT_MESSAGES_QUERY,
+            serde_json::json!({
+                "projectPath": known.project_path_with_namespace,
+                "iid": known.iid.to_string(),
+            }),
+        )
+        .await?;
+    // GraphQL may return partial data alongside HTTP 200 errors. Do not expose
+    // raw errors (which can include server internals) or accept a partial editor.
+    if value
+        .get("errors")
+        .is_some_and(|errors| errors.as_array().is_none_or(|errors| !errors.is_empty()))
+    {
+        return Err(unavailable_commit_messages());
+    }
+    let data = value
+        .get("data")
+        .filter(|data| data.is_object())
+        .ok_or_else(unavailable_commit_messages)?;
+    let current_user = data
+        .get("currentUser")
+        .and_then(|user| user.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(unavailable_commit_messages)?;
+    if current_user != format!("gid://gitlab/User/{user_id}") {
+        return Err(ApiError::new(
+            "stale",
+            "GitLab 当前账号身份已变化，请重新连接账号",
+        ));
+    }
+    let project = data
+        .get("project")
+        .filter(|project| project.is_object())
+        .ok_or_else(unavailable_commit_messages)?;
+    if project.get("id").and_then(Value::as_str)
+        != Some(format!("gid://gitlab/Project/{}", known.project_id).as_str())
+        || project.get("fullPath").and_then(Value::as_str)
+            != Some(known.project_path_with_namespace.as_str())
+    {
+        return Err(invalid_response());
+    }
+    let request: RawCommitMessages = decode(
+        project
+            .get("mergeRequest")
+            .filter(|request| request.is_object())
+            .ok_or_else(unavailable_commit_messages)?
+            .clone(),
+    )?;
+    if request.id != format!("gid://gitlab/MergeRequest/{}", known.id)
+        || request.iid != known.iid.to_string()
+    {
+        return Err(invalid_response());
+    }
+    if request.diff_head_sha != known.sha
+        || request.target_branch != known.target_branch
+        || request.source_branch != known.source_branch
+        || request.title != known.title
+        || request.description != known.description
+        || !same_timestamp(&request.updated_at, &known.updated_at)
+    {
+        return Err(ApiError::new(
+            "conflict",
+            "合并请求已变化，请刷新后重新加载默认提交消息",
+        ));
+    }
+    let message = |message: Option<String>| -> Result<String, ApiError> {
+        message
+            .filter(|message| {
+                !message.trim().is_empty() && message.len() <= MAX_COMMIT_MESSAGE_BYTES
+            })
+            .ok_or_else(unavailable_commit_messages)
+    };
+    Ok(CommitMessages {
+        mr_id: known.id,
+        project_id: known.project_id,
+        iid: known.iid,
+        sha: request
+            .diff_head_sha
+            .ok_or_else(unavailable_commit_messages)?,
+        target_branch: request.target_branch,
+        merge_commit_message: message(request.default_merge_commit_message)?,
+        squash_commit_message: message(request.default_squash_commit_message)?,
+    })
 }
 
 /// Automatic status refresh skips the potentially paginated version history.
@@ -1203,6 +1590,7 @@ pub async fn detail_status(
     {
         detail.diff_versions = known.diff_versions.clone();
     }
+    detail.can_approve &= approval_diff_ready(&detail.diff_versions);
     Ok(detail)
 }
 
@@ -1245,6 +1633,10 @@ pub async fn diffs(
             &[],
         )
         .await?;
+    diff_version(value, version_id)
+}
+
+fn diff_version(value: Value, version_id: u64) -> Result<DiffVersion, ApiError> {
     let info = version_info(&value)?;
     if info.id != version_id {
         return Err(invalid_response());
@@ -1297,6 +1689,144 @@ pub async fn diffs(
     })
 }
 
+async fn download_revision(
+    context: &Context,
+    user: &User,
+    project: &RawProject,
+    mr_id: u64,
+    iid: u64,
+    expected_target_branch: &str,
+    reviewed_version_id: u64,
+    reviewed_refs: &DiffRefs,
+) -> Result<DiffVersionInfo, ApiError> {
+    let pid = project.id.to_string();
+    let iid_text = iid.to_string();
+    let request: RawMergeRequest = decode(
+        context
+            .get(&["projects", &pid, "merge_requests", &iid_text], &[])
+            .await?,
+    )?;
+    let summary = request.summary(context, user, Some(project), false)?;
+    if summary.id != mr_id || summary.iid != iid {
+        return Err(invalid_response());
+    }
+    let refs: RawRefs = request
+        .diff_refs
+        .and_then(|value| decode(value).ok())
+        .ok_or_else(invalid_response)?;
+    let refs = DiffRefs {
+        base_sha: refs.base_sha,
+        start_sha: refs.start_sha,
+        head_sha: refs.head_sha,
+    };
+    let latest = versions(context, &pid, &iid_text)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(invalid_response)?;
+    if expected_target_branch.is_empty()
+        || summary.target_branch != expected_target_branch
+        || summary.sha.as_deref() != Some(reviewed_refs.head_sha.as_str())
+        || refs != *reviewed_refs
+        || latest.id != reviewed_version_id
+        || latest.refs != *reviewed_refs
+    {
+        return Err(ApiError::new(
+            "conflict",
+            "下载期间远程差异版本或比较范围已变化，请刷新后重新下载",
+        ));
+    }
+    if latest.state != "collected" || latest.patch_id_ready == Some(false) {
+        return Err(ApiError::new(
+            "blocked",
+            "GitLab 差异尚未准备完成或受到服务器限制，请稍后重试或在 GitLab 下载",
+        ));
+    }
+    Ok(latest)
+}
+
+/// raw_diffs has no version parameter. Verify its current revision on both
+/// sides of the download rather than exporting the UI's limited file objects.
+pub async fn download_diff(
+    config: &Config,
+    mr_id: u64,
+    project_id: u64,
+    iid: u64,
+    expected_target_branch: &str,
+    reviewed_version_id: u64,
+    reviewed_refs: &DiffRefs,
+) -> Result<RawDiffDownload, ApiError> {
+    if mr_id == 0
+        || project_id == 0
+        || iid == 0
+        || reviewed_version_id == 0
+        || !valid_sha(&reviewed_refs.base_sha)
+        || !valid_sha(&reviewed_refs.start_sha)
+        || !valid_sha(&reviewed_refs.head_sha)
+    {
+        return Err(ApiError::new("conflict", "请先加载有效的差异版本后再下载"));
+    }
+    let context = Context::new(config)?;
+    let user = context.user().await?;
+    let project = context.project(project_id).await?;
+    let before = download_revision(
+        &context,
+        &user,
+        &project,
+        mr_id,
+        iid,
+        expected_target_branch,
+        reviewed_version_id,
+        reviewed_refs,
+    )
+    .await?;
+    let expected_files = before
+        .real_size
+        .as_deref()
+        .and_then(|size| size.parse::<usize>().ok())
+        .ok_or_else(|| {
+            ApiError::new(
+                "invalid_response",
+                "无法确认 GitLab 差异文件数量，请刷新后重试或在 GitLab 下载",
+            )
+        })?;
+    let bytes = context
+        .raw_diff(&project_id.to_string(), &iid.to_string())
+        .await?;
+    let after = download_revision(
+        &context,
+        &user,
+        &project,
+        mr_id,
+        iid,
+        expected_target_branch,
+        reviewed_version_id,
+        reviewed_refs,
+    )
+    .await?;
+    let files = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| line.starts_with(b"diff --git "))
+        .count();
+    if before.real_size != after.real_size
+        || files != expected_files
+        || (expected_files > 0 && !bytes.starts_with(b"diff --git "))
+        || (expected_files == 0 && !bytes.is_empty())
+    {
+        return Err(ApiError::new(
+            "invalid_response",
+            "GitLab 返回的文本差异不完整或格式不受支持，请在 GitLab 下载",
+        ));
+    }
+    // Even this original response is governed by GitLab's server diff limits.
+    // Preserve it byte for byte, including rename/mode and binary-file notices.
+    Ok(RawDiffDownload {
+        bytes,
+        version_id: after.id,
+        refs: after.refs,
+    })
+}
+
 #[derive(Deserialize)]
 struct RawNote {
     id: u64,
@@ -1307,6 +1837,7 @@ struct RawNote {
     system: bool,
     resolvable: bool,
     resolved: Option<bool>,
+    position: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -1314,6 +1845,51 @@ struct RawDiscussion {
     id: String,
     individual_note: bool,
     notes: Vec<RawNote>,
+}
+
+fn note_position(value: Value) -> Option<DiffNotePosition> {
+    let text = |key: &str| value.get(key)?.as_str().map(str::to_owned);
+    let position = DiffNotePosition {
+        base_sha: text("base_sha")?,
+        start_sha: text("start_sha")?,
+        head_sha: text("head_sha")?,
+        position_type: text("position_type")?,
+        old_path: text("old_path")?,
+        new_path: text("new_path")?,
+        old_line: value.get("old_line").and_then(Value::as_u64),
+        new_line: value.get("new_line").and_then(Value::as_u64),
+    };
+    (position.position_type == "text"
+        && valid_sha(&position.base_sha)
+        && valid_sha(&position.start_sha)
+        && valid_sha(&position.head_sha))
+    .then_some(position)
+}
+
+fn discussion(value: Value) -> Result<Discussion, ApiError> {
+    let raw: RawDiscussion = decode(value)?;
+    if raw.id.is_empty() {
+        return Err(invalid_response());
+    }
+    Ok(Discussion {
+        id: raw.id,
+        individual_note: raw.individual_note,
+        notes: raw
+            .notes
+            .into_iter()
+            .map(|note| Note {
+                id: note.id,
+                body: note.body,
+                author: note.author,
+                created_at: note.created_at,
+                updated_at: note.updated_at,
+                system: note.system,
+                resolvable: note.resolvable,
+                resolved: note.resolved,
+                position: note.position.and_then(note_position),
+            })
+            .collect(),
+    })
 }
 
 pub async fn discussions(
@@ -1340,31 +1916,11 @@ pub async fn discussions(
             &[],
             |values| {
                 for value in values {
-                    let discussion: RawDiscussion = decode(value)?;
-                    if discussion.id.is_empty() {
-                        return Err(invalid_response());
-                    }
+                    let discussion = discussion(value)?;
                     if !seen.insert(discussion.id.clone()) {
                         continue;
                     }
-                    result.push(Discussion {
-                        id: discussion.id,
-                        individual_note: discussion.individual_note,
-                        notes: discussion
-                            .notes
-                            .into_iter()
-                            .map(|note| Note {
-                                id: note.id,
-                                body: note.body,
-                                author: note.author,
-                                created_at: note.created_at,
-                                updated_at: note.updated_at,
-                                system: note.system,
-                                resolvable: note.resolvable,
-                                resolved: note.resolved,
-                            })
-                            .collect(),
-                    });
+                    result.push(discussion);
                 }
                 Ok(())
             },
@@ -1373,22 +1929,257 @@ pub async fn discussions(
     Ok(result)
 }
 
-pub async fn merge(
+fn diff_contains_position(file: &DiffFile, position: &DiffCommentPosition) -> bool {
+    if file.too_large == Some(true) || file.collapsed == Some(true) {
+        return false;
+    }
+    let range = |text: &str, prefix: char| -> Option<(u64, u64)> {
+        let text = text.strip_prefix(prefix)?;
+        let (start, count) = text.split_once(',').unwrap_or((text, "1"));
+        let start: u64 = start.parse().ok()?;
+        let count: u64 = count.parse().ok()?;
+        (start <= u32::MAX as u64 && count <= u32::MAX as u64).then_some((start, count))
+    };
+    let mut cursor = None;
+    for line in file.diff.lines() {
+        if line.starts_with("@@ ") {
+            let mut parts = line.split_whitespace();
+            let parsed = (|| {
+                if parts.next()? != "@@" {
+                    return None;
+                }
+                let (old, old_left) = range(parts.next()?, '-')?;
+                let (new, new_left) = range(parts.next()?, '+')?;
+                if parts.next()? != "@@" {
+                    return None;
+                }
+                Some((old, new, old_left, new_left))
+            })();
+            cursor = parsed;
+            continue;
+        }
+        let Some((old, new, old_left, new_left)) = cursor.as_mut() else {
+            continue;
+        };
+        let (old_line, new_line) = match line.as_bytes().first() {
+            Some(b' ') if *old_left > 0 && *new_left > 0 => (Some(*old), Some(*new)),
+            Some(b'-') if *old_left > 0 => (Some(*old), None),
+            Some(b'+') if *new_left > 0 => (None, Some(*new)),
+            Some(b'\\') => continue,
+            _ => {
+                cursor = None;
+                continue;
+            }
+        };
+        if position.old_line == old_line && position.new_line == new_line {
+            return true;
+        }
+        if old_line.is_some() {
+            *old += 1;
+            *old_left -= 1;
+        }
+        if new_line.is_some() {
+            *new += 1;
+            *new_left -= 1;
+        }
+    }
+    false
+}
+
+pub fn uncertain_diff_comment() -> DiffCommentResult {
+    DiffCommentResult {
+        state: "uncertain".into(),
+        message: "评论是否已添加尚未确认，请到 GitLab 核实，勿重复提交".into(),
+        discussion: None,
+    }
+}
+
+/// Create one text diff thread against the reviewed latest version. The final
+/// context check prevents a credentials/sleep change during preflight from
+/// sending a comment under the previous account context.
+pub async fn create_diff_comment(
     config: &Config,
+    mr_id: u64,
     project_id: u64,
     iid: u64,
+    expected_user_id: u64,
+    reviewed_version_id: u64,
+    reviewed_refs: &DiffRefs,
+    expected_target_branch: &str,
+    position: &DiffCommentPosition,
+    body: &str,
+    before_write: impl Fn() -> Result<(), ApiError>,
+) -> Result<DiffCommentResult, ApiError> {
+    let body = body.trim();
+    if body.is_empty() || body.len() > 1024 * 1024 {
+        return Err(ApiError::new(
+            "invalid_input",
+            "请输入评论内容，且不超过 1 MiB",
+        ));
+    }
+    if mr_id == 0
+        || project_id == 0
+        || iid == 0
+        || expected_user_id == 0
+        || reviewed_version_id == 0
+        || !valid_sha(&reviewed_refs.base_sha)
+        || !valid_sha(&reviewed_refs.start_sha)
+        || !valid_sha(&reviewed_refs.head_sha)
+        || position.old_path.is_empty()
+        || position.new_path.is_empty()
+        || position.old_path.contains('\0')
+        || position.new_path.contains('\0')
+        || (position.old_line.is_none() && position.new_line.is_none())
+        || position
+            .old_line
+            .is_some_and(|line| line == 0 || line > u32::MAX as u64)
+        || position
+            .new_line
+            .is_some_and(|line| line == 0 || line > u32::MAX as u64)
+    {
+        return Err(ApiError::new(
+            "conflict",
+            "评论位置无效，请刷新差异后重新选择代码行",
+        ));
+    }
+    let context = Context::new(config)?;
+    let user = context.user().await?;
+    if user.id != expected_user_id {
+        return Err(ApiError::new(
+            "stale",
+            "GitLab 账号身份已变化，请重新连接账号",
+        ));
+    }
+    let project = context.project(project_id).await?;
+    let pid = project_id.to_string();
+    let iid_text = iid.to_string();
+    let request: RawMergeRequest = decode(
+        context
+            .get(&["projects", &pid, "merge_requests", &iid_text], &[])
+            .await?,
+    )?;
+    let summary = request.summary(&context, &user, Some(&project), false)?;
+    if summary.id != mr_id || summary.project_id != project_id || summary.iid != iid {
+        return Err(invalid_response());
+    }
+    let current_refs = request
+        .diff_refs
+        .and_then(|refs| decode::<RawRefs>(refs).ok());
+    if summary.sha.as_deref() != Some(reviewed_refs.head_sha.as_str())
+        || expected_target_branch.is_empty()
+        || summary.target_branch != expected_target_branch
+        || current_refs.is_none_or(|refs| {
+            refs.base_sha != reviewed_refs.base_sha
+                || refs.start_sha != reviewed_refs.start_sha
+                || refs.head_sha != reviewed_refs.head_sha
+        })
+    {
+        return Err(ApiError::new(
+            "conflict",
+            "远程差异版本或比较范围已变化，请刷新后重新选择评论位置",
+        ));
+    }
+    let revisions = versions(&context, &pid, &iid_text).await?;
+    if revisions.first().is_none_or(|revision| {
+        revision.id != reviewed_version_id || revision.refs != *reviewed_refs
+    }) {
+        return Err(ApiError::new(
+            "conflict",
+            "远程差异版本已变化，请刷新后重新选择评论位置",
+        ));
+    }
+    let revision = diff_version(
+        context
+            .get(
+                &[
+                    "projects",
+                    &pid,
+                    "merge_requests",
+                    &iid_text,
+                    "versions",
+                    &reviewed_version_id.to_string(),
+                ],
+                &[],
+            )
+            .await?,
+        reviewed_version_id,
+    )?;
+    if revision.refs != *reviewed_refs
+        || !matches!(revision.state.as_str(), "collected" | "overflow")
+        || !revision.files.iter().any(|file| {
+            file.old_path == position.old_path
+                && file.new_path == position.new_path
+                && diff_contains_position(file, position)
+        })
+    {
+        return Err(ApiError::new(
+            "conflict",
+            "评论位置不在当前差异中，请刷新后重新选择代码行",
+        ));
+    }
+    let expected_position = DiffNotePosition {
+        base_sha: reviewed_refs.base_sha.clone(),
+        start_sha: reviewed_refs.start_sha.clone(),
+        head_sha: reviewed_refs.head_sha.clone(),
+        position_type: "text".into(),
+        old_path: position.old_path.clone(),
+        new_path: position.new_path.clone(),
+        old_line: position.old_line,
+        new_line: position.new_line,
+    };
+    let mut payload = serde_json::json!({
+        "position_type": "text", "base_sha": reviewed_refs.base_sha, "start_sha": reviewed_refs.start_sha, "head_sha": reviewed_refs.head_sha,
+        "old_path": position.old_path, "new_path": position.new_path,
+    });
+    if let Some(line) = position.old_line {
+        payload["old_line"] = line.into();
+    }
+    if let Some(line) = position.new_line {
+        payload["new_line"] = line.into();
+    }
+    before_write()?;
+    let write = context
+        .request(
+            Method::POST,
+            &["projects", &pid, "merge_requests", &iid_text, "discussions"],
+            &[],
+            Some(serde_json::json!({"body": body, "position": payload})),
+        )
+        .await;
+    match write {
+        Ok((value, _, _)) => match discussion(value) {
+            Ok(discussion)
+                if discussion.notes.iter().any(|note| {
+                    note.id > 0
+                        && !note.system
+                        && note.body == body
+                        && note.author.id == user.id
+                        && note.position.as_ref() == Some(&expected_position)
+                }) =>
+            {
+                Ok(DiffCommentResult {
+                    state: "created".into(),
+                    message: "评论已添加".into(),
+                    discussion: Some(discussion),
+                })
+            }
+            _ => Ok(uncertain_diff_comment()),
+        },
+        Err(error) if uncertain_transport(&error) => Ok(uncertain_diff_comment()),
+        Err(error) => Err(error),
+    }
+}
+
+fn validate_review(
+    detail: &Detail,
     reviewed_sha: &str,
     expected_target_branch: &str,
     reviewed_version_id: u64,
     reviewed_refs: &DiffRefs,
-    squash: bool,
-    delete_source: bool,
-) -> Result<MergeResult, ApiError> {
+) -> Result<(), ApiError> {
     if !valid_sha(reviewed_sha) {
         return Err(ApiError::new("conflict", "请先加载并审阅有效的源提交版本"));
     }
-    let context = Context::new(config)?;
-    let (detail, user, project) = load_detail(&context, project_id, iid, true).await?;
     if detail.summary.sha.as_deref() != Some(reviewed_sha) {
         return Err(ApiError::new(
             "conflict",
@@ -1413,6 +2204,34 @@ pub async fn merge(
             "远程差异版本或比较范围已变化，请刷新并重新审阅",
         ));
     }
+    Ok(())
+}
+
+pub async fn merge(
+    config: &Config,
+    project_id: u64,
+    iid: u64,
+    reviewed_sha: &str,
+    expected_target_branch: &str,
+    reviewed_version_id: u64,
+    reviewed_refs: &DiffRefs,
+    squash: bool,
+    delete_source: bool,
+    merge_commit_message: Option<&str>,
+    squash_commit_message: Option<&str>,
+) -> Result<MergeResult, ApiError> {
+    if !valid_sha(reviewed_sha) {
+        return Err(ApiError::new("conflict", "请先加载并审阅有效的源提交版本"));
+    }
+    let context = Context::new(config)?;
+    let (detail, user, project) = load_detail(&context, project_id, iid, true).await?;
+    validate_review(
+        &detail,
+        reviewed_sha,
+        expected_target_branch,
+        reviewed_version_id,
+        reviewed_refs,
+    )?;
     if !detail.can_merge {
         return Err(ApiError::new(
             "blocked",
@@ -1440,8 +2259,30 @@ pub async fn merge(
     }
     let pid = project_id.to_string();
     let iid_text = iid.to_string();
-    let value = context.request(Method::PUT, &["projects", &pid, "merge_requests", &iid_text, "merge"], &[],
-        Some(serde_json::json!({ "sha": reviewed_sha, "squash": squash, "should_remove_source_branch": delete_source }))).await;
+    let mut body = serde_json::json!({ "sha": reviewed_sha, "squash": squash, "should_remove_source_branch": delete_source });
+    // Omitting untouched messages preserves GitLab's own project templates.
+    for (key, message) in [
+        ("merge_commit_message", merge_commit_message),
+        (
+            "squash_commit_message",
+            squash_commit_message.filter(|_| squash),
+        ),
+    ] {
+        if let Some(message) = message.filter(|message| !message.trim().is_empty()) {
+            if message.len() > MAX_COMMIT_MESSAGE_BYTES {
+                return Err(ApiError::new("blocked", "提交消息过长，请缩短后再合并"));
+            }
+            body[key] = Value::String(message.to_owned());
+        }
+    }
+    let value = context
+        .request(
+            Method::PUT,
+            &["projects", &pid, "merge_requests", &iid_text, "merge"],
+            &[],
+            Some(body),
+        )
+        .await;
     match value {
         Ok((value, _, _)) => {
             let summary = decode::<RawMergeRequest>(value)
@@ -1474,6 +2315,171 @@ pub async fn merge(
             reconcile_merge(&context, &project, &user, iid, reviewed_sha).await
         }
         Err(error) => Err(error),
+    }
+}
+
+fn action_identity(detail: &Detail, mr_id: u64, project_id: u64, iid: u64) -> bool {
+    detail.summary.id == mr_id
+        && detail.summary.project_id == project_id
+        && detail.summary.iid == iid
+}
+
+fn uncertain_action(message: &str, detail: Option<Detail>) -> ActionResult {
+    ActionResult {
+        state: "uncertain".into(),
+        message: message.into(),
+        detail,
+    }
+}
+
+fn uncertain_transport(error: &ApiError) -> bool {
+    matches!(
+        error.kind.as_str(),
+        "network" | "timeout" | "server" | "invalid_response"
+    )
+}
+
+/// Closing does not delete either the source branch or the merge request.
+pub async fn close(
+    config: &Config,
+    mr_id: u64,
+    project_id: u64,
+    iid: u64,
+) -> Result<ActionResult, ApiError> {
+    let context = Context::new(config)?;
+    let (detail, user, _) = load_detail(&context, project_id, iid, false).await?;
+    if !action_identity(&detail, mr_id, project_id, iid) {
+        return Err(invalid_response());
+    }
+    if !detail.can_close {
+        return Err(ApiError::new("blocked", "仅发起人可以取消开放的合并请求"));
+    }
+    let write = context
+        .request(
+            Method::PUT,
+            &[
+                "projects",
+                &project_id.to_string(),
+                "merge_requests",
+                &iid.to_string(),
+            ],
+            &[],
+            Some(serde_json::json!({"state_event": "close"})),
+        )
+        .await;
+    if let Err(error) = &write {
+        if !uncertain_transport(error) {
+            return Err(error.clone());
+        }
+    }
+    // Read once after both success and transport uncertainty. Never replay PUT.
+    let current = load_detail(&context, project_id, iid, true)
+        .await
+        .ok()
+        .filter(|(detail, current_user, _)| {
+            current_user.id == user.id && action_identity(detail, mr_id, project_id, iid)
+        })
+        .map(|(detail, _, _)| detail);
+    if current
+        .as_ref()
+        .is_some_and(|detail| detail.summary.state == "closed")
+    {
+        Ok(ActionResult {
+            state: "closed".into(),
+            message: "GitLab 已确认取消合并请求".into(),
+            detail: current,
+        })
+    } else {
+        Ok(uncertain_action(
+            "取消结果尚未确认；请刷新状态或在 GitLab 核对，请勿重复提交",
+            current,
+        ))
+    }
+}
+
+pub async fn approve(
+    config: &Config,
+    mr_id: u64,
+    project_id: u64,
+    iid: u64,
+    reviewed_sha: &str,
+    expected_target_branch: &str,
+    reviewed_version_id: u64,
+    reviewed_refs: &DiffRefs,
+) -> Result<ActionResult, ApiError> {
+    let context = Context::new(config)?;
+    let (detail, user, _) = load_detail(&context, project_id, iid, true).await?;
+    if !action_identity(&detail, mr_id, project_id, iid) {
+        return Err(invalid_response());
+    }
+    validate_review(
+        &detail,
+        reviewed_sha,
+        expected_target_branch,
+        reviewed_version_id,
+        reviewed_refs,
+    )?;
+    if !detail.can_approve {
+        return Err(ApiError::new(
+            "blocked",
+            "当前账号无法批准此请求，请刷新审核人和审批状态",
+        ));
+    }
+    let write = context
+        .request(
+            Method::POST,
+            &[
+                "projects",
+                &project_id.to_string(),
+                "merge_requests",
+                &iid.to_string(),
+                "approve",
+            ],
+            &[],
+            Some(serde_json::json!({"sha": reviewed_sha})),
+        )
+        .await;
+    if let Err(error) = &write {
+        if !uncertain_transport(error) {
+            return Err(error.clone());
+        }
+    }
+    // GitLab enforces approver eligibility, password/SAML requirements and SHA.
+    let current = load_detail(&context, project_id, iid, true)
+        .await
+        .ok()
+        .filter(|(detail, current_user, _)| {
+            current_user.id == user.id && action_identity(detail, mr_id, project_id, iid)
+        })
+        .map(|(detail, _, _)| detail);
+    let approved = current.as_ref().is_some_and(|detail| {
+        detail
+            .approvals
+            .approved_by
+            .iter()
+            .any(|approved| approved.id == user.id)
+            && approval_status_ready(detail.summary.detailed_merge_status.as_deref())
+            && approval_diff_ready(&detail.diff_versions)
+            && validate_review(
+                detail,
+                reviewed_sha,
+                expected_target_branch,
+                reviewed_version_id,
+                reviewed_refs,
+            )
+            .is_ok()
+    });
+    if approved {
+        Ok(ActionResult {
+            state: "approved".into(),
+            message: "GitLab 已确认批准当前版本".into(),
+            detail: current,
+        })
+    } else {
+        Ok(uncertain_action(
+            "批准结果尚未确认；请刷新状态或在 GitLab 核对，请勿重复提交",
+            current,
+        ))
     }
 }
 

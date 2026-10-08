@@ -1,7 +1,7 @@
 //! One native MR inbox scheduler. It never fetches or changes the local repository.
 pub mod api;
 
-use api::{ApiError, Detail, DiffVersion, Discussion, MergeResult, Summary, User};
+use api::{ActionResult, ApiError, Detail, DiffCommentResult, DiffVersion, Discussion, MergeResult, Summary, User};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 use tauri::{Emitter, Manager};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 const EVENT: &str = "merge-request-state";
@@ -61,6 +62,14 @@ pub struct Snapshot {
     error: Option<ApiError>,
     persistence_error: Option<String>,
     selected_detail: Option<Detail>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadedDiff {
+    file_name: String,
+    version_id: u64,
+    refs: api::DiffRefs,
 }
 
 #[derive(Clone)]
@@ -152,6 +161,7 @@ struct Service {
     list_gate: AsyncMutex<()>,
     detail_gate: AsyncMutex<()>,
     diff_gate: AsyncMutex<()>,
+    download_gate: AsyncMutex<()>,
     discussion_gate: AsyncMutex<()>,
     mutation_gate: AsyncMutex<()>,
 }
@@ -331,6 +341,8 @@ fn detail_bytes(detail: &Detail) -> usize {
             .sum::<usize>()
         + detail.squash_policy.len()
         + detail.pipeline_status.as_ref().map_or(0, String::len)
+        + detail.merge_commit_message.as_ref().map_or(0, String::len)
+        + detail.squash_commit_message.as_ref().map_or(0, String::len)
 }
 fn diff_bytes(diff: &DiffVersion) -> usize {
     std::mem::size_of::<DiffVersion>()
@@ -366,6 +378,14 @@ fn discussion_bytes(discussions: &[Discussion]) -> usize {
                             + user_bytes(&note.author)
                             + note.created_at.len()
                             + note.updated_at.len()
+                            + note.position.as_ref().map_or(0, |position| {
+                                position.base_sha.len()
+                                    + position.start_sha.len()
+                                    + position.head_sha.len()
+                                    + position.position_type.len()
+                                    + position.old_path.len()
+                                    + position.new_path.len()
+                            })
                     })
                     .sum::<usize>()
         })
@@ -831,6 +851,7 @@ pub fn setup(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         list_gate: AsyncMutex::new(()),
         detail_gate: AsyncMutex::new(()),
         diff_gate: AsyncMutex::new(()),
+        download_gate: AsyncMutex::new(()),
         discussion_gate: AsyncMutex::new(()),
         mutation_gate: AsyncMutex::new(()),
     });
@@ -1385,6 +1406,67 @@ pub async fn mr_detail(
 }
 
 #[tauri::command]
+pub async fn mr_commit_messages(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    mr_id: u64,
+    epoch: u64,
+) -> Result<api::CommitMessages, ApiError> {
+    let service = state.0.clone();
+    let _gate = service.detail_gate.lock().await;
+    let (context, known, user_id) = {
+        let inner = service.lock();
+        let context = inner.context(epoch, false)?;
+        if inner.visibility.detail_id != Some(mr_id) {
+            return Err(error("stale", "合并请求详情已切换，请重新打开消息编辑"));
+        }
+        let cache = inner
+            .cache()
+            .ok_or_else(|| error("not_found", "尚未加载合并请求"))?;
+        let known = cache
+            .details
+            .get(&mr_id)
+            .ok_or_else(|| error("blocked", "请先加载合并请求详情"))?
+            .value
+            .summary
+            .clone();
+        let user_id = cache
+            .user
+            .as_ref()
+            .ok_or_else(|| error("stale", "GitLab 当前账号身份尚未确认，请刷新列表"))?
+            .id;
+        (context, known, user_id)
+    };
+    let result = read_deadline(api::commit_messages(&context.config, &known, user_id)).await;
+    let mut inner = service.lock();
+    if !inner.accepts(&context)
+        || inner.visibility.detail_id != Some(mr_id)
+        || inner
+            .cache()
+            .and_then(|cache| cache.user.as_ref())
+            .is_none_or(|user| user.id != user_id)
+        || inner
+            .cache()
+            .and_then(|cache| cache.details.get(&mr_id))
+            .is_none_or(|detail| !api::same_message_revision(&known, &detail.value.summary))
+    {
+        return Err(error(
+            "stale",
+            "合并请求或账号已变化，请重新加载默认提交消息",
+        ));
+    }
+    if let Err(failure) = &result {
+        // An older GraphQL schema affects only this editor, not ordinary MR reads.
+        if failure.kind != "unsupported" {
+            inner.request_failure(&context, failure.clone());
+            inner.publish(&app);
+            service.changed.notify_one();
+        }
+    }
+    result
+}
+
+#[tauri::command]
 pub async fn mr_diffs(
     app: tauri::AppHandle,
     state: tauri::State<'_, MrState>,
@@ -1442,12 +1524,159 @@ pub async fn mr_diffs(
     Ok(result)
 }
 
+/// Write beside the destination and replace it only after the account guard
+/// succeeds. A failed transfer/write leaves an existing destination intact.
+fn save_diff_file<Guard>(
+    path: &std::path::Path,
+    bytes: &[u8],
+    before_commit: impl FnOnce() -> Result<Guard, ApiError>,
+) -> Result<(), ApiError> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    let temporary = path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(format!(
+            ".gitkit-mr-diff-{}-{}-{}.tmp",
+            std::process::id(),
+            now(),
+            SERIAL.fetch_add(1, Ordering::Relaxed),
+        ));
+    let save_error = || {
+        error(
+            "save_failed",
+            "无法保存文本差异，请检查保存位置和磁盘空间后重试",
+        )
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|_| save_error())?;
+    let result = (|| {
+        file.write_all(bytes).map_err(|_| save_error())?;
+        file.sync_all().map_err(|_| save_error())?;
+        drop(file);
+        let _guard = before_commit()?;
+        std::fs::rename(&temporary, path).map_err(|_| save_error())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn mr_download_diff(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    mr_id: u64,
+    epoch: u64,
+    reviewed_version_id: u64,
+    reviewed_refs: api::DiffRefs,
+    expected_target_branch: String,
+) -> Result<Option<DownloadedDiff>, ApiError> {
+    let service = state.0.clone();
+    let _gate = service
+        .download_gate
+        .try_lock()
+        .map_err(|_| error("blocked", "已有差异下载正在进行，请等待结果"))?;
+    let (context, request) = {
+        let inner = service.lock();
+        (inner.context(epoch, false)?, inner.request(mr_id)?)
+    };
+    // The native picker is the authority for the destination. The webview
+    // cannot use this command to write arbitrary paths supplied through IPC.
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Diff", &["diff"])
+        .set_file_name(format!(
+            "project-{}-mr-{}-v{}.diff",
+            request.project_id, request.iid, reviewed_version_id
+        ))
+        .save_file(move |path| {
+            let _ = sender.send(path);
+        });
+    let Some(path) = receiver
+        .await
+        .map_err(|_| error("save_failed", "无法打开文本差异保存窗口，请重试"))?
+    else {
+        return Ok(None);
+    };
+    let path = path
+        .into_path()
+        .map_err(|_| error("save_failed", "文本差异保存位置无效，请选择本地文件"))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| error("save_failed", "文本差异保存位置无效，请选择本地文件"))?
+        .to_string_lossy()
+        .into_owned();
+    {
+        let inner = service.lock();
+        inner.context(epoch, false)?;
+        if !inner.accepts(&context) || inner.request(mr_id)? != request {
+            return Err(error("stale", "合并请求状态或 GitLab 账号已变化，请刷新"));
+        }
+    }
+    let result = read_deadline(api::download_diff(
+        &context.config,
+        mr_id,
+        request.project_id,
+        request.iid,
+        &expected_target_branch,
+        reviewed_version_id,
+        &reviewed_refs,
+    ))
+    .await;
+    let downloaded = {
+        let mut inner = service.lock();
+        if !inner.accepts(&context) {
+            return Err(error("stale", "合并请求状态或 GitLab 账号已变化，请刷新"));
+        }
+        match result {
+            Ok(downloaded) => downloaded,
+            Err(failure) => {
+                inner.request_failure(&context, failure.clone());
+                inner.publish(&app);
+                service.changed.notify_one();
+                return Err(failure);
+            }
+        }
+    };
+    let saved = DownloadedDiff {
+        file_name,
+        version_id: downloaded.version_id,
+        refs: downloaded.refs,
+    };
+    let writing_service = service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        save_diff_file(&path, &downloaded.bytes, || {
+            let inner = writing_service.lock();
+            if !inner.accepts(&context) || inner.request(mr_id)? != request {
+                return Err(error("stale", "合并请求状态或 GitLab 账号已变化，请刷新"));
+            }
+            Ok(inner)
+        })
+    })
+    .await
+    .map_err(|_| {
+        error(
+            "save_failed",
+            "无法保存文本差异，请检查保存位置和磁盘空间后重试",
+        )
+    })??;
+    Ok(Some(saved))
+}
+
 #[tauri::command]
 pub async fn mr_discussions(
     app: tauri::AppHandle,
     state: tauri::State<'_, MrState>,
     mr_id: u64,
     epoch: u64,
+    force: Option<bool>,
 ) -> Result<Vec<Discussion>, ApiError> {
     let requested_at = now();
     let service = state.0.clone();
@@ -1457,7 +1686,9 @@ pub async fn mr_discussions(
         let context = inner.context(epoch, false)?;
         let request = inner.request(mr_id)?;
         if let Some(cached) = inner.cache().and_then(|c| c.discussions.get(&mr_id)) {
-            if cached.at >= requested_at || now() - cached.at < COOLDOWN {
+            if cached.at >= requested_at
+                || (!force.unwrap_or(false) && now() - cached.at < COOLDOWN)
+            {
                 return Ok(cached.value.clone());
             }
         }
@@ -1498,6 +1729,117 @@ pub async fn mr_discussions(
     Ok(result)
 }
 
+fn invalidate_comment_cache(cache: &mut Cache, mr_id: u64) {
+    cache.details.remove(&mr_id);
+    cache.discussions.remove(&mr_id);
+}
+
+#[tauri::command]
+pub async fn mr_create_diff_comment(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    mr_id: u64,
+    epoch: u64,
+    reviewed_version_id: u64,
+    reviewed_refs: api::DiffRefs,
+    expected_target_branch: String,
+    position: api::DiffCommentPosition,
+    body: String,
+) -> Result<DiffCommentResult, ApiError> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let service = state.0.clone();
+    let _gate = service
+        .mutation_gate
+        .try_lock()
+        .map_err(|_| error("blocked", "已有合并请求操作正在进行，请等待结果"))?;
+    let (context, request, user_id) = {
+        let mut inner = service.lock();
+        let context = inner.context(epoch, false)?;
+        let request = inner.request(mr_id)?;
+        let user_id = inner
+            .cache()
+            .and_then(|cache| cache.user.as_ref())
+            .map(|user| user.id)
+            .filter(|id| *id > 0)
+            .ok_or_else(|| error("stale", "请刷新合并请求并确认 GitLab 账号"))?;
+        inner.write_generation += 1;
+        (
+            Context {
+                generation: inner.write_generation,
+                ..context
+            },
+            request,
+            user_id,
+        )
+    };
+    let sent = AtomicBool::new(false);
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        api::create_diff_comment(
+            &context.config,
+            mr_id,
+            request.project_id,
+            request.iid,
+            user_id,
+            reviewed_version_id,
+            &reviewed_refs,
+            &expected_target_branch,
+            &position,
+            &body,
+            || {
+                let inner = service.lock();
+                inner.context(epoch, false)?;
+                if !inner.accepts(&context) {
+                    return Err(error(
+                        "stale",
+                        "GitLab 账号或应用状态已变化，请刷新后重新评论",
+                    ));
+                }
+                sent.store(true, Ordering::SeqCst);
+                Ok(())
+            },
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        if sent.load(Ordering::SeqCst) {
+            Ok(api::uncertain_diff_comment())
+        } else {
+            Err(error("timeout", "GitLab 请求超时，请稍后重试"))
+        }
+    });
+    let mut inner = service.lock();
+    // Invalidate the original account cache even if the user switched accounts
+    // after POST. Its remote discussions may have changed in either outcome.
+    if sent.load(Ordering::SeqCst) {
+        if let Some(cache) = inner.caches.get_mut(&context.key) {
+            invalidate_comment_cache(cache, mr_id);
+        }
+    }
+    if !inner.accepts(&context) {
+        if sent.load(Ordering::SeqCst) {
+            inner.data_revision += 1;
+            inner.publish(&app);
+            return Ok(api::uncertain_diff_comment());
+        }
+        return Err(error(
+            "stale",
+            "GitLab 账号或应用状态已变化，请刷新后重新评论",
+        ));
+    }
+    if let Err(failure) = &result {
+        if failure.kind != "invalid_input" {
+            inner.request_failure(&context, failure.clone());
+        }
+    }
+    inner.write_generation += 1;
+    inner.data_revision += 1;
+    inner.next_detail = now().saturating_add(COOLDOWN);
+    inner.publish(&app);
+    service.changed.notify_one();
+    result
+}
+
 #[tauri::command]
 pub async fn mr_merge(
     app: tauri::AppHandle,
@@ -1510,6 +1852,8 @@ pub async fn mr_merge(
     reviewed_refs: api::DiffRefs,
     squash: bool,
     delete_source: bool,
+    merge_commit_message: Option<String>,
+    squash_commit_message: Option<String>,
 ) -> Result<MergeResult, ApiError> {
     let service = state.0.clone();
     let _gate = service
@@ -1545,6 +1889,8 @@ pub async fn mr_merge(
             &reviewed_refs,
             squash,
             delete_source,
+            merge_commit_message.as_deref(),
+            squash_commit_message.as_deref(),
         ),
     )
     .await
@@ -1607,6 +1953,185 @@ pub async fn mr_merge(
     })
 }
 
+enum Action {
+    Close,
+    Approve {
+        reviewed_sha: String,
+        expected_target_branch: String,
+        reviewed_version_id: u64,
+        reviewed_refs: api::DiffRefs,
+    },
+}
+
+fn cache_action_result(cache: &mut Cache, mr_id: u64, result: &Result<ActionResult, ApiError>) {
+    cache.details.remove(&mr_id);
+    cache.discussions.remove(&mr_id);
+    if let Ok(ActionResult {
+        detail: Some(detail),
+        ..
+    }) = result
+    {
+        update_summary(cache, detail.summary.clone());
+        cache.details.insert(
+            mr_id,
+            Cached {
+                value: detail.clone(),
+                at: now(),
+            },
+        );
+        retain_recent(&mut cache.details, MAX_DETAILS);
+    }
+}
+
+async fn perform_action(
+    app: &tauri::AppHandle,
+    service: &Arc<Service>,
+    mr_id: u64,
+    epoch: u64,
+    action: Action,
+) -> Result<ActionResult, ApiError> {
+    let _gate = service
+        .mutation_gate
+        .try_lock()
+        .map_err(|_| error("blocked", "已有合并请求操作正在进行，请等待结果"))?;
+    let (context, request) = {
+        let mut inner = service.lock();
+        let context = inner.context(epoch, false)?;
+        let request = inner.request(mr_id)?;
+        inner.write_generation += 1;
+        (
+            Context {
+                generation: inner.write_generation,
+                ..context
+            },
+            request,
+        )
+    };
+    let operation = async {
+        match action {
+            Action::Close => {
+                api::close(&context.config, mr_id, request.project_id, request.iid).await
+            }
+            Action::Approve {
+                reviewed_sha,
+                expected_target_branch,
+                reviewed_version_id,
+                reviewed_refs,
+            } => {
+                api::approve(
+                    &context.config,
+                    mr_id,
+                    request.project_id,
+                    request.iid,
+                    &reviewed_sha,
+                    &expected_target_branch,
+                    reviewed_version_id,
+                    &reviewed_refs,
+                )
+                .await
+            }
+        }
+    };
+    let result = tokio::time::timeout(Duration::from_secs(120), operation)
+        .await
+        .unwrap_or_else(|_| {
+            Err(error(
+                "uncertain",
+                "操作结果尚未确认，请到 GitLab 核实，勿重复提交",
+            ))
+        })
+        .and_then(|result| {
+            if result.detail.as_ref().is_some_and(|detail| {
+                detail.summary.id != mr_id || Request::from(&detail.summary) != request
+            }) {
+                Err(error(
+                    "uncertain",
+                    "GitLab 返回的合并请求身份不一致，请到原项目核实操作结果，勿重复提交",
+                ))
+            } else if result
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail_bytes(detail) > DETAIL_BUDGET)
+            {
+                Ok(ActionResult {
+                    detail: None,
+                    ..result
+                })
+            } else {
+                Ok(result)
+            }
+        });
+    {
+        let mut inner = service.lock();
+        if !inner.accepts(&context) {
+            return Err(error(
+                if inner.epoch == epoch {
+                    "uncertain"
+                } else {
+                    "stale"
+                },
+                "操作已发送，但应用状态已变化，请到原 GitLab 项目核实结果，勿重复提交",
+            ));
+        }
+        // Drop any reads begun during the write before publishing the fresh result.
+        inner.write_generation += 1;
+        if let Some(cache) = inner.caches.get_mut(&context.key) {
+            cache_action_result(cache, mr_id, &result);
+        }
+        inner.data_revision += 1;
+        inner.next_detail = now().saturating_add(COOLDOWN);
+        inner.trim_budget(CACHE_BUDGET);
+        inner.publish(app);
+    }
+    service.changed.notify_one();
+    result.map_err(|failure| {
+        if matches!(failure.kind.as_str(), "timeout" | "network") {
+            error(
+                "uncertain",
+                "操作结果尚未确认，请刷新状态或到 GitLab 核实，勿直接重复提交",
+            )
+        } else {
+            failure
+        }
+    })
+}
+
+#[tauri::command]
+pub async fn mr_close(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    mr_id: u64,
+    epoch: u64,
+) -> Result<ActionResult, ApiError> {
+    perform_action(&app, &state.0.clone(), mr_id, epoch, Action::Close).await
+}
+
+#[tauri::command]
+pub async fn mr_approve(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    mr_id: u64,
+    epoch: u64,
+    reviewed_sha: String,
+    expected_target_branch: String,
+    reviewed_version_id: u64,
+    reviewed_refs: api::DiffRefs,
+) -> Result<ActionResult, ApiError> {
+    perform_action(
+        &app,
+        &state.0.clone(),
+        mr_id,
+        epoch,
+        Action::Approve {
+            reviewed_sha,
+            expected_target_branch,
+            reviewed_version_id,
+            reviewed_refs,
+        },
+    )
+    .await
+}
+
 #[tauri::command]
 pub fn mr_open(state: tauri::State<'_, MrState>, mr_id: u64, epoch: u64) -> Result<(), ApiError> {
     let inner = state.0.lock();
@@ -1632,6 +2157,22 @@ pub fn mr_open(state: tauri::State<'_, MrState>, mr_id: u64, epoch: u64) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diff_save_is_atomic_and_stale_context_preserves_existing_file() {
+        let directory = std::env::temp_dir().join(format!("gitkit-diff-save-{}-{}", std::process::id(), now()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("review.diff");
+        std::fs::write(&path, b"previous download").unwrap();
+        let failure = save_diff_file(&path, b"new download", || Err::<(), _>(error("stale", "changed"))).unwrap_err();
+        assert_eq!(failure.kind, "stale");
+        assert_eq!(std::fs::read(&path).unwrap(), b"previous download");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        save_diff_file(&path, b"new download", || Ok(())).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new download");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     fn fixture() -> Inner {
         let config = api::Config {
@@ -1719,6 +2260,8 @@ mod tests {
             },
             blocking_discussions_resolved: None,
             can_merge: false,
+            can_close: false,
+            can_approve: false,
             blocked_reasons: vec![],
             diff_refs: None,
             diff_versions: vec![],
@@ -1727,6 +2270,8 @@ mod tests {
             delete_source_default: false,
             delete_source_required: false,
             delete_source_allowed: None,
+            merge_commit_message: None,
+            squash_commit_message: None,
         }
     }
 
@@ -1927,6 +2472,8 @@ mod tests {
             },
             blocking_discussions_resolved: None,
             can_merge: false,
+            can_close: false,
+            can_approve: false,
             blocked_reasons: vec![],
             diff_refs: None,
             diff_versions: vec![],
@@ -1935,6 +2482,8 @@ mod tests {
             delete_source_default: false,
             delete_source_required: false,
             delete_source_allowed: None,
+            merge_commit_message: None,
+            squash_commit_message: None,
         };
         let cache = inner.caches.get_mut(&key).unwrap();
         cache.items = original.clone();
@@ -2131,5 +2680,94 @@ mod tests {
         assert_eq!(cache.len(), MAX_DETAILS);
         assert!(cache.contains_key(&19));
         assert!(!cache.contains_key(&0));
+    }
+
+    #[test]
+    fn action_cache_replaces_confirmed_detail_and_removes_closed_requests_from_inbox() {
+        let mut cache = Cache::default();
+        let initial = row(101, 8);
+        cache.items = vec![initial.clone()];
+        cache.details.insert(
+            101,
+            Cached {
+                value: detail(initial.clone()),
+                at: 0,
+            },
+        );
+        cache.discussions.insert(
+            101,
+            Cached {
+                value: vec![],
+                at: 0,
+            },
+        );
+        let mut current = detail(initial);
+        current.summary.state = "closed".into();
+        let result = Ok(ActionResult {
+            state: "closed".into(),
+            message: "confirmed".into(),
+            detail: Some(current.clone()),
+        });
+        cache_action_result(&mut cache, 101, &result);
+        assert!(cache.items.is_empty());
+        assert_eq!(cache.details.get(&101).unwrap().value, current);
+        assert!(!cache.discussions.contains_key(&101));
+    }
+
+    #[test]
+    fn uncertain_action_without_detail_invalidates_personal_approval_and_discussion_cache() {
+        let initial = row(101, 8);
+        let mut cache = Cache {
+            items: vec![initial.clone()],
+            ..Cache::default()
+        };
+        cache.details.insert(
+            101,
+            Cached {
+                value: detail(initial),
+                at: 0,
+            },
+        );
+        cache.discussions.insert(
+            101,
+            Cached {
+                value: vec![],
+                at: 0,
+            },
+        );
+        cache_action_result(
+            &mut cache,
+            101,
+            &Ok(ActionResult {
+                state: "uncertain".into(),
+                message: "not confirmed".into(),
+                detail: None,
+            }),
+        );
+        assert_eq!(cache.items.len(), 1);
+        assert!(!cache.details.contains_key(&101));
+        assert!(!cache.discussions.contains_key(&101));
+    }
+
+    #[test]
+    fn diff_comment_invalidates_only_the_commented_mr_details_and_discussions() {
+        let mut cache = Cache::default();
+        for mr_id in [101, 102] {
+            cache.items.push(row(mr_id, 8));
+            cache.details.insert(mr_id, Cached {
+                value: detail(row(mr_id, 8)),
+                at: 0,
+            });
+            cache.discussions.insert(mr_id, Cached {
+                value: vec![],
+                at: 0,
+            });
+        }
+        invalidate_comment_cache(&mut cache, 101);
+        assert!(!cache.details.contains_key(&101));
+        assert!(!cache.discussions.contains_key(&101));
+        assert!(cache.details.contains_key(&102));
+        assert!(cache.discussions.contains_key(&102));
+        assert_eq!(cache.items.len(), 2);
     }
 }

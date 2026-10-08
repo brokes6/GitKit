@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import { ChevronRight, CircleAlert, FolderGit2, LoaderCircle, RefreshCw, X } from "lucide-react";
 import type { Project } from "./App";
+import { Skeleton } from "./Skeleton";
 import { getCurrentLanguage, tf, tx } from "./i18n";
 import { activityIntensity, activityKeyboardIndex, aggregateProjectActivity } from "./projectActivity";
 import type { ActivityDay } from "./projectActivity";
@@ -40,9 +41,9 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
   const incomplete = hasIdentities && (refreshing || failed.length > 0 || loadedCount < projects.length);
   const available = !hasIdentities || loadedCount > 0;
   const loading = refreshing && !available;
-  const selectedDay = data.days.find((day) => day.key === selectedKey);
-  const detailDay = selectedDay ?? data.days.find((day) => day.key === detailKey);
-  const previewDay = data.days.find((day) => day.key === (hoveredKey ?? focusedKey ?? selectedKey));
+  const selectedDay = available ? data.days.find((day) => day.key === selectedKey) : undefined;
+  const detailDay = available ? selectedDay ?? data.days.find((day) => day.key === detailKey) : undefined;
+  const previewDay = available ? data.days.find((day) => day.key === (hoveredKey ?? focusedKey ?? selectedKey)) : undefined;
   const tabKey = data.days.some((day) => day.key === keyboardKey) ? keyboardKey : data.days[data.days.length - 1]?.key;
   const projectsById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const detailProjects = detailDay?.projects.flatMap((value) => {
@@ -78,12 +79,14 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
     <div className="gk-activity-heading">
       <div><h2 id="workspace-activity-heading">{tx("工作区提交活动")}</h2><span>{tx("最近 12 个月")}</span></div>
       <div className="gk-activity-totals">
-        <strong>{available ? tf("{0} 个提交", numberFormatter.format(data.totalCommits)) : "—"}</strong>
-        {available && <span>{tf("{0} 个活跃日", numberFormatter.format(data.activeDays))}</span>}
+        {loading ? <><Skeleton width={76} height={11} /><Skeleton width={64} height={10} /></>
+          : <><strong>{available ? tf("{0} 个提交", numberFormatter.format(data.totalCommits)) : "—"}</strong>
+            {available && <span>{tf("{0} 个活跃日", numberFormatter.format(data.activeDays))}</span>}</>}
         {incomplete && !loading && <span>{tf("已读取 {0} / {1} 个项目", loadedCount, projects.length)}</span>}
-        {refreshing && <span className="gk-activity-progress"><LoaderCircle size={12} className="gk-overview-spin" aria-hidden="true" />{tx("更新中")}</span>}
+        {refreshing && !loading && <span className="gk-activity-progress"><LoaderCircle size={12} className="gk-overview-spin" aria-hidden="true" />{tx("更新中")}</span>}
       </div>
     </div>
+    {loading && <span className="sr-only" role="status">{tf("正在读取 {0} 个项目的提交活动", projects.length)}</span>}
     <div className="gk-activity-scope"><span>{tx("所有项目 · 仅设置中的提交者身份 · 按提交者日期 · 包含未推送提交")}</span>
       {checkedAt && <span>{tf("活动读取于 {0}", new Intl.DateTimeFormat(locale, {
         month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
@@ -94,13 +97,14 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
         <div className="gk-activity-months" aria-hidden="true">{months.map(({ label, index }) =>
           <span key={index} style={{ gridColumn: index + 1 }}>{label}</span>)}</div>
         <div className="gk-activity-weekdays" aria-hidden="true"><span>{tx("一")}</span><span>{tx("三")}</span><span>{tx("五")}</span></div>
-        <p className="sr-only" id="workspace-activity-help">{tx("使用方向键选择日期，按 Enter 查看当天项目。Home 和 End 跳至首日与末日。")}</p>
-        <div className="gk-activity-grid" role="group" aria-label={tx("每日提交活动")} aria-describedby="workspace-activity-help">
+        {available && <p className="sr-only" id="workspace-activity-help">{tx("使用方向键选择日期，按 Enter 查看当天项目。Home 和 End 跳至首日与末日。")}</p>}
+        <div className="gk-activity-grid" role="group" aria-label={tx("每日提交活动")} aria-describedby={available ? "workspace-activity-help" : undefined}>
           {data.weeks.map((week, index) => <div className="gk-activity-week" key={index}>{week.map((day, weekday) => day
-            ? <button key={day.key} ref={(node) => { if (node) dayButtons.current.set(day.key, node); else dayButtons.current.delete(day.key); }}
+            ? loading ? <Skeleton key={day.key} className="gk-activity-day gk-activity-placeholder" width="100%" height="var(--gka-cell)" color="var(--gka-zero)" />
+              : <button key={day.key} ref={(node) => { if (node) dayButtons.current.set(day.key, node); else dayButtons.current.delete(day.key); }}
               className="gk-activity-day" data-level={available ? activityIntensity(day.count, data.peakCount) : 0}
               data-unavailable={!available || undefined} data-selected={selectedDay?.key === day.key || undefined}
-              tabIndex={tabKey === day.key ? 0 : -1} title={describeDay(day)} aria-label={describeDay(day)} aria-pressed={selectedDay?.key === day.key}
+              disabled={!available} tabIndex={available && tabKey === day.key ? 0 : -1} title={describeDay(day)} aria-label={describeDay(day)} aria-pressed={selectedDay?.key === day.key}
               aria-controls="workspace-activity-detail" aria-expanded={selectedDay?.key === day.key}
               onMouseEnter={() => setHoveredKey(day.key)} onFocus={() => { setFocusedKey(day.key); setKeyboardKey(day.key); }}
               onBlur={() => setFocusedKey(null)} onKeyDown={(event) => navigateDay(event, day)}
@@ -111,12 +115,11 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
     </div>
     <div className="gk-activity-caption">
       <span className="gk-activity-day-caption">{previewDay ? describeDay(previewDay) : tx("同一提交在多个项目中只计一次")}</span>
-      <span className="gk-activity-legend" aria-label={tx("颜色表示提交数量")}><span>{tx("少")}</span>
-        {[0, 1, 2, 3, 4].map((level) => <i key={level} data-level={level} aria-hidden="true" />)}<span>{tx("多")}</span></span>
+      {loading ? <Skeleton width={80} height={9} /> : <span className="gk-activity-legend" aria-label={tx("颜色表示提交数量")}><span>{tx("少")}</span>
+        {[0, 1, 2, 3, 4].map((level) => <i key={level} data-level={level} aria-hidden="true" />)}<span>{tx("多")}</span></span>}
     </div>
-    {(loading || failed.length > 0 || (!refreshing && available && data.totalCommits === 0)) && <div className="gk-activity-status" role="status">
-      {loading ? <span>{tf("正在读取 {0} 个项目的提交活动", projects.length)}</span>
-        : failed.length > 0 ? <><CircleAlert size={13} aria-hidden="true" /><span>{tf("{0} 个项目读取失败，统计尚不完整", failed.length)}</span></>
+    {(failed.length > 0 || (!refreshing && available && data.totalCommits === 0)) && <div className="gk-activity-status" role="status">
+      {failed.length > 0 ? <><CircleAlert size={13} aria-hidden="true" /><span>{tf("{0} 个项目读取失败，统计尚不完整", failed.length)}</span></>
           : <span>{hasIdentities ? tx("最近 12 个月没有匹配已配置身份的提交") : tx("请先在设置中配置提交者身份")}</span>}
       {failed.length > 0 && <button className="gk-activity-retry" disabled={refreshing} onClick={activity.refresh}>
         <RefreshCw size={12} aria-hidden="true" />{tx("重新读取")}</button>}
