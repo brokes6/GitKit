@@ -264,7 +264,11 @@ fn ci_running(detail: Option<&Detail>) -> bool {
 }
 
 fn user_bytes(user: &User) -> usize {
-    std::mem::size_of::<User>() + user.name.len() + user.username.len()
+    std::mem::size_of::<User>()
+        + user.name.len()
+        + user.username.len()
+        + user.email.as_ref().map_or(0, String::len)
+        + user.public_email.as_ref().map_or(0, String::len)
 }
 fn refs_bytes(refs: &api::DiffRefs) -> usize {
     refs.base_sha.len() + refs.start_sha.len() + refs.head_sha.len()
@@ -2342,6 +2346,8 @@ mod tests {
                 id: 7,
                 name: "Fixture".into(),
                 username: "fixture".into(),
+                email: None,
+                public_email: None,
             },
             roles: vec!["author".into()],
             draft: false,

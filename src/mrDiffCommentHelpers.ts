@@ -1,4 +1,4 @@
-import type { MrDiffCommentPosition, MrDiffRefs, MrDiscussion } from "./mergeRequestTypes";
+import type { MrDiffCommentPosition, MrDiffFile, MrDiffNotePosition, MrDiffRefs, MrDiscussion } from "./mergeRequestTypes";
 import { sameMrRefs } from "./mergeRequestHelpers.ts";
 
 function validLine(line: number | null): boolean {
@@ -20,6 +20,36 @@ function validPositionLines(position: Pick<MrDiffCommentPosition, "oldLine" | "n
   return (position.oldLine !== null || position.newLine !== null)
     && (position.oldLine === null || validLine(position.oldLine))
     && (position.newLine === null || validLine(position.newLine));
+}
+
+/** Ignore replies without positions and anchors from a different GitLab version. */
+export function mrDiscussionDiffPosition(
+  discussion: MrDiscussion,
+  refs: MrDiffRefs | null,
+): MrDiffNotePosition | null {
+  if (!refs || !refs.baseSha || !refs.startSha || !refs.headSha) return null;
+
+  for (const note of discussion.notes) {
+    const position = note.position;
+    if (note.system || !position || position.positionType !== "text"
+      || !sameMrRefs(position, refs) || !validPositionLines(position)
+      || !position.oldPath || !position.newPath) continue;
+    return position;
+  }
+  return null;
+}
+
+/** A discussion can open a code row only in the exact displayed GitLab file/version. */
+export function mrDiscussionDiffTarget(
+  discussion: MrDiscussion,
+  refs: MrDiffRefs | null,
+  files: readonly Pick<MrDiffFile, "oldPath" | "newPath" | "deletedFile">[],
+): { path: string; position: MrDiffNotePosition } | null {
+  const position = mrDiscussionDiffPosition(discussion, refs);
+  if (!position) return null;
+  const file = files.find((candidate) => candidate.oldPath === position.oldPath
+    && candidate.newPath === position.newPath);
+  return file ? { path: file.deletedFile ? file.oldPath : file.newPath, position } : null;
 }
 
 /** Index once per displayed file/version instead of scanning every thread per row. */

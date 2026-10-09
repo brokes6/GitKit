@@ -27,6 +27,10 @@ pub struct User {
     pub id: u64,
     pub name: String,
     pub username: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default, alias = "public_email")]
+    pub public_email: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

@@ -1,5 +1,5 @@
 /** Remote GitLab data. These types never describe or mutate the local index. */
-export interface MrUser { id: number; name: string; username: string }
+export interface MrUser { id: number; name: string; username: string; email?: string | null; publicEmail?: string | null }
 export type MrRole = "author" | "assignee" | "reviewer";
 export type MrParticipantKind = "assignee" | "reviewer";
 export interface MrParticipantCandidates { users: MrUser[]; nextPage: number | null }

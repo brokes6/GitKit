@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isMrCommentableLine, mrCommentLineKey, mrLineDiscussionIndex, mrLineDiscussions } from '../src/mrDiffCommentHelpers.ts';
+import { isMrCommentableLine, mrCommentLineKey, mrDiscussionDiffPosition, mrDiscussionDiffTarget, mrLineDiscussionIndex, mrLineDiscussions } from '../src/mrDiffCommentHelpers.ts';
 
 const refs = { baseSha: 'base', startSha: 'start', headSha: 'head' };
 const file = { oldPath: 'src/before.ts', newPath: 'src/after.ts' };
@@ -101,4 +101,72 @@ test('file index separates both diff sides and returns each full thread only onc
   assert.deepEqual(index.get(mrCommentLineKey(line(7, null))), [deleted]);
   assert.deepEqual(index.get(mrCommentLineKey(line(14, 15))), [context, second]);
   assert.equal(mrLineDiscussionIndex([context], null, file).size, 0);
+});
+
+test('discussion navigation preserves the original code anchor when replies have no position', () => {
+  const discussion = thread('thread', line(14, 15), [
+    { id: 2, body: 'reply', position: null },
+    { id: 3, body: 'another reply' },
+  ]);
+  const target = mrDiscussionDiffTarget(discussion, refs, [{ ...file, deletedFile: false }]);
+  assert.deepEqual(target, { path: file.newPath, position: discussion.notes[0].position });
+  assert.equal(target.position, discussion.notes[0].position);
+  assert.equal(mrDiscussionDiffPosition(discussion, refs), discussion.notes[0].position);
+});
+
+test('discussion navigation opens renamed files by their new path and deletions by their old path', () => {
+  const added = thread('added', line(null, 7));
+  const deleted = thread('deleted', line(7, null));
+  const renamed = { ...file, deletedFile: false };
+  const removed = { ...file, deletedFile: true };
+  assert.deepEqual(mrDiscussionDiffTarget(added, refs, [renamed]), {
+    path: file.newPath, position: added.notes[0].position,
+  });
+  assert.deepEqual(mrDiscussionDiffTarget(deleted, refs, [removed]), {
+    path: file.oldPath, position: deleted.notes[0].position,
+  });
+});
+
+test('discussion navigation never guesses the current line for another diff version', () => {
+  const files = [{ ...file, deletedFile: false }];
+  for (const key of ['baseSha', 'startSha', 'headSha']) {
+    assert.equal(mrDiscussionDiffTarget(thread(key, { ...line(14, 15), [key]: 'previous' }), refs, files), null);
+    assert.equal(mrDiscussionDiffTarget(thread(key, line(14, 15)), { ...refs, [key]: '' }, files), null);
+    assert.equal(mrDiscussionDiffPosition(thread(key, { ...line(14, 15), [key]: 'previous' }), refs), null);
+    assert.equal(mrDiscussionDiffPosition(thread(key, line(14, 15)), { ...refs, [key]: '' }), null);
+  }
+  assert.equal(mrDiscussionDiffTarget(thread('current', line(14, 15)), null, files), null);
+});
+
+test('discussion navigation requires both paths so reused or renamed paths cannot redirect a thread', () => {
+  const discussion = thread('renamed', line(14, 15));
+  assert.equal(mrDiscussionDiffTarget(discussion, refs, [
+    { oldPath: 'src/other.ts', newPath: file.newPath, deletedFile: false },
+    { oldPath: file.oldPath, newPath: 'src/other.ts', deletedFile: false },
+  ]), null);
+  assert.equal(mrDiscussionDiffTarget(discussion, refs, []), null);
+});
+
+test('ordinary notes, system messages, images and invalid text lines cannot navigate to a code row', () => {
+  const files = [{ ...file, deletedFile: false }];
+  const system = thread('system', line(14, 15));
+  system.notes[0].system = true;
+  const invalid = [
+    thread('regular', null), system,
+    thread('image', { ...line(14, 15), positionType: 'image' }),
+    ...[line(null, null), line(0, 15), line(14, -1), line(14, 1.5),
+      line(Number.NaN, 15), line(null, Number.MAX_SAFE_INTEGER + 1),
+      { ...line(14, 15), oldPath: '' }, { ...line(14, 15), newPath: '' }]
+      .map((position, index) => thread(`invalid-${index}`, position)),
+  ];
+  for (const discussion of invalid) {
+    assert.equal(mrDiscussionDiffPosition(discussion, refs), null, discussion.id);
+    assert.equal(mrDiscussionDiffTarget(discussion, refs, files), null, discussion.id);
+  }
+});
+
+test('a valid discussion position is available before diff files load while its target waits for the file', () => {
+  const discussion = thread('loading', line(14, 15));
+  assert.equal(mrDiscussionDiffPosition(discussion, refs), discussion.notes[0].position);
+  assert.equal(mrDiscussionDiffTarget(discussion, refs, []), null);
 });

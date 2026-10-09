@@ -509,7 +509,7 @@ function fileManagerActionLabel(): string {
 
 // ─── Avatar ───────────────────────────────────────────────────────────────────
 
-function Avatar({ author, size = 28 }: { author: Pick<Author, "initials" | "color">; size?: number }) {
+export function Avatar({ author, size = 28 }: { author: Pick<Author, "initials" | "color">; size?: number }) {
   const compact = size <= 18;
   return (
     <div className="rounded-full flex items-center justify-center flex-shrink-0 font-semibold"

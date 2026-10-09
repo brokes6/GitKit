@@ -7,6 +7,7 @@ import { mrErrorMessage } from "./mergeRequestHelpers";
 import type { MrDetail, MrParticipantCandidates, MrParticipantKind, MrParticipantsResult, MrUser } from "./mergeRequestTypes";
 import { Skeleton } from "./Skeleton";
 import { DialogPresence, useDialogPresence } from "./DialogPresence";
+import { MergeRequestAvatar } from "./MergeRequestAvatar";
 
 interface Props {
   theme: ThemeColors;
@@ -59,7 +60,7 @@ export function MergeRequestParticipants(props: Props) {
             disabled={props.disabled || busy} onClick={() => { setNotice(null); setOpen(open === kind ? null : kind); }}>{tx("编辑")}</button>}
         </div>
         {users.length ? <div className="gkm-participant-users">{users.map(user => <div className="gkm-participant-user" key={user.id} title={`${user.name} @${user.username}`}>
-          <span className="gkm-avatar" aria-hidden="true">{(user.name || user.username).slice(0, 1)}</span><div><strong>{user.name || user.username}</strong><small>@{user.username}</small></div>
+          <MergeRequestAvatar user={user} /><div><strong>{user.name || user.username}</strong><small>@{user.username}</small></div>
         </div>)}</div> : <p className="gkm-participant-none">{tx("未分配")}</p>}
         <DialogPresence onExited={restorePickerFocus}>{open === kind ? <ParticipantPicker key={kind} {...props} kind={kind} users={users} canEdit={canEdit}
           onClose={() => close(kind)} onSaved={message => { setNotice(message); close(kind); }}
@@ -206,7 +207,7 @@ function ParticipantPicker({ theme, style, kind, users, viewer, canEdit, disable
       title={`${user.name} @${user.username}`} aria-label={tf("移除 {0}", user.name || user.username)} onClick={() => toggle(user)}><span>{user.name || user.username}</span><X size={11} aria-hidden="true" /></button>)}</div>}
     <div ref={listRef} className="gkm-participant-options" aria-busy={loading}>
       {candidates.map(user => <label className="gkm-participant-option" key={user.id} title={`${user.name} @${user.username}`}><input type="checkbox"
-        checked={selected.some(item => item.id === user.id)} disabled={locked} onChange={() => toggle(user)} /><span className="gkm-avatar" aria-hidden="true">{(user.name || user.username).slice(0, 1)}</span><span><strong>{user.name || user.username}</strong><small>@{user.username}</small></span></label>)}
+        checked={selected.some(item => item.id === user.id)} disabled={locked} onChange={() => toggle(user)} /><MergeRequestAvatar user={user} size={28} /><span><strong>{user.name || user.username}</strong><small>@{user.username}</small></span></label>)}
       {loading && <div className="gkm-participant-skeleton" role="status" aria-label={tx("正在加载项目成员")}><Skeleton height={26} /><Skeleton height={26} /><Skeleton height={26} /></div>}
       {!loading && !loadError && !candidates.length && <p className="gkm-participant-empty">{tx(query ? "没有匹配的项目成员" : "没有可选择的项目成员")}</p>}
       {loadError && <div className="gkm-participant-error" role="alert">{translateNativeMessage(loadError)}<button className="gkm-text-button" type="button" disabled={locked} onClick={() => nextPage ? void loadMore() : setRetry(value => value + 1)}>{tx("重试")}</button></div>}

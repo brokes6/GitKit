@@ -13,6 +13,42 @@ fn user(id: u64) -> Value {
     json!({"id": id, "name": format!("User {id}"), "username": format!("u{id}")})
 }
 
+#[test]
+fn user_email_fields_preserve_legacy_and_gitlab_response_compatibility() {
+    let legacy: User = serde_json::from_value(user(7)).unwrap();
+    assert_eq!(legacy.email, None);
+    assert_eq!(legacy.public_email, None);
+
+    let mut response = user(7);
+    response["public_email"] = json!("public@example.test");
+    let public_only: User = serde_json::from_value(response.clone()).unwrap();
+    assert_eq!(public_only.email, None);
+    assert_eq!(
+        public_only.public_email.as_deref(),
+        Some("public@example.test")
+    );
+
+    response["email"] = json!("primary@example.test");
+    let both: User = serde_json::from_value(response).unwrap();
+    assert_eq!(both.email.as_deref(), Some("primary@example.test"));
+    assert_eq!(both.public_email.as_deref(), Some("public@example.test"));
+    let serialized = serde_json::to_value(&both).unwrap();
+    assert_eq!(serialized["email"], "primary@example.test");
+    assert_eq!(serialized["publicEmail"], "public@example.test");
+    assert!(serialized.get("public_email").is_none());
+    assert_eq!(serde_json::from_value::<User>(serialized).unwrap(), both);
+
+    for value in [Value::Null, json!("")] {
+        let mut response = user(7);
+        response["email"] = value.clone();
+        response["public_email"] = value.clone();
+        let parsed: User = serde_json::from_value(response).unwrap();
+        let expected = value.as_str();
+        assert_eq!(parsed.email.as_deref(), expected);
+        assert_eq!(parsed.public_email.as_deref(), expected);
+    }
+}
+
 fn project() -> Value {
     json!({"id": 9, "name": "app", "path_with_namespace": "team/sub/app", "squash_option": "default_off",
         "remove_source_branch_after_merge": false, "only_allow_merge_if_pipeline_succeeds": true,
