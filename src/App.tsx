@@ -44,6 +44,8 @@ import { workingFileKey, workingFileCount, sameWorking, mergeWorkingPaths, shoul
 import type { WorkingFile } from "./workingStatus";
 import { ProjectOverview, WorkbenchActionBar } from "./Workbench";
 import { ToolbarText } from "./ToolbarText";
+import { useToolbarLayoutMotion } from "./useToolbarLayoutMotion";
+import { DialogPresence, useDialogPresence } from "./DialogPresence";
 import { Skeleton, CodeSkeleton } from "./Skeleton";
 import { useProjectOverview } from "./useProjectOverview";
 import { useAppForeground } from "./useAppForeground";
@@ -1011,6 +1013,11 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
   const moreButton = useRef<HTMLButtonElement>(null);
   const moreMenu = useRef<HTMLDivElement>(null);
   const focusMoreMenuOnOpen = useRef(false);
+  const toolbarLayoutKey = JSON.stringify([
+    project?.id, project?.name, project?.initialized, branch, pushCount, getCurrentLanguage(),
+  ]);
+  const toolbarRef = useToolbarLayoutMotion(toolbarLayoutKey);
+  useEffect(() => { setMorePos(null); }, [toolbarLayoutKey]);
   useEffect(() => {
     if (!morePos) return;
     if (focusMoreMenuOnOpen.current) {
@@ -1037,22 +1044,25 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
     { label: tx("强制推送…"), Icon: AlertTriangle, action: onForcePush },
   ];
   return (
-    <div className="flex items-center gap-1.5 h-full flex-1 min-w-0"
+    <div ref={toolbarRef} className="flex items-center gap-1.5 h-full flex-1 min-w-0"
       role="group" aria-label={tx("仓库操作")}
       style={{ color: t.textSec,
         "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
-      <div className="gk-toolbar-project flex items-center min-w-0 gap-2 px-2 mr-1"
-        style={{ borderRight: `0.5px solid ${t.border}` }}>
+      <div className="gk-toolbar-project relative flex items-center min-w-0 px-2 mr-1"
+        style={{ borderRight: "0.5px solid transparent" }}>
+        <div className="gk-toolbar-metadata flex items-center min-w-0 gap-2">
         <span className="gk-toolbar-name text-xs font-semibold truncate" title={project?.path} style={{ color: t.text }}><ToolbarText>{project?.name ?? "GitKit"}</ToolbarText></span>
         <span className="flex items-center gap-1 min-w-0" style={{ color: t.textMuted }}>
           <GitBranch size={12} className="flex-shrink-0" aria-hidden="true" />
           <span className="gk-toolbar-branch text-[11px] truncate" title={branch}><ToolbarText order={1}>{project?.initialized === false ? tx("未初始化 Git") : project ? branch || tx("未检出分支") : tx("选择仓库")}</ToolbarText></span>
         </span>
+        </div>
+        <span data-gk-toolbar-move aria-hidden="true" className="absolute inset-y-0 right-0" style={{ background: t.border, width: 0.5 }} />
       </div>
       {actions.map(({ label, Icon, action, op }, index) => {
         const running = busy === op;
         return (
-          <button key={op} onClick={action} disabled={!action || !!busy} aria-busy={running || undefined}
+          <button data-gk-toolbar-move key={op} onClick={action} disabled={!action || !!busy} aria-busy={running || undefined}
             data-running={running || undefined}
             className="gk-shell-button gk-git-action flex items-center justify-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
             style={{ borderRadius: R - 3,
@@ -1064,7 +1074,7 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
           </button>
         );
       })}
-      <button onClick={onUndoCommit} disabled={!onUndoCommit || !!busy}
+      <button data-gk-toolbar-move onClick={onUndoCommit} disabled={!onUndoCommit || !!busy}
         className="gk-shell-button gk-git-action flex items-center justify-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
         title={onUndoCommit ? tx("撤回最近一次未推送提交到工作区") : tx("当前分支没有可撤回的未推送提交")}
         style={{ borderRadius: R - 3, "--gk-action-accent": t.accentFg,
@@ -1073,17 +1083,17 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
         <ToolbarText order={5}>{tx("撤回")}</ToolbarText>
       </button>
       <div className="flex-1" />
-      <button onClick={onCreateBranch} disabled={!onCreateBranch || !!busy}
+      <button data-gk-toolbar-move onClick={onCreateBranch} disabled={!onCreateBranch || !!busy}
         className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
         style={{ borderRadius: R - 3 }}>
         <GitBranchPlus size={15} aria-hidden="true" /><ToolbarText order={6}>{tx("新建分支")}</ToolbarText>
       </button>
-      <button disabled={!onCreatePR || !!busy} onClick={onCreatePR}
+      <button data-gk-toolbar-move disabled={!onCreatePR || !!busy} onClick={onCreatePR}
         className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
         style={{ borderRadius: R - 3, background: onCreatePR ? t.accent : t.inputBg, color: onCreatePR ? "#fff" : t.textMuted }}>
         <GitPullRequest size={15} aria-hidden="true" /><ToolbarText order={7}>{tx("创建合并请求")}</ToolbarText>
       </button>
-      <button ref={moreButton} disabled={!moreActions.some(({ action }) => !!action) || !!busy} aria-label={tx("更多仓库操作")} title={tx("更多仓库操作")}
+      <button data-gk-toolbar-move ref={moreButton} disabled={!moreActions.some(({ action }) => !!action) || !!busy} aria-label={tx("更多仓库操作")} title={tx("更多仓库操作")}
         aria-haspopup="menu" aria-expanded={!!morePos}
         onClick={(event) => {
           if (morePos) { setMorePos(null); return; }
@@ -2479,6 +2489,7 @@ function ExpandedDiffDialog({ files, file, onFileSelect, onClose, repoPath }: {
   onFileSelect: (file: CommitFile) => void; onClose: () => void; repoPath: string;
 }) {
   const t = useTheme();
+  const { closing } = useDialogPresence();
   const dialogRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
@@ -2487,6 +2498,9 @@ function ExpandedDiffDialog({ files, file, onFileSelect, onClose, repoPath }: {
   const scrollSettledTimerRef = useRef<number | null>(null);
   const [activeHunk, setActiveHunk] = useState(-1);
   onCloseRef.current = onClose;
+  useLayoutEffect(() => {
+    dialogRef.current?.toggleAttribute("inert", closing);
+  }, [closing]);
 
   const fileIndex = files.findIndex((entry) => entry.path === file.path);
   const loading = !!repoPath && file.diff === undefined && !file.diffError;
@@ -2527,6 +2541,7 @@ function ExpandedDiffDialog({ files, file, onFileSelect, onClose, repoPath }: {
   }, [file.path, file.diff, file.diffError, hunkCount]);
 
   useEffect(() => {
+    if (closing) return;
     const dialog = dialogRef.current;
     dialog?.focus();
     const onKey = (event: KeyboardEvent) => {
@@ -2546,7 +2561,7 @@ function ExpandedDiffDialog({ files, file, onFileSelect, onClose, repoPath }: {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, []);
+  }, [closing]);
 
   const selectAdjacentFile = (direction: -1 | 1, hunk: "first" | "last") => {
     const next = files[fileIndex + direction];
@@ -2592,13 +2607,13 @@ function ExpandedDiffDialog({ files, file, onFileSelect, onClose, repoPath }: {
   );
 
   return createPortal(
-    <div className="gk-expanded-diff-overlay fixed inset-0 flex items-center justify-center"
+    <div className="gk-expanded-diff-overlay fixed inset-0 flex items-center justify-center" aria-hidden={closing || undefined}
       style={{ zIndex: 220, colorScheme: t.isDark ? "dark" : "light",
-        padding: "64px clamp(12px, 2vw, 24px) 24px" }}>
-      <div className="absolute inset-0 gk-overlay-in" style={{ background: "rgba(0,0,0,0.45)" }}
+        padding: "64px clamp(12px, 2vw, 24px) 24px", pointerEvents: closing ? "none" : undefined }}>
+      <div className={`absolute inset-0 ${closing ? "gk-overlay-out" : "gk-overlay-in"}`} style={{ background: "rgba(0,0,0,0.45)" }}
         {...press(onClose)} />
       <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={tx("展开文件差异")}
-        tabIndex={-1} className="gk-expanded-diff-card gk-modal-in relative flex flex-col overflow-hidden outline-none"
+        tabIndex={-1} className={`gk-expanded-diff-card ${closing ? "gk-modal-out" : "gk-modal-in"} relative flex flex-col overflow-hidden outline-none`}
         style={{ width: "100%", height: "100%", maxWidth: 1440,
           background: t.dialogBg, borderRadius: 14, boxShadow: t.shadowWindow }}>
         <CodeDiffSurface filePath={file.path} diff={file.diff}
@@ -2886,7 +2901,7 @@ function FileTracePanel({ repoPath, anchor, filePath, branch, expanded, onExpand
         </div>}
       </div>
     </div>
-    {expanded && traceFile && <ExpandedDiffDialog files={[traceFile]} file={traceFile} onFileSelect={() => {}} onClose={onCloseExpanded} repoPath={repoPath} />}
+    <DialogPresence>{expanded && traceFile ? <ExpandedDiffDialog files={[traceFile]} file={traceFile} onFileSelect={() => {}} onClose={onCloseExpanded} repoPath={repoPath} /> : null}</DialogPresence>
   </div>;
 }
 
@@ -3555,26 +3570,30 @@ const press = (fn: () => void) => ({
 
 type DlgIcon = typeof GitPullRequest;
 
-export function Modal({ title, Icon, onClose, width = 480, children, footer, closing = false, onExited, theme }: {
+export function Modal({ title, Icon, onClose, width = 480, children, footer, closing: ownClosing = false, onExited, theme }: {
   title: string; Icon: DlgIcon; onClose: () => void; width?: number;
   children: React.ReactNode; footer?: React.ReactNode; closing?: boolean; onExited?: () => void;
   theme?: ThemeColors;
 }) {
   const inheritedTheme = useTheme();
   const t = theme ?? inheritedTheme;
+  const presence = useDialogPresence();
+  const closing = ownClosing || presence.closing;
   useEffect(() => {
+    if (closing) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, closing]);
   return (
     <div className="fixed inset-0 flex items-center justify-center" style={{ zIndex: 200, pointerEvents: closing ? "none" : undefined }}>
       <div className={`absolute inset-0 ${closing ? "gk-overlay-out" : "gk-overlay-in"}`}
         style={{ background: "rgba(0,0,0,0.45)" }} {...press(onClose)} />
-      <div role="dialog" aria-modal="true" aria-label={title}
+      <div role="dialog" aria-modal="true" aria-label={title} aria-hidden={closing || undefined}
+        ref={element => { if (element) element.inert = closing; }}
         className={`relative flex flex-col ${closing ? "gk-modal-out" : "gk-modal-in"}`}
         onAnimationEnd={(event) => {
-          if (closing && event.currentTarget === event.target) onExited?.();
+          if (closing && event.currentTarget === event.target && event.animationName === "gk-modal-out") onExited?.();
         }}
         style={{ width, maxWidth: "calc(100vw - 32px)", maxHeight: "85vh",
         background: t.dialogBg,
@@ -3612,9 +3631,27 @@ function CommitSearchDialog({ commits, ready, errored, onClose, onSelect }: {
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const deferredQuery = useDeferredValue(normalizedQuery);
   const inputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
   const closeActionRef = useRef<(() => void) | null>(null);
+  const closeCompletedRef = useRef(false);
   const [closing, setClosing] = useState(false);
+  useLayoutEffect(() => {
+    dialogRef.current?.toggleAttribute("inert", closing);
+  }, [closing]);
+  const finishClose = useCallback(() => {
+    if (closeCompletedRef.current || !closeActionRef.current) return;
+    closeCompletedRef.current = true;
+    const action = closeActionRef.current;
+    closeActionRef.current = null;
+    action();
+  }, []);
+  useEffect(() => {
+    if (!closing) return;
+    const timer = window.setTimeout(finishClose,
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 200);
+    return () => window.clearTimeout(timer);
+  }, [closing, finishClose]);
   const matches = useMemo(() => deferredQuery ? commits.filter((commit) => [
     commit.message, commit.body, commit.author.name, commit.author.email,
     commit.hash, commit.fullHash, commit.branchLabel,
@@ -3623,7 +3660,7 @@ function CommitSearchDialog({ commits, ready, errored, onClose, onSelect }: {
   const results = matches.slice(0, 80);
   const searching = normalizedQuery !== deferredQuery;
   const closeWith = (action: () => void) => {
-    if (closing || closeActionRef.current) return;
+    if (closing || closeActionRef.current || closeCompletedRef.current) return;
     closeActionRef.current = action;
     setClosing(true);
   };
@@ -3634,6 +3671,7 @@ function CommitSearchDialog({ commits, ready, errored, onClose, onSelect }: {
     inputRef.current?.focus();
     const dialog = inputRef.current?.closest('[role="dialog"]');
     const trapFocus = (event: KeyboardEvent) => {
+      if (closeActionRef.current || closeCompletedRef.current) return;
       if (event.key === "Escape") { event.preventDefault(); requestClose(); return; }
       if (event.key !== "Tab" || !dialog) return;
       const controls = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled), input'));
@@ -3646,17 +3684,13 @@ function CommitSearchDialog({ commits, ready, errored, onClose, onSelect }: {
   }, []);
   useEffect(() => { resultsRef.current?.scrollTo({ top: 0 }); }, [deferredQuery]);
   return (
-    <div className="fixed inset-0 flex items-center justify-center" style={{ zIndex: 200, pointerEvents: closing ? "none" : undefined }}>
+    <div className="fixed inset-0 flex items-center justify-center" aria-hidden={closing || undefined} style={{ zIndex: 200, pointerEvents: closing ? "none" : undefined }}>
       <div className={`absolute inset-0 ${closing ? "gk-overlay-out" : "gk-overlay-in"}`}
         style={{ background: "rgba(0,0,0,0.45)" }} {...press(requestClose)} />
-      <div role="dialog" aria-modal="true" aria-label={tx("搜索提交")}
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={tx("搜索提交")}
         className={`relative flex flex-col min-h-0 overflow-hidden ${closing ? "gk-modal-out" : "gk-modal-in"}`}
         onAnimationEnd={(event) => {
-          if (closing && event.currentTarget === event.target) {
-            const action = closeActionRef.current;
-            closeActionRef.current = null;
-            action?.();
-          }
+          if (closing && event.currentTarget === event.target && event.animationName === "gk-modal-out") finishClose();
         }}
         style={{ width: 620, maxWidth: "calc(100vw - 32px)", maxHeight: "85vh",
           background: t.dialogBg, borderRadius: R + 2,
@@ -4671,7 +4705,7 @@ function CreatePRDialog({ path, branches, currentBranch, defaultTarget, term, on
   path?: string;
   branches: Branch[]; currentBranch: string; defaultTarget: string;
   term: string; // "合并请求" (GitLab) | "拉取请求" (GitHub)
-  onCancel: () => void; onConfirm: (source: string, target: string, title: string, description: string) => Promise<void>;
+  onCancel: () => void; onConfirm: (source: string, target: string, title: string, description: string) => Promise<boolean>;
 }) {
   const t = useTheme();
   const [source, setSource] = useState(currentBranch || branches[0]?.name || "");
@@ -4679,8 +4713,32 @@ function CreatePRDialog({ path, branches, currentBranch, defaultTarget, term, on
   const [title, setTitle] = useState("");
   const [desc, setDesc] = useState("");
   const [busy, setBusy] = useState(false);
+  const [closing, setClosing] = useState(false);
+  const busyRef = useRef(false);
+  const closePhase = useRef<"open" | "closing" | "closed">("open");
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
+  const finishClose = useCallback(() => {
+    if (closePhase.current !== "closing") return;
+    closePhase.current = "closed";
+    onCancelRef.current();
+  }, []);
+  const beginClose = () => {
+    if (closePhase.current !== "open") return;
+    closePhase.current = "closing";
+    setClosing(true);
+  };
+  const requestClose = () => { if (!busyRef.current) beginClose(); };
+  useEffect(() => {
+    if (!closing) return;
+    // animationend is the normal exit; also finish if animations are disabled
+    // or the WebView drops the event. Reduced motion needs no visual delay.
+    const timer = window.setTimeout(finishClose,
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 200);
+    return () => window.clearTimeout(timer);
+  }, [closing, finishClose]);
   const same = source === target;
-  const valid = title.trim().length > 0 && !same && !busy;
+  const valid = title.trim().length > 0 && !same && !busy && !closing;
 
   // Live merge-conflict preview between source and target (no working-tree changes).
   const [preview, setPreview] = useState<{ state: "idle" | "checking" | "clean" | "conflict" | "error"; files: string[] }>({ state: "idle", files: [] });
@@ -4699,15 +4757,18 @@ function CreatePRDialog({ path, branches, currentBranch, defaultTarget, term, on
     return () => { cancelled = true; clearTimeout(id); };
   }, [path, source, target, same]);
   const submit = async () => {
-    if (!valid) return;
+    if (!valid || busyRef.current || closePhase.current !== "open") return;
+    busyRef.current = true;
     setBusy(true);
-    try { await onConfirm(source, target, title.trim(), desc); }
-    finally { setBusy(false); }
+    try {
+      if (await onConfirm(source, target, title.trim(), desc)) beginClose();
+    } finally { busyRef.current = false; setBusy(false); }
   };
   const selectCls = "text-xs px-2.5 py-2 cursor-pointer outline-none w-full";
   return (
-    <Modal title={tf("创建{0}", term)} Icon={GitPullRequest} onClose={onCancel} width={560}
-      footer={<ModalFooter onCancel={onCancel} onConfirm={submit} confirmLabel={tf("创建{0}", term)} disabled={!valid} busy={busy} />}>
+    <Modal title={tf("创建{0}", term)} Icon={GitPullRequest} onClose={requestClose} width={560}
+      closing={closing} onExited={finishClose}
+      footer={<ModalFooter onCancel={requestClose} onConfirm={submit} confirmLabel={tf("创建{0}", term)} disabled={!valid} busy={busy} />}>
       {/* merge route */}
       <div className="flex flex-col gap-2.5 p-3.5"
         style={{ background: t.inputBg, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 1 }}>
@@ -6135,24 +6196,43 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId,
   ] as const;
   const [section, setSection] = useState<(typeof MENU)[number]["key"]>(initialSection);
   const [closing, setClosing] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    dialogRef.current?.toggleAttribute("inert", closing);
+  }, [closing]);
+  const closeCompletedRef = useRef(false);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const finishClose = useCallback(() => {
+    if (closeCompletedRef.current) return;
+    closeCompletedRef.current = true;
+    onCloseRef.current();
+  }, []);
   const requestClose = () => setClosing(true);
   useEffect(() => {
+    if (closing) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") setClosing(true);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [closing]);
+  useEffect(() => {
+    if (!closing) return;
+    const timer = window.setTimeout(finishClose,
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 200);
+    return () => window.clearTimeout(timer);
+  }, [closing, finishClose]);
 
   return (
-    <div className="fixed inset-0 flex items-center justify-center"
+    <div className="fixed inset-0 flex items-center justify-center" aria-hidden={closing || undefined}
       style={{ zIndex: 200, pointerEvents: closing ? "none" : undefined }}>
       <div className={`absolute inset-0 ${closing ? "gk-overlay-out" : "gk-overlay-in"}`}
         style={{ background: "rgba(0,0,0,0.45)" }} {...press(requestClose)} />
-      <div role="dialog" aria-modal="true" aria-labelledby="settings-title"
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-title"
         className={`relative flex flex-col ${closing ? "gk-modal-out" : "gk-modal-in"}`}
         onAnimationEnd={(event) => {
-          if (closing && event.currentTarget === event.target) onClose();
+          if (closing && event.currentTarget === event.target && event.animationName === "gk-modal-out") finishClose();
         }}
         style={{ width: "min(900px, calc(100vw - 48px))",
         height: "min(720px, calc(100vh - 48px))",
@@ -8707,14 +8787,14 @@ export default function App() {
     if (!prInfo) { toast(tx("请先在设置中配置 GitLab 或 GitHub 令牌")); return; }
     setPrOpen(true);
   };
-  const doCreatePR = async (source: string, target: string, title: string, description: string) => {
-    if (!prInfo) return;
+  const doCreatePR = async (source: string, target: string, title: string, description: string): Promise<boolean> => {
+    if (!prInfo) return false;
     let instanceUrl = prInfo.instanceUrl;
     let token = prInfo.token;
     // GitHub: pick the account matching origin (prompts when several match).
     if (prInfo.provider === "github") {
       const resolved = await resolveRemoteToken(prInfo.remoteUrl, tx("创建拉取请求"));
-      if (!resolved || !resolved.token) return; // cancelled, or no token configured
+      if (!resolved || !resolved.token) return false; // cancelled, or no token configured
       token = resolved.token;
       instanceUrl = resolved.account?.url ?? "";
     }
@@ -8724,8 +8804,8 @@ export default function App() {
         provider: prInfo.provider, instanceUrl, remoteUrl: prInfo.remoteUrl,
         token, source, target, title, description,
       });
-      setPrOpen(false);
       toast.success(tf("已创建{0},正在浏览器打开", prInfo.term), { id: tid, description: url });
+      return true;
     } catch (e) {
       toast.error(tf("创建失败：{0}", e), { id: tid });
       throw e; // keep the dialog open so the user can retry
@@ -9083,7 +9163,7 @@ export default function App() {
               discussionsLoading={mr.discussionsLoading} discussionsError={mr.discussionsError}
               onRefresh={mr.refresh} onReviewLatest={mr.reviewLatest} onDownloadDiff={mr.downloadDiff} onMerge={mr.merge} onCommitMessages={mr.commitMessages} onCancel={mr.close} onApprove={mr.approve} onOpenExternal={mr.openExternal}
               onBackList={mr.backList} onBackWorkspace={mr.backWorkspace} onTabChange={mr.onTabChange}
-              onCreateDiffComment={mr.createDiffComment}
+              onCreateDiffComment={mr.createDiffComment} onParticipantCandidates={mr.participantCandidates} onUpdateParticipants={mr.updateParticipants}
               renderDiff={(files, selected, onSelect, sourceKey, lineComments) => <FileDiffView files={files} selectedFile={selected}
                 onFileSelect={onSelect} repoPath="" sourceKey={sourceKey} compact lineComments={lineComments} />} />}
             <div className="gk-history-workspace flex-1 min-w-0 min-h-0 overflow-hidden" data-history-mode={historyLayoutMode}
@@ -9489,7 +9569,7 @@ export default function App() {
             onConfigure={() => { mr.closeList(); setSettingsSection("gitlab"); setSettingsOpen(true); }} />
         </div>
 
-        {diffExpanded && detailOpen && !viewChanges && !fileTrace && (
+        <DialogPresence>{diffExpanded && detailOpen && !viewChanges && !fileTrace ? (
           selectedStash && selectedStashFile
             ? <ExpandedDiffDialog files={selectedStash.files} file={selectedStashFile}
                 onFileSelect={selectStashFile} onClose={closeExpandedDiff}
@@ -9499,7 +9579,7 @@ export default function App() {
                   onFileSelect={selectDetailFile} onClose={closeExpandedDiff}
                   repoPath={isReal ? path ?? "" : ""} />
               : null
-        )}
+        ) : null}</DialogPresence>
 
         {searchOpen && activeProject && (
           <CommitSearchDialog key={activeProject.id} commits={commits}
@@ -9528,32 +9608,32 @@ export default function App() {
             onClose={() => setSettingsOpen(false)} />
         )}
 
-        {updateRows && (
+        <DialogPresence>{updateRows ? (
           <UpdatesDialog rows={updateRows} busy={pullBusy}
             onPull={doPullUpdates} onClose={() => setUpdateRows(null)} />
-        )}
+        ) : null}</DialogPresence>
 
-        {createBranchOpen && (
+        <DialogPresence>{createBranchOpen ? (
           <CreateBranchDialog branches={branches}
             defaultBase={currentBranch || branches[0]?.name || ""}
             dirty={changesCount > 0}
             onCancel={() => setCreateBranchOpen(false)}
             onConfirm={doCreateBranch} />
-        )}
+        ) : null}</DialogPresence>
 
-        {renameTarget && (
+        <DialogPresence>{renameTarget ? (
           <RenameBranchDialog branch={renameTarget} branches={branches}
             onCancel={() => setRenameTarget(null)}
             onConfirm={doRenameBranch} />
-        )}
+        ) : null}</DialogPresence>
 
-        {stashDialogOpen && (
+        <DialogPresence>{stashDialogOpen ? (
           <StashDialog busy={stashBusy}
             onCancel={() => { if (!stashBusy) setStashDialogOpen(false); }}
             onConfirm={doStash} />
-        )}
+        ) : null}</DialogPresence>
 
-        {deleteBranchTarget && (
+        <DialogPresence>{deleteBranchTarget ? (
           <ConfirmDialog
             title={deleteBranchTarget.worktree ? tx("移除工作树并删除分支")
               : deleteBranchTarget.force ? tx("强制删除分支") : tx("删除分支")}
@@ -9567,29 +9647,29 @@ export default function App() {
             busy={deleteBranchBusy}
             onCancel={() => { if (!deleteBranchBusy) setDeleteBranchTarget(null); }}
             onConfirm={runDeleteBranch} />
-        )}
+        ) : null}</DialogPresence>
 
-        {createRepoTarget && (
+        <DialogPresence>{createRepoTarget ? (
           <CreateRepoDialog key={createRepoTarget.path}
             accounts={createRepoTarget.created ? [createRepoTarget.created.account] : loadRepoAccounts()} defaultName={createRepoTarget.name}
             hasHead={createRepoTarget.hasHead} created={createRepoTarget.created} busy={createRepoBusy}
             onCancel={() => { if (!createRepoBusy) setCreateRepoTarget(null); }}
             onSettings={() => { setCreateRepoTarget(null); setSettingsSection("github"); setSettingsOpen(true); }}
             onConfirm={doCreateRepoAndPush} />
-        )}
+        ) : null}</DialogPresence>
 
-        {cloneOpen && (
+        <DialogPresence>{cloneOpen ? (
           <CloneDialog onClose={() => setCloneOpen(false)} onDone={handleCloneDone} />
-        )}
+        ) : null}</DialogPresence>
 
-        {tagDialogOpen && activeProject && (
+        <DialogPresence>{tagDialogOpen && activeProject ? (
           <TagDialog path={activeProject.path} currentBranch={currentBranch}
             busy={tagBusy}
             onCancel={() => { if (!tagBusy) setTagDialogOpen(false); }}
             onConfirm={doCreateAndPushTag} />
-        )}
+        ) : null}</DialogPresence>
 
-        {checkoutTarget && (
+        <DialogPresence>{checkoutTarget ? (
           <Modal title={tf("切换到 {0}", checkoutTarget.branch)} Icon={GitBranch}
             onClose={() => setCheckoutTarget(null)} width={440}
             footer={
@@ -9620,28 +9700,28 @@ export default function App() {
               </span>
             </div>
           </Modal>
-        )}
+        ) : null}</DialogPresence>
 
-        {mergeOpen && activeProject && (
+        <DialogPresence>{mergeOpen && activeProject ? (
           <LocalMergeDialog key={activeProject.path} path={activeProject.path} branch={currentBranch}
             sources={mergeSources} dirty={activeWorking.length > 0}
             onCancel={() => setMergeOpen(false)} onConfirm={doLocalMerge}
             onChanges={() => { setMergeOpen(false); openOperationChanges(); }}
             onStash={() => { setMergeOpen(false); requestStash(); }} />
-        )}
+        ) : null}</DialogPresence>
 
-        {operationContinueRequest && path === operationContinueRequest.path && (
+        <DialogPresence>{operationContinueRequest && path === operationContinueRequest.path ? (
           <OperationContinueDialog key={`${operationContinueRequest.path}:${operationContinueRequest.kind}`}
             path={operationContinueRequest.path} kind={operationContinueRequest.kind} identities={identities} defaultIdentityId={defaultIdentityId}
             onCancel={() => setOperationContinueRequest(null)} onConfirm={doContinueOperation} />
-        )}
+        ) : null}</DialogPresence>
 
-        {cherryTarget && path === cherryTarget.path && (
+        <DialogPresence>{cherryTarget && path === cherryTarget.path ? (
           <CherryPickDialog commit={cherryTarget.commit} branches={branches} currentBranch={currentBranch}
             onCancel={() => setCherryTarget(null)} onConfirm={doCherryPick} />
-        )}
+        ) : null}</DialogPresence>
 
-        {cherryConflict && path === cherryConflict.path && (
+        <DialogPresence>{cherryConflict && path === cherryConflict.path ? (
           <CherryPickConflictDialog commit={cherryConflict.commit} target={cherryConflict.target} files={cherryConflict.files}
             onCancel={() => setCherryConflict(null)}
             onContinue={(useKaleidoscope) => {
@@ -9649,7 +9729,7 @@ export default function App() {
               setCherryConflict(null);
               void runCherryPick(info.path, info.commit, info.target, useKaleidoscope);
             }} />
-        )}
+        ) : null}</DialogPresence>
 
         {prOpen && prInfo && (
           <CreatePRDialog path={activeProject?.path} branches={branches} currentBranch={currentBranch} term={prInfo.term}
@@ -9658,14 +9738,14 @@ export default function App() {
             onCancel={() => setPrOpen(false)} onConfirm={doCreatePR} />
         )}
 
-        {acctPicker && (
+        <DialogPresence>{acctPicker ? (
           <AccountPickerDialog action={acctPicker.action} accounts={acctPicker.accounts}
             canRemember={acctPicker.canRemember}
             onPick={(a, remember) => { acctPicker.resolve({ account: a, remember }); setAcctPicker(null); }}
             onCancel={() => { acctPicker.resolve(null); setAcctPicker(null); }} />
-        )}
+        ) : null}</DialogPresence>
 
-        {forcePushRequest && (
+        <DialogPresence>{forcePushRequest ? (
           <ForcePushDialog request={forcePushRequest}
             onCancel={() => {
               realCache.current.delete(forcePushRequest.path);
@@ -9673,14 +9753,14 @@ export default function App() {
               setForcePushRequest(null);
             }}
             onConfirm={(preview) => confirmForcePush(forcePushRequest, preview)} />
-        )}
+        ) : null}</DialogPresence>
 
-        {confirmState && (
+        <DialogPresence>{confirmState ? (
           <ConfirmDialog title={confirmState.title} message={confirmState.message}
             confirmLabel={confirmState.confirmLabel} busy={confirmBusy} danger={confirmState.danger}
             onCancel={() => { if (!confirmBusy) setConfirmState(null); }}
             onConfirm={runConfirm} />
-        )}
+        ) : null}</DialogPresence>
 
         {/* Non-blocking operation status: repo browsing stays available while
             mutation controls remain globally locked by gitBusy / busyLabel. */}

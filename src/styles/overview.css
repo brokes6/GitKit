@@ -52,6 +52,13 @@
 .gk-overview-row { display: grid; grid-template-columns: minmax(155px, 32%) minmax(0, 1fr) minmax(96px, max-content); position: relative; align-items: center; gap: 14px; padding: 8px; min-height: 52px; border-bottom: .5px solid var(--gko-border); transition: background-color 120ms ease-out; }
 .gk-overview-row:last-child { border-bottom: 0; }
 .gk-overview-row:hover, .gk-overview-row:focus-within { background: var(--gko-hover); border-radius: 8px; }
+.gk-overview-row-loading { pointer-events: none; }
+.gk-overview-skeleton-name { display: block; margin-bottom: 5px; }
+.gk-overview-row-loading .gk-overview-condition > .gk-skeleton,
+.gk-overview-row-loading .gk-overview-facts > .gk-skeleton { display: block; }
+.gk-overview-row-loading .gk-overview-facts { margin-top: 7px; }
+.gk-overview-skeleton-action { width: 96px; }
+.gk-overview-loading[data-motion-paused="true"] .gk-skeleton { animation-play-state: paused; }
 .gk-overview-project { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .gk-overview-project-icon { display: flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 24px; }
 .gk-overview-identity { min-width: 0; flex: 1; }

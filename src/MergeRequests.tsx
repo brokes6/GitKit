@@ -7,6 +7,9 @@ import type { MrActionResult, MrCommitMessages, MrDetail, MrDiffVersion, MrDiscu
 import { mrErrorMessage, mrVersionChanged, mrViewerActions, reviewVersion, sameMrRefs } from "./mergeRequestHelpers";
 import { CodeSkeleton, Skeleton } from "./Skeleton";
 import { MergeRequestDownload } from "./MergeRequestDownload";
+import { MergeRequestParticipants } from "./MergeRequestParticipants";
+import { DialogPresence } from "./DialogPresence";
+import type { MrParticipantCandidates, MrParticipantKind, MrParticipantsResult } from "./mergeRequestTypes";
 import type { MrLineCommentActions } from "./MergeRequestDiffComment";
 import type { MrDiffCommentPosition, MrDiffCommentResult } from "./mergeRequestTypes";
 import "./styles/mergeRequests.css";
@@ -131,6 +134,9 @@ export interface MergeRequestPopoverProps {
 }
 
 export function MergeRequestPopover({ theme, snapshot, configured, error, open, anchorRef, onClose, onSelect, onRefresh, onConfigure }: MergeRequestPopoverProps) {
+  const [present, setPresent] = useState(open);
+  const openRef = useRef(open);
+  openRef.current = open;
   const [filter, setFilter] = useState<ListFilter>("all");
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -146,6 +152,21 @@ export function MergeRequestPopover({ theme, snapshot, configured, error, open, 
   const authError = snapshot?.error?.kind === "unauthorized" || snapshot?.error?.kind === "invalid_config";
   const hasCache = snapshot?.lastCheckedAt !== null && snapshot?.lastCheckedAt !== undefined;
   const busy = refreshing || snapshot?.refreshing || (configured && !hasCache && !failure);
+
+  useLayoutEffect(() => {
+    if (open) setPresent(true);
+    if (popoverRef.current) popoverRef.current.inert = !open;
+  }, [open, present]);
+
+  useEffect(() => {
+    if (open || !present) return;
+    // Keep the portal for its exit, including entry-toggle and row selection.
+    // Reopening cancels this fallback and restores interaction immediately.
+    const timer = window.setTimeout(() => {
+      if (!openRef.current) setPresent(false);
+    }, window.matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 200);
+    return () => window.clearTimeout(timer);
+  }, [open, present]);
 
   useLayoutEffect(() => {
     const context = snapshot?.contextKey ?? null;
@@ -164,26 +185,28 @@ export function MergeRequestPopover({ theme, snapshot, configured, error, open, 
   useLayoutEffect(() => {
     if (!open) return;
     let frame = 0;
+    const place = () => {
+      const anchor = anchorRef.current;
+      const popover = popoverRef.current;
+      if (!anchor || !popover) return;
+      const viewport = window.visualViewport;
+      const offsetLeft = viewport?.offsetLeft || 0;
+      const offsetTop = viewport?.offsetTop || 0;
+      const width = viewport?.width || window.innerWidth;
+      const rect = anchor.getBoundingClientRect();
+      const popupWidth = Math.min(380, Math.max(0, width - 16));
+      const height = Math.min(600, Math.max(0, rect.top - offsetTop - 16));
+      popover.style.width = `${popupWidth}px`;
+      popover.style.height = `${height}px`;
+      popover.style.left = `${Math.max(offsetLeft + 8, Math.min(rect.left, offsetLeft + width - popupWidth - 8))}px`;
+      popover.style.top = `${rect.top - height - 8}px`;
+    };
     const position = () => {
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        const anchor = anchorRef.current;
-        const popover = popoverRef.current;
-        if (!anchor || !popover) return;
-        const viewport = window.visualViewport;
-        const offsetLeft = viewport?.offsetLeft || 0;
-        const offsetTop = viewport?.offsetTop || 0;
-        const width = viewport?.width || window.innerWidth;
-        const rect = anchor.getBoundingClientRect();
-        const popupWidth = Math.min(380, Math.max(0, width - 16));
-        const height = Math.min(600, Math.max(0, rect.top - offsetTop - 16));
-        popover.style.width = `${popupWidth}px`;
-        popover.style.height = `${height}px`;
-        popover.style.left = `${Math.max(offsetLeft + 8, Math.min(rect.left, offsetLeft + width - popupWidth - 8))}px`;
-        popover.style.top = `${rect.top - height - 8}px`;
-      });
+      frame = requestAnimationFrame(place);
     };
-    position();
+    // Establish the anchor before the entrance's first paint.
+    place();
     const observer = new ResizeObserver(position);
     if (anchorRef.current) observer.observe(anchorRef.current);
     observer.observe(document.documentElement);
@@ -231,10 +254,14 @@ export function MergeRequestPopover({ theme, snapshot, configured, error, open, 
     } finally { setRefreshing(false); }
   }
 
-  if (!open) return null;
+  if (!open && !present) return null;
   const filters: Array<[ListFilter, string]> = [["all", "全部"], ["reviewer", "我审核"], ["assignee", "指派给我"], ["author", "我发起"]];
   const configure = onConfigure && <button className="gkm-button gkm-button-primary" type="button" onClick={onConfigure}><KeyRound size={14} aria-hidden="true" />{tx("连接 GitLab 账号")}</button>;
-  return createPortal(<div ref={popoverRef} id="gkm-mr-popover" className="gkm-popover" style={themeStyle(theme)} role="dialog" aria-modal={false} aria-labelledby="gkm-list-title">
+  return createPortal(<div ref={popoverRef} id="gkm-mr-popover" className={`gkm-popover ${open ? "gk-modal-in" : "gk-modal-out"}`}
+    style={{ ...themeStyle(theme), pointerEvents: open ? undefined : "none" }} role="dialog" aria-modal={false} aria-hidden={!open || undefined} aria-labelledby="gkm-list-title"
+    onAnimationEnd={event => {
+      if (!openRef.current && event.currentTarget === event.target && event.animationName === "gk-modal-out") setPresent(false);
+    }}>
     <header className="gkm-list-head"><div><h2 id="gkm-list-title">{tx("合并请求")}</h2><p title={snapshot?.instanceUrl ?? undefined}>{tx("所有项目")}{snapshot?.user && ` · @${snapshot.user.username}`}</p></div><button className="gkm-icon-button" type="button" aria-label={tx("刷新合并请求")} title={tx("刷新合并请求")} onClick={refresh} disabled={!configured || busy}><RefreshCw size={15} className={busy ? "gkm-spin" : undefined} aria-hidden="true" /></button><button className="gkm-icon-button" type="button" aria-label={tx("关闭合并请求")} onClick={() => { onClose("button"); anchorRef.current?.focus(); }}><X size={16} aria-hidden="true" /></button></header>
     {configured && hasCache && <div className="gkm-list-count"><span>{tf("{0} 条相关请求", snapshot?.total || 0)}</span>{!!snapshot?.newCount && <strong>{tf("{0} 条新请求", snapshot.newCount)}</strong>}</div>}
     {configured && <div className="gkm-filters" aria-label={tx("按我的角色筛选")}>{filters.map(([value, label]) => <button type="button" key={value} aria-pressed={filter === value} className={filter === value ? "is-selected" : ""} onClick={() => setFilter(value)}>{tx(label)}{hasCache && <span>{value === "all" ? items.length : items.filter(item => item.roles.includes(value)).length}</span>}</button>)}</div>}
@@ -285,6 +312,8 @@ export interface MergeRequestDetailProps {
   onCommitMessages: () => Promise<MrCommitMessages>;
   onCancel: () => Promise<MrActionResult>;
   onApprove: (reviewedSha: string) => Promise<MrActionResult>;
+  onParticipantCandidates?: (query: string, page: number) => Promise<MrParticipantCandidates>;
+  onUpdateParticipants?: (kind: MrParticipantKind, userIds: number[], expectedUserIds: number[]) => Promise<MrParticipantsResult>;
   onOpenExternal: () => void;
   onBackList: () => void;
   onBackWorkspace: () => void;
@@ -303,6 +332,40 @@ function failureKind(cause: unknown): string | null {
 
 function CheckRow({ label, children, good, unknown }: { label: string; children: ReactNode; good?: boolean; unknown?: boolean }) {
   return <div className={`gkm-check${good ? " is-good" : unknown ? " is-unknown" : " is-blocked"}`}>{good ? <CheckCircle2 size={15} aria-hidden="true" /> : unknown ? <Clock3 size={15} aria-hidden="true" /> : <AlertCircle size={15} aria-hidden="true" />}<div><span>{label}</span><strong>{children}</strong></div></div>;
+}
+
+function MergeRequestTabIndicator({ tab }: { tab: MergeRequestTab }) {
+  const indicatorRef = useRef<HTMLSpanElement>(null);
+  const measureRef = useRef<(animate: boolean) => void>(() => {});
+
+  useLayoutEffect(() => {
+    const indicator = indicatorRef.current;
+    const tablist = indicator?.parentElement;
+    if (!indicator || !tablist) return;
+    let previous: string | null = null;
+    const measure = (animate: boolean) => {
+      const selected = tablist.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]');
+      if (!selected) return;
+      const bounds = selected.getBoundingClientRect();
+      const left = bounds.left - tablist.getBoundingClientRect().left;
+      const transform = `translateX(${left}px) scaleX(${bounds.width})`;
+      if (transform === previous) return;
+      indicator.dataset.motion = String(animate && previous !== null);
+      indicator.style.transform = transform;
+      indicator.style.opacity = "1";
+      previous = transform;
+    };
+    measureRef.current = measure;
+    // Mount and geometry changes snap into place; only tab selection travels.
+    measure(false);
+    const observer = new ResizeObserver(() => measure(false));
+    observer.observe(tablist);
+    tablist.querySelectorAll('[role="tab"]').forEach(button => observer.observe(button));
+    return () => { observer.disconnect(); measureRef.current = () => {}; };
+  }, []);
+
+  useLayoutEffect(() => { measureRef.current(true); }, [tab]);
+  return <span ref={indicatorRef} className="gkm-tab-indicator" aria-hidden="true" />;
 }
 
 export function MergeRequestDetail(props: MergeRequestDetailProps) {
@@ -596,10 +659,15 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
         const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : -1;
         if (next < 0) return;
         event.preventDefault(); changeTab(tabs[next][0]); tabsRef.current?.querySelectorAll<HTMLButtonElement>("[role=tab]")[next]?.focus();
-      }}>{tabs.map(([value, label]) => <button type="button" role="tab" key={value} id={`gkm-tab-${value}`} aria-controls={`gkm-panel-${value}`} aria-selected={tab === value} tabIndex={tab === value ? 0 : -1} onClick={() => changeTab(value)}>{tx(label)}{value === "changes" && files.length > 0 && <span>{files.length}</span>}</button>)}<button className="gkm-icon-button gkm-tabs-refresh" type="button" onClick={refresh} disabled={refreshing || loading} title={tx("刷新状态")} aria-label={tx("刷新状态")}><RefreshCw size={14} className={refreshing || loading ? "gkm-spin" : undefined} aria-hidden="true" /></button></div>
+      }}>{tabs.map(([value, label]) => <button type="button" role="tab" key={value} id={`gkm-tab-${value}`} aria-controls={`gkm-panel-${value}`} aria-selected={tab === value} tabIndex={tab === value ? 0 : -1} onClick={() => changeTab(value)}>{tx(label)}{value === "changes" && files.length > 0 && <span>{files.length}</span>}</button>)}<button className="gkm-icon-button gkm-tabs-refresh" type="button" onClick={refresh} disabled={refreshing || loading} title={tx("刷新状态")} aria-label={tx("刷新状态")}><RefreshCw size={14} className={refreshing || loading ? "gkm-spin" : undefined} aria-hidden="true" /></button><MergeRequestTabIndicator tab={tab} /></div>
       <div className="gkm-detail-panels">
         <div className="gkm-panel gkm-overview" id="gkm-panel-overview" role="tabpanel" aria-labelledby="gkm-tab-overview" hidden={tab !== "overview"}><div className="gkm-description"><h3>{tx("说明")}</h3>{detail.description ? <div className="gkm-prose">{detail.description}</div> : <p className="gkm-muted">{tx("这条请求没有填写说明。")}</p>}<div className="gkm-author"><span className="gkm-avatar" aria-hidden="true">{(summary!.author.name || summary!.author.username).slice(0, 1)}</span><div>{summary!.author.name || summary!.author.username}<small>{tf("最后更新 {0}", dateLabel(summary!.updatedAt))}</small></div></div><div className="gkm-reviewed">{tx("当前查看的版本")}<code title={reviewedSha}>{reviewedSha ? reviewedSha.slice(0, 12) : tx("尚未就绪")}</code></div></div>
-          <aside className="gkm-checks"><h3>{tx("合并条件")}</h3><CheckRow label={tx("流水线")} good={authoritative?.pipelineStatus === "success"} unknown={!authoritative?.pipelineStatus || ["running", "pending", "preparing", "created", "scheduled"].includes(authoritative.pipelineStatus)}>{statusLabel(authoritative?.pipelineStatus || null)}</CheckRow><CheckRow label={tx("审批")} good={authoritative?.approvals.approved === true || authoritative?.approvals.approvalsRequired === 0} unknown={!authoritative?.approvals.readable || authoritative.approvals.approved === null}>{!authoritative?.approvals.readable ? tx("审批信息不可读") : authoritative.approvals.approvalsLeft && authoritative.approvals.approvalsLeft > 0 ? tf("还需 {0} 次审批", authoritative.approvals.approvalsLeft) : authoritative.approvals.approved === true ? tx("已通过") : authoritative.approvals.approvalsRequired === 0 ? tx("无需审批") : tx("等待审批")}</CheckRow><CheckRow label={tx("讨论")} good={authoritative?.blockingDiscussionsResolved === true} unknown={authoritative?.blockingDiscussionsResolved === null}>{authoritative?.blockingDiscussionsResolved === true ? tx("阻塞讨论已解决") : authoritative?.blockingDiscussionsResolved === false ? tx("仍有未解决的讨论") : tx("讨论状态未知")}</CheckRow><CheckRow label={tx("合并权限与规则")} good={authoritative?.canMerge === true && remoteState === "opened"} unknown={!authoritative?.summary.detailedMergeStatus}>{authoritative?.canMerge && remoteState === "opened" ? tx("GitLab 允许合并") : tx("暂时无法合并")}</CheckRow>{authoritative?.blockedReasons.length ? <ul className="gkm-blocked-reasons">{authoritative.blockedReasons.map((reason, index) => <li key={index}>{translateNativeMessage(reason)}</li>)}</ul> : null}<p className="gkm-check-note">{tx("权限、审批、CI 和冲突均以 GitLab 为准。")}</p></aside>
+          <aside className="gkm-checks">
+            {authoritative && props.onParticipantCandidates && props.onUpdateParticipants && <MergeRequestParticipants theme={theme} style={themeStyle(theme)} detail={authoritative} viewer={snapshot?.user || null}
+              disabled={actionBlocked} onCandidates={props.onParticipantCandidates} onUpdate={props.onUpdateParticipants}
+              onRefresh={async () => { await onRefresh(); setNeedsRecheck(false); setActionResult(null); setNotice(null); }}
+              onBusyChange={setSubmitting} onNeedsRecheck={() => setNeedsRecheck(true)} />}
+            <h3>{tx("合并条件")}</h3><CheckRow label={tx("流水线")} good={authoritative?.pipelineStatus === "success"} unknown={!authoritative?.pipelineStatus || ["running", "pending", "preparing", "created", "scheduled"].includes(authoritative.pipelineStatus)}>{statusLabel(authoritative?.pipelineStatus || null)}</CheckRow><CheckRow label={tx("审批")} good={authoritative?.approvals.approved === true || authoritative?.approvals.approvalsRequired === 0} unknown={!authoritative?.approvals.readable || authoritative.approvals.approved === null}>{!authoritative?.approvals.readable ? tx("审批信息不可读") : authoritative.approvals.approvalsLeft && authoritative.approvals.approvalsLeft > 0 ? tf("还需 {0} 次审批", authoritative.approvals.approvalsLeft) : authoritative.approvals.approved === true ? tx("已通过") : authoritative.approvals.approvalsRequired === 0 ? tx("无需审批") : tx("等待审批")}</CheckRow><CheckRow label={tx("讨论")} good={authoritative?.blockingDiscussionsResolved === true} unknown={authoritative?.blockingDiscussionsResolved === null}>{authoritative?.blockingDiscussionsResolved === true ? tx("阻塞讨论已解决") : authoritative?.blockingDiscussionsResolved === false ? tx("仍有未解决的讨论") : tx("讨论状态未知")}</CheckRow><CheckRow label={tx("合并权限与规则")} good={authoritative?.canMerge === true && remoteState === "opened"} unknown={!authoritative?.summary.detailedMergeStatus}>{authoritative?.canMerge && remoteState === "opened" ? tx("GitLab 允许合并") : tx("暂时无法合并")}</CheckRow>{authoritative?.blockedReasons.length ? <ul className="gkm-blocked-reasons">{authoritative.blockedReasons.map((reason, index) => <li key={index}>{translateNativeMessage(reason)}</li>)}</ul> : null}<p className="gkm-check-note">{tx("权限、审批、CI 和冲突均以 GitLab 为准。")}</p></aside>
         </div>
         <div className="gkm-panel gkm-changes" id="gkm-panel-changes" role="tabpanel" aria-labelledby="gkm-tab-changes" hidden={tab !== "changes"}>{diffError && <Banner tone="error" action={<button type="button" className="gkm-text-button" onClick={() => onTabChange("changes")}>{tx("重试")}</button>}>{translateNativeMessage(diffError)}</Banner>}{diffVersion?.truncated && <Banner action={<button className="gkm-text-button" type="button" onClick={onOpenExternal}>{tx("在 GitLab 中查看")}</button>}>{tx("GitLab 未返回完整差异，请在网页中继续查看。")}</Banner>}{diffLoading && files.length === 0 ? <MergeRequestChangesSkeleton /> : files.length ? <div className="gkm-diff">{diff}</div> : !diffError && <EmptyState title={tx("没有可显示的文件差异")} action={<button className="gkm-button" type="button" onClick={onOpenExternal}>{tx("在 GitLab 中查看")}</button>} />}</div>
         <div className="gkm-panel gkm-discussions" id="gkm-panel-discussion" role="tabpanel" aria-labelledby="gkm-tab-discussion" hidden={tab !== "discussion"}>{discussionsError && <Banner tone="error" action={<button className="gkm-text-button" type="button" onClick={() => onTabChange("discussion")}>{tx("重试")}</button>}>{translateNativeMessage(discussionsError)}</Banner>}{discussionsLoading && discussions.length === 0 ? <MergeRequestDiscussionSkeleton /> : discussions.length ? discussions.map(discussion => <article className="gkm-thread" key={discussion.id}>{discussion.notes.map(note => <div key={note.id} className={`gkm-note${note.system ? " is-system" : ""}`}><span className="gkm-avatar" aria-hidden="true">{(note.author.name || note.author.username).slice(0, 1)}</span><div><div className="gkm-note-meta"><strong>{note.author.name || note.author.username}</strong><span>{dateLabel(note.createdAt)}</span>{note.resolvable && <span className={note.resolved ? "gkm-resolved" : "gkm-unresolved"}>{note.resolved ? <Check size={11} aria-hidden="true" /> : <Clock3 size={11} aria-hidden="true" />}{tx(note.resolved ? "已解决" : "未解决")}</span>}{note.system && <span>{tx("系统消息")}</span>}</div><div className="gkm-prose">{note.body}</div></div></div>)}</article>) : !discussionsError && <EmptyState title={tx("暂无讨论")} /> }<p className="gkm-discussion-note">{tx("回复和解决讨论请在 GitLab 中操作。")}<button className="gkm-text-button" type="button" onClick={onOpenExternal}>{tx("在 GitLab 中打开")}<ExternalLink size={12} aria-hidden="true" /></button></p></div>
@@ -610,6 +678,6 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
         <button type="button" className="gkm-button gkm-button-primary" onClick={beginMerge} disabled={mergeSubmitBlocked}><GitMerge size={14} aria-hidden="true" />{tx("合并请求")}</button>
       </div></div></footer>
     </>}
-    {downloadOpen && <MergeRequestDownload theme={theme} style={themeStyle(theme)} detail={detail} unavailable={downloadUnavailable} onDownload={props.onDownloadDiff} onClose={() => setDownloadOpen(false)} />}
+    <DialogPresence>{downloadOpen ? <MergeRequestDownload theme={theme} style={themeStyle(theme)} detail={detail} unavailable={downloadUnavailable} onDownload={props.onDownloadDiff} onClose={() => setDownloadOpen(false)} /> : null}</DialogPresence>
   </section>;
 }

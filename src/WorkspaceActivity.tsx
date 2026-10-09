@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
 import { ChevronRight, CircleAlert, FolderGit2, LoaderCircle, RefreshCw, X } from "lucide-react";
 import type { Project } from "./App";
@@ -7,12 +7,23 @@ import { getCurrentLanguage, tf, tx } from "./i18n";
 import { activityIntensity, activityKeyboardIndex, aggregateProjectActivity } from "./projectActivity";
 import type { ActivityDay } from "./projectActivity";
 import type { useProjectActivity } from "./useProjectActivity";
+import { useMotionVisibility } from "./useMotionVisibility";
 
 interface WorkspaceActivityProps {
   projects: Project[];
   activity: ReturnType<typeof useProjectActivity>;
   onOpen: (project: Project, target: "history") => void;
 }
+
+const ActivityLoadingGrid = memo(function ActivityLoadingGrid({ weeks }: { weeks: (ActivityDay | null)[][] }) {
+  return <div className="gk-activity-loading" aria-hidden="true">
+    {[0, 1].map((layer) => <div className="gk-activity-grid gk-activity-loading-grid" key={layer}>
+      {weeks.map((week, index) => <div className="gk-activity-week" key={index}>{week.map((day, weekday) =>
+        <span className={`gk-activity-day${day ? "" : " gk-activity-pad"}`} key={weekday}
+          data-level={day ? (index * 3 + weekday * 2 + layer * 2) % 5 : undefined} />)}</div>)}
+    </div>)}
+  </div>;
+});
 
 export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActivityProps) {
   const { entries, window, hasIdentities } = activity;
@@ -40,10 +51,20 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
   }, null);
   const incomplete = hasIdentities && (refreshing || failed.length > 0 || loadedCount < projects.length);
   const available = !hasIdentities || loadedCount > 0;
-  const loading = refreshing && !available;
-  const selectedDay = available ? data.days.find((day) => day.key === selectedKey) : undefined;
-  const detailDay = available ? selectedDay ?? data.days.find((day) => day.key === detailKey) : undefined;
-  const previewDay = available ? data.days.find((day) => day.key === (hoveredKey ?? focusedKey ?? selectedKey)) : undefined;
+  const initialScan = useRef(false);
+  if (!refreshing) initialScan.current = false;
+  else if (!available) initialScan.current = true;
+  // Keep the first scan behind its loading palette until the whole batch settles.
+  // A later refresh with usable snapshots leaves those snapshots visible.
+  const loading = refreshing && initialScan.current;
+  const interactive = available && !loading;
+  const activityRef = useRef<HTMLElement>(null);
+  useMotionVisibility(activityRef, refreshing);
+  // The loading palette is static; only its two enclosing layers animate.
+  const loadingWeeks = useMemo(() => aggregateProjectActivity([], {}, window).weeks, [window]);
+  const selectedDay = interactive ? data.days.find((day) => day.key === selectedKey) : undefined;
+  const detailDay = interactive ? selectedDay ?? data.days.find((day) => day.key === detailKey) : undefined;
+  const previewDay = interactive ? data.days.find((day) => day.key === (hoveredKey ?? focusedKey ?? selectedKey)) : undefined;
   const tabKey = data.days.some((day) => day.key === keyboardKey) ? keyboardKey : data.days[data.days.length - 1]?.key;
   const projectsById = useMemo(() => new Map(projects.map((project) => [project.id, project])), [projects]);
   const detailProjects = detailDay?.projects.flatMap((value) => {
@@ -75,7 +96,7 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
   }).filter((month) => month.label);
 
   if (!projects.length) return null;
-  return <section className="gk-activity" aria-labelledby="workspace-activity-heading" aria-busy={refreshing}>
+  return <section ref={activityRef} className="gk-activity" aria-labelledby="workspace-activity-heading" aria-busy={refreshing}>
     <div className="gk-activity-heading">
       <div><h2 id="workspace-activity-heading">{tx("工作区提交活动")}</h2><span>{tx("最近 12 个月")}</span></div>
       <div className="gk-activity-totals">
@@ -93,24 +114,24 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
       }).format(checkedAt))}</span>}
     </div>
     <div className="gk-activity-calendar-scroll" onMouseLeave={() => setHoveredKey(null)}>
-      <div className="gk-activity-calendar" style={{ "--gka-weeks": data.weeks.length } as CSSProperties}>
+      <div className="gk-activity-calendar" data-loading={loading} style={{ "--gka-weeks": data.weeks.length } as CSSProperties}>
         <div className="gk-activity-months" aria-hidden="true">{months.map(({ label, index }) =>
           <span key={index} style={{ gridColumn: index + 1 }}>{label}</span>)}</div>
         <div className="gk-activity-weekdays" aria-hidden="true"><span>{tx("一")}</span><span>{tx("三")}</span><span>{tx("五")}</span></div>
-        {available && <p className="sr-only" id="workspace-activity-help">{tx("使用方向键选择日期，按 Enter 查看当天项目。Home 和 End 跳至首日与末日。")}</p>}
-        <div className="gk-activity-grid" role="group" aria-label={tx("每日提交活动")} aria-describedby={available ? "workspace-activity-help" : undefined}>
+        {interactive && <p className="sr-only" id="workspace-activity-help">{tx("使用方向键选择日期，按 Enter 查看当天项目。Home 和 End 跳至首日与末日。")}</p>}
+        <div className="gk-activity-grid gk-activity-data" role="group" aria-hidden={loading || undefined} aria-label={tx("每日提交活动")} aria-describedby={interactive ? "workspace-activity-help" : undefined}>
           {data.weeks.map((week, index) => <div className="gk-activity-week" key={index}>{week.map((day, weekday) => day
-            ? loading ? <Skeleton key={day.key} className="gk-activity-day gk-activity-placeholder" width="100%" height="var(--gka-cell)" color="var(--gka-zero)" />
-              : <button key={day.key} ref={(node) => { if (node) dayButtons.current.set(day.key, node); else dayButtons.current.delete(day.key); }}
+            ? <button key={day.key} ref={(node) => { if (node) dayButtons.current.set(day.key, node); else dayButtons.current.delete(day.key); }}
               className="gk-activity-day" data-level={available ? activityIntensity(day.count, data.peakCount) : 0}
               data-unavailable={!available || undefined} data-selected={selectedDay?.key === day.key || undefined}
-              disabled={!available} tabIndex={available && tabKey === day.key ? 0 : -1} title={describeDay(day)} aria-label={describeDay(day)} aria-pressed={selectedDay?.key === day.key}
+              disabled={!interactive} tabIndex={interactive && tabKey === day.key ? 0 : -1} title={describeDay(day)} aria-label={describeDay(day)} aria-pressed={selectedDay?.key === day.key}
               aria-controls="workspace-activity-detail" aria-expanded={selectedDay?.key === day.key}
               onMouseEnter={() => setHoveredKey(day.key)} onFocus={() => { setFocusedKey(day.key); setKeyboardKey(day.key); }}
               onBlur={() => setFocusedKey(null)} onKeyDown={(event) => navigateDay(event, day)}
               onClick={() => { setDetailKey(day.key); setSelectedKey((previous) => previous === day.key ? null : day.key); }} />
             : <span className="gk-activity-day gk-activity-pad" key={weekday} aria-hidden="true" />)}</div>)}
         </div>
+        <ActivityLoadingGrid weeks={loadingWeeks} />
       </div>
     </div>
     <div className="gk-activity-caption">

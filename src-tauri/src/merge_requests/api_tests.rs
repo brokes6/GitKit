@@ -1944,3 +1944,456 @@ fn diff_comment_known_server_rejections_remain_rejections() {
         assert!(!error.message.contains("fixture-secret"));
     }
 }
+
+fn participant_preflight(request: Value) -> Vec<Step> {
+    preflight(request).into_iter().take(3).collect()
+}
+
+fn member(id: u64) -> Value {
+    let mut value = user(id);
+    value["state"] = json!("active");
+    value["access_level"] = json!(30);
+    value
+}
+
+#[test]
+fn participant_detail_reports_server_selection_and_author_only_gate() {
+    for (author, state, allowed) in [
+        (7, "opened", true),
+        (8, "opened", false),
+        (7, "closed", false),
+    ] {
+        let mut request = mr(1, author, &[7, 8], &[9]);
+        request["state"] = json!(state);
+        let steps = if state == "closed" {
+            after_close(request)
+        } else {
+            merge_preflight(request)
+        };
+        let (config, _, server) = mock(steps);
+        let detail = run(detail(&config, 9, 1)).unwrap();
+        server.join().unwrap();
+        assert_eq!(detail.can_manage_participants, allowed);
+        assert_eq!(
+            detail
+                .assignees
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+        assert_eq!(
+            detail
+                .reviewers
+                .iter()
+                .map(|user| user.id)
+                .collect::<Vec<_>>(),
+            vec![9]
+        );
+        let dto = serde_json::to_value(detail).unwrap();
+        assert_eq!(dto["canManageParticipants"], json!(allowed));
+    }
+}
+
+#[test]
+fn participant_candidates_query_inherited_members_and_filter_ineligible_accounts() {
+    let mut blocked = member(8);
+    blocked["state"] = json!("blocked");
+    let mut locked = member(9);
+    locked["locked"] = json!(true);
+    let mut expired = member(10);
+    expired["expires_at"] = json!("2000-01-01");
+    let mut awaiting = member(11);
+    awaiting["access_level"] = json!(0);
+    let mut response = get(
+        "/projects/9/members/all?query=User+%26+team&per_page=100&page=2",
+        json!([
+            member(7),
+            blocked,
+            locked,
+            expired,
+            awaiting,
+            member(7),
+            member(12)
+        ]),
+    );
+    response.headers.push(("X-Next-Page", "3".into()));
+    let mut steps = participant_preflight(mr(1, 7, &[], &[]));
+    steps.push(response);
+    let (config, requests, server) = mock(steps);
+    let result = run(participant_candidates(
+        &config,
+        101,
+        9,
+        1,
+        " User & team ",
+        2,
+    ))
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        result.users.iter().map(|user| user.id).collect::<Vec<_>>(),
+        vec![7, 12]
+    );
+    assert_eq!(result.next_page, Some(3));
+    assert!(!requests.lock().unwrap().last().unwrap().contains("state="));
+}
+
+#[test]
+fn participant_candidates_reject_non_author_and_invalid_search_before_member_lookup() {
+    let (config, requests, server) = mock(participant_preflight(mr(1, 8, &[7], &[])));
+    let error = run(participant_candidates(&config, 101, 9, 1, "", 1)).unwrap_err();
+    server.join().unwrap();
+    assert_eq!(error.kind, "blocked");
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    for (query, page) in [
+        ("x".repeat(257), 1),
+        ("".into(), 0),
+        ("".into(), 201),
+        ("bad\nquery".into(), 1),
+    ] {
+        let (config, requests, server) = mock(vec![]);
+        let error = run(participant_candidates(&config, 101, 9, 1, &query, page)).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.kind, "invalid_input");
+        assert!(requests.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn participant_candidates_preserve_next_page_when_all_visible_accounts_are_filtered() {
+    let mut blocked = member(8);
+    blocked["state"] = json!("blocked");
+    let mut response = get("/members/all", json!([blocked]));
+    response.headers.push(("X-Next-Page", "2".into()));
+    let mut steps = participant_preflight(mr(1, 7, &[], &[]));
+    steps.push(response);
+    let (config, _, server) = mock(steps);
+    let result = run(participant_candidates(&config, 101, 9, 1, "", 1)).unwrap();
+    server.join().unwrap();
+    assert!(result.users.is_empty());
+    assert_eq!(result.next_page, Some(2));
+}
+
+#[test]
+fn participant_updates_isolate_the_selected_field_and_clear_with_zero() {
+    for (kind, selected, expected, assignees, reviewers, payload) in [
+        (
+            ParticipantKind::Assignee,
+            vec![9, 8, 9],
+            vec![7],
+            vec![8, 9],
+            vec![10],
+            json!({"assignee_ids": [8, 9]}),
+        ),
+        (
+            ParticipantKind::Reviewer,
+            vec![7, 9],
+            vec![10],
+            vec![7],
+            vec![7, 9],
+            json!({"reviewer_ids": [7, 9]}),
+        ),
+        (
+            ParticipantKind::Assignee,
+            vec![],
+            vec![7],
+            vec![],
+            vec![10],
+            json!({"assignee_ids": [0]}),
+        ),
+        (
+            ParticipantKind::Reviewer,
+            vec![],
+            vec![10],
+            vec![7],
+            vec![],
+            json!({"reviewer_ids": [0]}),
+        ),
+    ] {
+        let mut steps = participant_preflight(mr(1, 7, &[7], &[10]));
+        let updated = mr(1, 7, &assignees, &reviewers);
+        steps.push(step("PUT", "/projects/9/merge_requests/1", updated.clone()));
+        steps.extend(merge_preflight(updated));
+        let (config, requests, server) = mock(steps);
+        let result = run(update_participants(
+            &config,
+            101,
+            9,
+            1,
+            kind,
+            &selected,
+            &expected,
+            || Ok(()),
+        ))
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.state, "updated");
+        assert!(result.detail.unwrap().can_manage_participants);
+        let requests = requests.lock().unwrap();
+        let write = requests
+            .iter()
+            .find(|request| request.starts_with("PUT "))
+            .unwrap();
+        let body: Value = serde_json::from_str(write.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(body, payload);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("PUT "))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn participant_updates_recheck_author_open_state_global_identity_and_expected_selection() {
+    for change in ["author", "closed", "global", "selection"] {
+        let mut request = mr(1, 7, &[7], &[8]);
+        match change {
+            "author" => request["author"] = user(9),
+            "closed" => request["state"] = json!("closed"),
+            "global" => request["id"] = json!(999),
+            "selection" => request["reviewers"] = json!([user(9)]),
+            _ => unreachable!(),
+        }
+        let (config, requests, server) = mock(participant_preflight(request));
+        let error = run(update_participants(
+            &config,
+            101,
+            9,
+            1,
+            ParticipantKind::Reviewer,
+            &[7],
+            &[8],
+            || Ok(()),
+        ))
+        .unwrap_err();
+        server.join().unwrap();
+        let expected = match change {
+            "global" => "invalid_response",
+            "selection" => "conflict",
+            _ => "blocked",
+        };
+        assert_eq!(error.kind, expected, "{change}");
+        assert!(requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.starts_with("GET ")));
+    }
+}
+
+#[test]
+fn participant_update_uses_project_and_iid_with_repeated_iids_across_projects() {
+    let mut steps = vec![
+        get("/user", user(7)),
+        get("/projects/10", other_project()),
+        get(
+            "/projects/10/merge_requests/1",
+            other_project_mr(1, 7, &[], &[]),
+        ),
+        step(
+            "PUT",
+            "/projects/10/merge_requests/1",
+            other_project_mr(1, 7, &[], &[8]),
+        ),
+    ];
+    let mut confirmed = merge_preflight(other_project_mr(1, 7, &[], &[8]));
+    confirmed[1] = get("/projects/10", other_project());
+    confirmed[2] = get(
+        "/projects/10/merge_requests/1",
+        other_project_mr(1, 7, &[], &[8]),
+    );
+    steps.extend(confirmed);
+    let (config, requests, server) = mock(steps);
+    let result = run(update_participants(
+        &config,
+        1001,
+        10,
+        1,
+        ParticipantKind::Reviewer,
+        &[8],
+        &[],
+        || Ok(()),
+    ))
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(result.state, "updated");
+    assert_eq!(result.detail.unwrap().summary.project_id, 10);
+    assert!(requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| !request.contains("/projects/9/")));
+}
+
+#[test]
+fn participant_lost_write_response_reconciles_once_and_never_replays() {
+    for (confirmed, state) in [(true, "updated"), (false, "uncertain")] {
+        let mut steps = participant_preflight(mr(1, 7, &[], &[]));
+        let mut lost = step("PUT", "/merge_requests/1", Value::Null);
+        lost.drop_response = true;
+        steps.push(lost);
+        steps.extend(merge_preflight(mr(
+            1,
+            7,
+            &[],
+            if confirmed { &[8] } else { &[] },
+        )));
+        let (config, requests, server) = mock(steps);
+        let result = run(update_participants(
+            &config,
+            101,
+            9,
+            1,
+            ParticipantKind::Reviewer,
+            &[8],
+            &[],
+            || Ok(()),
+        ))
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(result.state, state);
+        assert_eq!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|request| request.starts_with("PUT "))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn participant_truncated_server_selection_syncs_actual_members_with_specific_message() {
+    let mut steps = participant_preflight(mr(1, 7, &[], &[]));
+    let retained = mr(1, 7, &[], &[8]);
+    steps.push(step("PUT", "/merge_requests/1", retained.clone()));
+    steps.extend(merge_preflight(retained));
+    let (config, requests, server) = mock(steps);
+    let result = run(update_participants(
+        &config,
+        101,
+        9,
+        1,
+        ParticipantKind::Reviewer,
+        &[8, 9],
+        &[],
+        || Ok(()),
+    ))
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(result.state, "uncertain");
+    assert_eq!(
+        result.message,
+        "GitLab 未保留全部成员选择，请检查成员权限、实例版本与人数限制，已同步实际成员"
+    );
+    assert_eq!(
+        result
+            .detail
+            .unwrap()
+            .reviewers
+            .iter()
+            .map(|user| user.id)
+            .collect::<Vec<_>>(),
+        vec![8]
+    );
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| request.starts_with("PUT "))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn participant_known_server_rejection_remains_an_error_without_reconciliation() {
+    for (status, kind) in [
+        (400, "blocked"),
+        (403, "forbidden"),
+        (409, "conflict"),
+        (422, "blocked"),
+    ] {
+        let mut steps = participant_preflight(mr(1, 7, &[], &[]));
+        let mut denied = step(
+            "PUT",
+            "/merge_requests/1",
+            json!({"message": "fixture-secret"}),
+        );
+        denied.status = status;
+        steps.push(denied);
+        let (config, requests, server) = mock(steps);
+        let error = run(update_participants(
+            &config,
+            101,
+            9,
+            1,
+            ParticipantKind::Reviewer,
+            &[8],
+            &[],
+            || Ok(()),
+        ))
+        .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.kind, kind);
+        assert!(!error.message.contains("fixture-secret"));
+        assert_eq!(requests.lock().unwrap().len(), 4);
+    }
+}
+
+#[test]
+fn participant_invalid_ids_are_rejected_before_any_network_request() {
+    for ids in [vec![0], vec![7; 101]] {
+        let (config, requests, server) = mock(vec![]);
+        let error = run(update_participants(
+            &config,
+            101,
+            9,
+            1,
+            ParticipantKind::Assignee,
+            &ids,
+            &[],
+            || Ok(()),
+        ))
+        .unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.kind, "invalid_input");
+        assert!(requests.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn participant_update_rechecks_application_context_immediately_before_put() {
+    let (config, requests, server) = mock(participant_preflight(mr(1, 7, &[], &[])));
+    let error = run(update_participants(
+        &config,
+        101,
+        9,
+        1,
+        ParticipantKind::Reviewer,
+        &[8],
+        &[],
+        || {
+            Err(ApiError::new(
+                "stale",
+                "fixture context changed before send",
+            ))
+        },
+    ))
+    .unwrap_err();
+    server.join().unwrap();
+    assert_eq!(error.kind, "stale");
+    assert_eq!(requests.lock().unwrap().len(), 3);
+    assert!(requests
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|request| request.starts_with("GET ")));
+}

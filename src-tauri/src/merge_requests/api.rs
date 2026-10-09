@@ -94,6 +94,9 @@ pub struct ApprovalState {
 #[serde(rename_all = "camelCase")]
 pub struct Detail {
     pub summary: Summary,
+    pub assignees: Vec<User>,
+    pub reviewers: Vec<User>,
+    pub can_manage_participants: bool,
     pub description: String,
     pub pipeline_status: Option<String>,
     pub approvals: ApprovalState,
@@ -206,10 +209,24 @@ pub struct MergeResult {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionResult {
-    /// closed, approved, or uncertain; confirmed by a fresh read after the write.
+    /// closed, approved, updated, or uncertain; confirmed by a fresh read after the write.
     pub state: String,
     pub message: String,
     pub detail: Option<Detail>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ParticipantKind {
+    Assignee,
+    Reviewer,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ParticipantCandidates {
+    pub users: Vec<User>,
+    pub next_page: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -239,6 +256,8 @@ pub struct RawDiffDownload {
     pub refs: DiffRefs,
 }
 const MAX_COMMIT_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_PARTICIPANTS: usize = 100;
+const MAX_PARTICIPANT_QUERY_BYTES: usize = 256;
 
 const COMMIT_MESSAGES_QUERY: &str = r#"
 query GitKitCommitMessages($projectPath: ID!, $iid: String!) {
@@ -555,6 +574,10 @@ impl Context {
         let is_merge = method == Method::PUT && parts.last() == Some(&"merge");
         let is_approval = method == Method::POST && parts.last() == Some(&"approve");
         let is_diff_comment = method == Method::POST && parts.last() == Some(&"discussions");
+        let is_participants = method == Method::PUT
+            && body.as_ref().is_some_and(|body| {
+                body.get("assignee_ids").is_some() || body.get("reviewer_ids").is_some()
+            });
         let mut request = self
             .client
             .request(method, self.endpoint(parts, query)?)
@@ -564,6 +587,16 @@ impl Context {
             request = request.json(&body);
         }
         let response = request.send().await.map_err(network_error)?;
+        if is_participants && matches!(response.status().as_u16(), 400 | 409 | 422) {
+            return Err(ApiError::new(
+                if response.status().as_u16() == 409 {
+                    "conflict"
+                } else {
+                    "blocked"
+                },
+                "GitLab 拒绝更新指派人或审核者，请检查成员权限、实例版本与人数限制",
+            ));
+        }
         if is_diff_comment
             && matches!(response.status().as_u16(), 400 | 409 | 422)
         {
@@ -1377,6 +1410,9 @@ async fn load_detail(
         _ => request.squash.unwrap_or(squash_policy == "default_on"),
     };
     let detail = Detail {
+        assignees: request.assignees.clone().ok_or_else(invalid_response)?,
+        reviewers: request.reviewers.clone().ok_or_else(invalid_response)?,
+        can_manage_participants: summary.state == "opened" && summary.author.id == user.id,
         can_close: summary.state == "opened" && summary.author.id == user.id,
         can_approve: summary.state == "opened"
             && summary.author.id != user.id
@@ -2347,6 +2383,242 @@ fn uncertain_transport(error: &ApiError) -> bool {
         error.kind.as_str(),
         "network" | "timeout" | "server" | "invalid_response"
     )
+}
+
+#[derive(Deserialize)]
+struct RawMember {
+    #[serde(flatten)]
+    user: User,
+    state: String,
+    locked: Option<bool>,
+    expires_at: Option<String>,
+    access_level: u64,
+}
+
+impl RawMember {
+    fn eligible(&self) -> bool {
+        self.user.id > 0
+            && !self.user.username.is_empty()
+            && self.state == "active"
+            && self.locked != Some(true)
+            && self.access_level > 0
+            && self.expires_at.as_ref().is_none_or(|date| {
+                chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                    .is_ok_and(|date| date >= chrono::Utc::now().date_naive())
+            })
+    }
+}
+
+fn participant_ids(ids: &[u64]) -> Result<Vec<u64>, ApiError> {
+    if ids.len() > MAX_PARTICIPANTS || ids.contains(&0) {
+        return Err(ApiError::new("invalid_input", "成员选择无效或人数超过上限"));
+    }
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
+impl ParticipantKind {
+    fn users<'a>(self, assignees: &'a [User], reviewers: &'a [User]) -> &'a [User] {
+        match self {
+            Self::Assignee => assignees,
+            Self::Reviewer => reviewers,
+        }
+    }
+
+    fn field(self) -> &'static str {
+        match self {
+            Self::Assignee => "assignee_ids",
+            Self::Reviewer => "reviewer_ids",
+        }
+    }
+}
+
+/// This gate always reads both token identity and the MR from GitLab. Cached
+/// frontend permissions cannot authorize changing another author's MR.
+async fn participant_request(
+    context: &Context,
+    mr_id: u64,
+    project_id: u64,
+    iid: u64,
+) -> Result<(RawMergeRequest, User), ApiError> {
+    if mr_id == 0 || project_id == 0 || iid == 0 {
+        return Err(invalid_config());
+    }
+    let user = context.user().await?;
+    let project = context.project(project_id).await?;
+    let request: RawMergeRequest = decode(
+        context
+            .get(
+                &[
+                    "projects",
+                    &project_id.to_string(),
+                    "merge_requests",
+                    &iid.to_string(),
+                ],
+                &[],
+            )
+            .await?,
+    )?;
+    let summary = request.summary(context, &user, Some(&project), false)?;
+    if summary.id != mr_id || summary.iid != iid || summary.project_id != project_id {
+        return Err(invalid_response());
+    }
+    if summary.author.id != user.id || summary.state != "opened" {
+        return Err(ApiError::new(
+            "blocked",
+            "仅创建者可以编辑开放请求的指派人和审核者",
+        ));
+    }
+    Ok((request, user))
+}
+
+pub async fn participant_candidates(
+    config: &Config,
+    mr_id: u64,
+    project_id: u64,
+    iid: u64,
+    query: &str,
+    page: u64,
+) -> Result<ParticipantCandidates, ApiError> {
+    let query = query.trim();
+    if query.len() > MAX_PARTICIPANT_QUERY_BYTES
+        || query.chars().any(char::is_control)
+        || !(1..=MAX_PAGES as u64).contains(&page)
+    {
+        return Err(ApiError::new(
+            "invalid_input",
+            "成员搜索或页码无效，请缩短搜索内容",
+        ));
+    }
+    let context = Context::new(config)?;
+    participant_request(&context, mr_id, project_id, iid).await?;
+    let project = project_id.to_string();
+    let parts = ["projects", project.as_str(), "members", "all"];
+    let filters = [
+        ("query", query.to_owned()),
+        ("per_page", PAGE_SIZE.to_string()),
+        ("page", page.to_string()),
+    ];
+    let endpoint = context.endpoint(&parts, &filters)?;
+    let (value, headers, _) = context.request(Method::GET, &parts, &filters, None).await?;
+    let members: Vec<RawMember> = decode(value)?;
+    if members.len() > PAGE_SIZE {
+        return Err(invalid_response());
+    }
+    let next = next_page(&endpoint, &headers, page, members.len())?;
+    if next.is_some_and(|next| next > MAX_PAGES as u64) {
+        return Err(ApiError::new(
+            "invalid_input",
+            "成员列表超过分页上限，请缩小搜索范围",
+        ));
+    }
+    // The API's state filter requires a paid tier. Filter the documented user
+    // state locally so the same picker works with GitLab Free.
+    let mut seen = HashSet::new();
+    let users = members
+        .into_iter()
+        .filter(|member| member.eligible() && seen.insert(member.user.id))
+        .map(|member| member.user)
+        .collect();
+    Ok(ParticipantCandidates {
+        users,
+        next_page: next,
+    })
+}
+
+pub async fn update_participants(
+    config: &Config,
+    mr_id: u64,
+    project_id: u64,
+    iid: u64,
+    kind: ParticipantKind,
+    user_ids: &[u64],
+    expected_user_ids: &[u64],
+    before_write: impl FnOnce() -> Result<(), ApiError>,
+) -> Result<ActionResult, ApiError> {
+    let selected = participant_ids(user_ids)?;
+    let expected = participant_ids(expected_user_ids)?;
+    let context = Context::new(config)?;
+    let (request, user) = participant_request(&context, mr_id, project_id, iid).await?;
+    let assignees = request.assignees.as_deref().ok_or_else(invalid_response)?;
+    let reviewers = request.reviewers.as_deref().ok_or_else(invalid_response)?;
+    let current_ids = kind
+        .users(assignees, reviewers)
+        .iter()
+        .map(|user| user.id)
+        .collect::<Vec<_>>();
+    if participant_ids(&current_ids)? != expected {
+        return Err(ApiError::new(
+            "conflict",
+            "指派人或审核者已在远程变化，请刷新后重新选择",
+        ));
+    }
+    let mut body = serde_json::Map::new();
+    body.insert(
+        kind.field().into(),
+        serde_json::json!(if selected.is_empty() {
+            vec![0]
+        } else {
+            selected.clone()
+        }),
+    );
+    before_write()?;
+    let write = context
+        .request(
+            Method::PUT,
+            &[
+                "projects",
+                &project_id.to_string(),
+                "merge_requests",
+                &iid.to_string(),
+            ],
+            &[],
+            Some(Value::Object(body)),
+        )
+        .await;
+    if let Err(error) = &write {
+        if !uncertain_transport(error) {
+            return Err(error.clone());
+        }
+    }
+    // A response body alone does not prove the server retained the selection.
+    // Reconcile once after success or transport uncertainty; never replay PUT.
+    let current = load_detail(&context, project_id, iid, true)
+        .await
+        .ok()
+        .filter(|(detail, current_user, _)| {
+            current_user.id == user.id
+                && detail.summary.author.id == user.id
+                && action_identity(detail, mr_id, project_id, iid)
+        })
+        .map(|(detail, _, _)| detail);
+    let retained_ids = current.as_ref().and_then(|detail| {
+        let ids = kind
+            .users(&detail.assignees, &detail.reviewers)
+            .iter()
+            .map(|user| user.id)
+            .collect::<Vec<_>>();
+        participant_ids(&ids).ok()
+    });
+    if retained_ids.as_ref() == Some(&selected) {
+        Ok(ActionResult {
+            state: "updated".into(),
+            message: "GitLab 已确认更新成员选择".into(),
+            detail: current,
+        })
+    } else if retained_ids.is_some() {
+        Ok(uncertain_action(
+            "GitLab 未保留全部成员选择，请检查成员权限、实例版本与人数限制，已同步实际成员",
+            current,
+        ))
+    } else {
+        Ok(uncertain_action(
+            "成员更新结果尚未确认，请刷新状态核对，请勿重复提交",
+            current,
+        ))
+    }
 }
 
 /// Closing does not delete either the source branch or the merge request.

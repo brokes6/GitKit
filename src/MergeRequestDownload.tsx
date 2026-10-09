@@ -1,16 +1,18 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { AlertCircle, Check, CheckCircle2, Copy, Download, FileText, LoaderCircle, Sparkles } from "lucide-react";
 import { Modal, type ThemeColors } from "./App";
 import { tf, tx } from "./i18n";
 import { mrErrorMessage } from "./mergeRequestHelpers";
 import { buildMrReviewPrompt } from "./mrReviewPrompt";
+import { useDialogPresence } from "./DialogPresence";
 import type { MrDetail, MrDownloadedDiff } from "./mergeRequestTypes";
 
 export function MergeRequestDownload({ theme, style, detail, unavailable, onDownload, onClose }: {
   theme: ThemeColors; style: CSSProperties; detail: MrDetail; unavailable: string | null;
   onDownload: (review: MrDetail) => Promise<MrDownloadedDiff | null>; onClose: () => void;
 }) {
+  const { closing } = useDialogPresence();
   const [review, setReview] = useState(detail);
   const [downloaded, setDownloaded] = useState<MrDownloadedDiff | null>(null);
   const [prompt, setPrompt] = useState<string | null>(null);
@@ -26,13 +28,15 @@ export function MergeRequestDownload({ theme, style, detail, unavailable, onDown
   const copyFailedRef = useRef(false);
   const closeRef = useRef(onClose); closeRef.current = onClose;
   const displayedDetail = downloaded ? review : detail;
-  const close = () => { if (!busyRef.current) closeRef.current(); };
+  const closingRef = useRef(closing); closingRef.current = closing;
+  const close = () => { if (!busyRef.current && !closingRef.current) closeRef.current(); };
   const focusAction = () => {
     if (primaryRef.current && !primaryRef.current.disabled) primaryRef.current.focus();
     else bodyRef.current?.closest('[role="dialog"]')?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus();
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (closing) return;
     aliveRef.current = true;
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const appRoot = document.getElementById("root");
@@ -56,14 +60,17 @@ export function MergeRequestDownload({ theme, style, detail, unavailable, onDown
       aliveRef.current = false;
       document.removeEventListener("keydown", onKey, true);
       if (appRoot) appRoot.inert = wasInert;
-      if (previous?.isConnected) previous.focus({ preventScroll: true });
+      const dialog = bodyRef.current?.closest('[role="dialog"]');
+      const otherDialog = Array.from(document.querySelectorAll('[role="dialog"][aria-modal="true"]'))
+        .some(element => element !== dialog && element.getAttribute("aria-hidden") !== "true");
+      if (!otherDialog && previous?.isConnected) previous.focus({ preventScroll: true });
     };
-  }, []);
+  }, [closing]);
 
-  useEffect(() => { if (prompt) promptRef.current?.focus(); }, [prompt]);
+  useEffect(() => { if (prompt && !closing) promptRef.current?.focus(); }, [prompt, closing]);
 
   async function download() {
-    if (busyRef.current || unavailable) return;
+    if (busyRef.current || closingRef.current || unavailable) return;
     busyRef.current = true;
     setBusy(true); setError(null);
     try {
@@ -79,13 +86,13 @@ export function MergeRequestDownload({ theme, style, detail, unavailable, onDown
   }
 
   useEffect(() => {
-    if (busy) return;
+    if (busy || closing) return;
     if (copyFailedRef.current) { promptRef.current?.focus(); promptRef.current?.select(); }
     else focusAction();
-  }, [busy, copyFailures]);
+  }, [busy, copyFailures, closing]);
 
   async function copyPrompt() {
-    if (!prompt || busyRef.current) return;
+    if (!prompt || busyRef.current || closingRef.current) return;
     busyRef.current = true; copyFailedRef.current = false; setBusy(true); setCopied(false); setError(null);
     try {
       await navigator.clipboard.writeText(prompt);

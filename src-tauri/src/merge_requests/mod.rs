@@ -316,6 +316,8 @@ fn detail_bytes(detail: &Detail) -> usize {
     std::mem::size_of::<Detail>()
         + summary_bytes(&detail.summary)
         + detail.description.len()
+        + detail.assignees.iter().map(user_bytes).sum::<usize>()
+        + detail.reviewers.iter().map(user_bytes).sum::<usize>()
         + detail
             .approvals
             .approved_by
@@ -1955,6 +1957,11 @@ pub async fn mr_merge(
 
 enum Action {
     Close,
+    UpdateParticipants {
+        kind: api::ParticipantKind,
+        user_ids: Vec<u64>,
+        expected_user_ids: Vec<u64>,
+    },
     Approve {
         reviewed_sha: String,
         expected_target_branch: String,
@@ -1990,6 +1997,9 @@ async fn perform_action(
     epoch: u64,
     action: Action,
 ) -> Result<ActionResult, ApiError> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let participant_update = matches!(&action, Action::UpdateParticipants { .. });
+    let participant_sent = AtomicBool::new(false);
     let _gate = service
         .mutation_gate
         .try_lock()
@@ -2011,6 +2021,31 @@ async fn perform_action(
         match action {
             Action::Close => {
                 api::close(&context.config, mr_id, request.project_id, request.iid).await
+            }
+            Action::UpdateParticipants {
+                kind,
+                user_ids,
+                expected_user_ids,
+            } => {
+                api::update_participants(
+                    &context.config,
+                    mr_id,
+                    request.project_id,
+                    request.iid,
+                    kind,
+                    &user_ids,
+                    &expected_user_ids,
+                    || {
+                        let inner = service.lock();
+                        inner.context(epoch, false)?;
+                        if !inner.accepts(&context) || inner.request(mr_id)? != request {
+                            return Err(error("stale", "合并请求状态或 GitLab 账号已变化，请刷新"));
+                        }
+                        participant_sent.store(true, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .await
             }
             Action::Approve {
                 reviewed_sha,
@@ -2035,10 +2070,14 @@ async fn perform_action(
     let result = tokio::time::timeout(Duration::from_secs(120), operation)
         .await
         .unwrap_or_else(|_| {
-            Err(error(
-                "uncertain",
-                "操作结果尚未确认，请到 GitLab 核实，勿重复提交",
-            ))
+            if participant_update && !participant_sent.load(Ordering::SeqCst) {
+                Err(error("timeout", "GitLab 请求超时，请稍后重试"))
+            } else {
+                Err(error(
+                    "uncertain",
+                    "操作结果尚未确认，请到 GitLab 核实，勿重复提交",
+                ))
+            }
         })
         .and_then(|result| {
             if result.detail.as_ref().is_some_and(|detail| {
@@ -2064,6 +2103,11 @@ async fn perform_action(
     {
         let mut inner = service.lock();
         if !inner.accepts(&context) {
+            if participant_update && !participant_sent.load(Ordering::SeqCst) {
+                return Err(result.err().unwrap_or_else(|| {
+                    error("stale", "合并请求状态或 GitLab 账号已变化，请刷新")
+                }));
+            }
             return Err(error(
                 if inner.epoch == epoch {
                     "uncertain"
@@ -2085,7 +2129,9 @@ async fn perform_action(
     }
     service.changed.notify_one();
     result.map_err(|failure| {
-        if matches!(failure.kind.as_str(), "timeout" | "network") {
+        if matches!(failure.kind.as_str(), "timeout" | "network")
+            && (!participant_update || participant_sent.load(Ordering::SeqCst))
+        {
             error(
                 "uncertain",
                 "操作结果尚未确认，请刷新状态或到 GitLab 核实，勿直接重复提交",
@@ -2094,6 +2140,67 @@ async fn perform_action(
             failure
         }
     })
+}
+
+#[tauri::command]
+pub async fn mr_participant_candidates(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    mr_id: u64,
+    epoch: u64,
+    query: String,
+    page: u64,
+) -> Result<api::ParticipantCandidates, ApiError> {
+    let service = state.0.clone();
+    let (context, request) = {
+        let inner = service.lock();
+        (inner.context(epoch, false)?, inner.request(mr_id)?)
+    };
+    let result = read_deadline(api::participant_candidates(
+        &context.config,
+        mr_id,
+        request.project_id,
+        request.iid,
+        &query,
+        page,
+    ))
+    .await;
+    let mut inner = service.lock();
+    if !inner.accepts(&context) || inner.request(mr_id)? != request {
+        return Err(error("stale", "合并请求状态或 GitLab 账号已变化，请刷新"));
+    }
+    if let Err(failure) = &result {
+        if failure.kind != "invalid_input" {
+            inner.request_failure(&context, failure.clone());
+            inner.publish(&app);
+            service.changed.notify_one();
+        }
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn mr_update_participants(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, MrState>,
+    mr_id: u64,
+    epoch: u64,
+    kind: api::ParticipantKind,
+    user_ids: Vec<u64>,
+    expected_user_ids: Vec<u64>,
+) -> Result<ActionResult, ApiError> {
+    perform_action(
+        &app,
+        &state.0.clone(),
+        mr_id,
+        epoch,
+        Action::UpdateParticipants {
+            kind,
+            user_ids,
+            expected_user_ids,
+        },
+    )
+    .await
 }
 
 #[tauri::command]
@@ -2249,6 +2356,9 @@ mod tests {
     fn detail(summary: Summary) -> Detail {
         Detail {
             summary,
+            assignees: vec![],
+            reviewers: vec![],
+            can_manage_participants: false,
             description: "reviewed".into(),
             pipeline_status: None,
             approvals: api::ApprovalState {
@@ -2461,6 +2571,9 @@ mod tests {
         let original = vec![row(1, 32)];
         let detail = Detail {
             summary: original[0].clone(),
+            assignees: vec![],
+            reviewers: vec![],
+            can_manage_participants: false,
             description: "reviewed".into(),
             pipeline_status: None,
             approvals: api::ApprovalState {

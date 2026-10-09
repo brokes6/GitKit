@@ -1,6 +1,13 @@
 /** Remote GitLab data. These types never describe or mutate the local index. */
 export interface MrUser { id: number; name: string; username: string }
 export type MrRole = "author" | "assignee" | "reviewer";
+export type MrParticipantKind = "assignee" | "reviewer";
+export interface MrParticipantCandidates { users: MrUser[]; nextPage: number | null }
+export interface MrParticipantsResult {
+  state: "updated" | "uncertain";
+  message: string;
+  detail: MrDetail | null;
+}
 export interface MrSummary {
   id: number;
   projectId: number;
@@ -58,6 +65,9 @@ export interface MrDiffFile {
 export interface MrDiffVersion extends MrDiffVersionInfo { files: MrDiffFile[]; truncated: boolean }
 export interface MrDetail {
   summary: MrSummary;
+  assignees: MrUser[];
+  reviewers: MrUser[];
+  canManageParticipants: boolean;
   description: string;
   pipelineStatus: string | null;
   approvals: {

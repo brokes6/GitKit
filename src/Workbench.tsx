@@ -9,6 +9,7 @@ import type { Project, ThemeColors } from "./App";
 import { ToolbarText } from "./ToolbarText";
 import { Skeleton } from "./Skeleton";
 import { WorkspaceActivity } from "./WorkspaceActivity";
+import { useMotionVisibility } from "./useMotionVisibility";
 import type { useProjectActivity } from "./useProjectActivity";
 import { getCurrentLanguage, tf, tx } from "./i18n";
 import {
@@ -212,7 +213,6 @@ const OverviewRow = memo(function OverviewRow({ project, entry, showLocation, on
   language: string;
 }) {
   const summary = entry?.summary ?? null;
-  const loading = !summary && !!entry?.checking && !entry.error && !entry.remoteError;
   const state = overviewState(entry);
   const Icon = STATE_ICONS[state];
   const otherBranches = summary?.behindBranches.filter((branch) => !branch.current && branch.name !== summary.currentBranch) ?? [];
@@ -221,7 +221,7 @@ const OverviewRow = memo(function OverviewRow({ project, entry, showLocation, on
   const label = actionLabel(state);
   const parentFolder = project.path.replace(/[\\/]+$/, "").split(/[\\/]/).slice(-2, -1)[0];
   return (
-    <li className="gk-overview-row" data-tone={STATE_TONES[state]} aria-busy={loading}>
+    <li className="gk-overview-row" data-tone={STATE_TONES[state]} aria-busy={entry?.checking || undefined}>
       <div className="gk-overview-project">
         <div className="gk-overview-project-icon" style={{ color: project.color }}><FolderGit2 size={17} aria-hidden="true" /></div>
         <div className="gk-overview-identity">
@@ -229,21 +229,18 @@ const OverviewRow = memo(function OverviewRow({ project, entry, showLocation, on
             aria-label={tf("进入项目：{0}", project.name)}>{project.name}</button>
           <div className="gk-overview-branch" title={summary?.currentBranch ?? ""}>
             <GitBranch size={11} aria-hidden="true" />
-            {loading ? <Skeleton width={72} height={8} />
-              : <span>{summary?.currentBranch || (summary?.detached ? tx("分离 HEAD") : tx("分支待确认"))}</span>}
+            <span>{summary?.currentBranch || (summary?.detached ? tx("分离 HEAD") : tx("分支待确认"))}</span>
             {showLocation && parentFolder && <span className="gk-overview-location" title={project.path}>{parentFolder}</span>}
           </div>
         </div>
       </div>
       <div className="gk-overview-condition">
-        {loading ? <><Skeleton width={108} height={18} /><span className="sr-only">{tx("正在读取状态")}</span></>
-          : <div className="gk-overview-state" data-tone={STATE_TONES[state]}>
+        <div className="gk-overview-state" data-tone={STATE_TONES[state]}>
           <Icon size={14} aria-hidden="true" className={state === "unknown" && entry?.checking ? "gk-overview-spin" : undefined} />
           <span>{stateTitle(state, entry)}</span>
           {entry?.checking && summary && <span className="gk-overview-checking">{tx("更新中")}</span>}
-        </div>}
-        {loading ? <div className="gk-overview-facts"><Skeleton width={160} height={8} /></div>
-          : !entry?.error && <SummaryDetails summary={summary} state={state} />}
+        </div>
+        {!entry?.error && <SummaryDetails summary={summary} state={state} />}
         {entry?.error && summary && <div className="gk-overview-facts">{tf("上次读取于 {0}，当前状态未确认", timestamp(summary.checkedAt))}</div>}
         {errors.length > 0 && <details className="gk-overview-errors">
           <summary><CircleAlert size={11} aria-hidden="true" /><span>{entry?.error ? tx("查看读取错误") : tx("远程检查失败")}</span></summary>
@@ -265,12 +262,38 @@ const OverviewRow = memo(function OverviewRow({ project, entry, showLocation, on
   );
 });
 
+function OverviewSkeletonRow() {
+  return <li className="gk-overview-row gk-overview-row-loading" aria-busy="true">
+    <div className="gk-overview-project">
+      <div className="gk-overview-project-icon"><Skeleton width={17} height={18} /></div>
+      <div className="gk-overview-identity">
+        <Skeleton className="gk-overview-skeleton-name" width={108} height={12} />
+        <div className="gk-overview-branch"><Skeleton width={11} height={10} /><Skeleton width={72} height={8} /></div>
+      </div>
+    </div>
+    <div className="gk-overview-condition">
+      <Skeleton width={124} height={18} />
+      <div className="gk-overview-facts"><Skeleton width={160} height={8} /></div>
+    </div>
+    <span className="gk-overview-row-action gk-overview-skeleton-action"><Skeleton width={57} height={10} /></span>
+  </li>;
+}
+
 export function ProjectOverview({ theme, projects, entries, refreshing, remoteBusy, remoteCheckedAt, remoteProgress,
   activity, onOpen, onAdd, onClone }: ProjectOverviewProps) {
   const [filter, setFilter] = useState<OverviewFilter>("attention");
   const [query, setQuery] = useState("");
   const counts = overviewFilterCounts(projects, entries);
-  const shown = selectOverviewProjects(projects, entries, filter, query);
+  const pendingProjects = projects.filter((project) => {
+    const entry = entries[project.id];
+    return entry?.checking && !entry.summary && !entry.error && !entry.remoteError;
+  });
+  const pendingIds = new Set(pendingProjects.map((project) => project.id));
+  const shown = selectOverviewProjects(projects.filter((project) => !pendingIds.has(project.id)), entries, filter, query);
+  const pendingShown = selectOverviewProjects(pendingProjects, entries, "all", query).slice(0, 4);
+  const loading = pendingProjects.length > 0;
+  const skeletonRef = useRef<HTMLDivElement>(null);
+  useMotionVisibility(skeletonRef, pendingShown.length > 0);
   const names = new Set<string>();
   const duplicateNames = new Set<string>();
   for (const project of projects) {
@@ -286,11 +309,6 @@ export function ProjectOverview({ theme, projects, entries, refreshing, remoteBu
   })).filter((group) => group.projects.length > 0);
   const snapshots = projects.map((project) => entries[project.id]?.error ? null : entries[project.id]?.summary?.checkedAt).filter((value): value is number => !!value);
   const localCheckedAt = snapshots.length ? Math.min(...snapshots) : null;
-  const pendingProjects = projects.filter((project) => {
-    const entry = entries[project.id];
-    return entry?.checking && !entry.summary && !entry.error && !entry.remoteError;
-  });
-  const loading = pendingProjects.length > 0;
   const emptyHealthy = filter === "attention" && !query.trim() && !loading && counts.attention === 0;
   const style = {
     background: theme.bgPanel, color: theme.text, border: `0.5px solid ${theme.border}`,
@@ -344,17 +362,16 @@ export function ProjectOverview({ theme, projects, entries, refreshing, remoteBu
           <h2>{tx("从一个仓库开始")}</h2><p>{tx("添加项目后，在这里查看更改、未完成操作和远程更新。")}</p>
           <div className="gk-overview-actions"><button className="gk-overview-button gk-overview-primary" onClick={onAdd}><Plus size={14} aria-hidden="true" />{tx("添加仓库")}</button>
             <button className="gk-overview-button gk-shell-button" onClick={onClone}><CloudDownload size={14} aria-hidden="true" />{tx("克隆仓库")}</button></div>
-        </div> : shown.length > 0 ? groups.map((group) => <section className="gk-overview-section" key={group.id} aria-labelledby={`overview-group-${group.id}`}>
+        </div> : shown.length > 0 || pendingShown.length > 0 ? <>{groups.map((group) => <section className="gk-overview-section" key={group.id} aria-labelledby={`overview-group-${group.id}`}>
           <div className="gk-overview-section-heading"><h2 id={`overview-group-${group.id}`}>{tx(GROUP_LABELS[group.id])}</h2>
             <span>{group.projects.length}</span></div>
           <ul className="gk-overview-list">{group.projects.map((project) => <OverviewRow key={project.id} project={project}
             entry={entries[project.id]} showLocation={duplicateNames.has(project.name)} onOpen={onOpen} language={getCurrentLanguage()} />)}</ul>
-        </section>)
-          : loading ? <div className="gk-overview-section" role="status" aria-label={tx("正在读取状态")}>
+        </section>)}
+          {pendingShown.length > 0 && <div ref={skeletonRef} className="gk-overview-section gk-overview-loading" role="status" aria-label={tx("正在读取状态")}>
             <div className="gk-overview-section-heading"><Skeleton width={74} height={10} /></div>
-            <ul className="gk-overview-list">{pendingProjects.map((project) => <OverviewRow key={project.id} project={project}
-              entry={entries[project.id]} showLocation={duplicateNames.has(project.name)} onOpen={onOpen} language={getCurrentLanguage()} />)}</ul>
-          </div> : <div className="gk-overview-empty">
+            <ul className="gk-overview-list">{pendingShown.map((project) => <OverviewSkeletonRow key={project.id} />)}</ul>
+          </div>}</> : <div className="gk-overview-empty">
             {emptyHealthy ? <CheckCheck size={24} strokeWidth={1.5} aria-hidden="true" /> : <Search size={24} strokeWidth={1.5} aria-hidden="true" />}
             <h2>{emptyHealthy ? tx("当前没有待处理事项") : query.trim() ? tx("没有找到匹配的项目") : tx("这个筛选下没有项目")}</h2>
             <p>{emptyHealthy ? tx("可查看全部项目，或检查远程是否有新更新。") : query.trim() ? tx("试试项目名称、路径或当前分支。") : tx("选择其他筛选查看项目状态。")}</p>

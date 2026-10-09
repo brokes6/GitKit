@@ -57,6 +57,8 @@ pub fn run() {
             merge_requests::mr_merge,
             merge_requests::mr_close,
             merge_requests::mr_approve,
+            merge_requests::mr_participant_candidates,
+            merge_requests::mr_update_participants,
             merge_requests::mr_open,
             daily_check::daily_check_snapshot,
             daily_check::daily_check_configure,

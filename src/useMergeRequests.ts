@@ -3,7 +3,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "./git";
 import { mrErrorMessage, mrVersionChanged, reviewVersion, sameMrRefs } from "./mergeRequestHelpers";
-import type { MrActionResult, MrCommitMessages, MrDetail, MrDiffCommentPosition, MrDiffCommentResult, MrDiffVersion, MrDiscussion, MrDownloadedDiff, MrMergeOptions, MrMergeResult, MrSnapshot } from "./mergeRequestTypes";
+import type { MrActionResult, MrCommitMessages, MrDetail, MrDiffCommentPosition, MrDiffCommentResult, MrDiffVersion, MrDiscussion, MrDownloadedDiff, MrMergeOptions, MrMergeResult, MrParticipantCandidates, MrParticipantKind, MrParticipantsResult, MrSnapshot } from "./mergeRequestTypes";
 import { tx } from "./i18n";
 
 interface Store {
@@ -34,7 +34,9 @@ export function useMergeRequests({ url, token, credentialRevision }: {
   const epochRef = useRef<number | null>(null);
   const detailRequest = useRef(0), diffRequest = useRef(0), discussionRequest = useRef(0);
   const selectionRequest = useRef(0);
+  const renderedSelection = selectionRequest.current;
   const diffCommentInFlight = useRef(false);
+  const participantRequest = useRef(0), participantsInFlight = useRef(false);
   const configureNative = useCallback(() => invoke<MrSnapshot>("mr_configure", {config:enabled ? {
     accountKey:"gitlab",url:instanceUrl,token,
   } : null}), [enabled,instanceUrl,token]);
@@ -53,6 +55,7 @@ export function useMergeRequests({ url, token, credentialRevision }: {
     let unlisten: (() => void) | undefined;
     epochRef.current = null;
     selectionRequest.current++;
+    participantRequest.current++;
     detailRequest.current++; diffRequest.current++; discussionRequest.current++;
     setStored(empty(key));
     if (!isTauri()) return;
@@ -141,6 +144,7 @@ export function useMergeRequests({ url, token, credentialRevision }: {
     }
     const request = ++detailRequest.current;
     selectionRequest.current++;
+    participantRequest.current++;
     diffRequest.current++; discussionRequest.current++;
     setListState({key,open:false});
     setStored((previous) => ({...empty(key),snapshot:previous.key === key ? previous.snapshot : null,selectedId:mrId,loading:true}));
@@ -196,6 +200,95 @@ export function useMergeRequests({ url, token, credentialRevision }: {
     };
     if (tab === 'changes') void loadDiff().catch(failed);
     if (tab === 'changes' || tab === 'discussion') void loadDiscussions().catch(failed);
+  };
+
+  const participantContext = () => {
+    if (key !== keyRef.current || renderedSelection !== selectionRequest.current)
+      throw new Error(tx("账号、合并请求或成员搜索已变化，请重新选择"));
+    const expected = context(), current = storeRef.current;
+    const detail = current.latest ?? current.detail;
+    if (!detail || current.selectedId !== detail.summary.id || current.detail?.summary.id !== detail.summary.id)
+      throw new Error(tx("请选择合并请求"));
+    if (!current.snapshot?.user || detail.summary.author.id !== current.snapshot.user.id
+      || !detail.canManageParticipants || detail.summary.state !== "opened")
+      throw new Error(tx("只有创建者可以修改进行中的合并请求的指派人和审核者"));
+    return {...expected,detail,mrId:detail.summary.id,selection:selectionRequest.current};
+  };
+  const participantCandidates = async (query: string, page: number): Promise<MrParticipantCandidates> => {
+    const expected = participantContext();
+    if (!Number.isSafeInteger(page) || page < 1) throw new Error(tx("成员列表页码无效"));
+    const request = ++participantRequest.current, detailGeneration = detailRequest.current;
+    const result = await invoke<MrParticipantCandidates>("mr_participant_candidates", {
+      mrId:expected.mrId,epoch:expected.epoch,query,page,
+    });
+    const current = storeRef.current;
+    if (request !== participantRequest.current || detailGeneration !== detailRequest.current
+      || keyRef.current !== expected.key || epochRef.current !== expected.epoch
+      || selectionRequest.current !== expected.selection || current.key !== expected.key
+      || current.selectedId !== expected.mrId)
+      throw new Error(tx("账号、合并请求或成员搜索已变化，请重新选择"));
+    participantContext();
+    return result;
+  };
+  const updateParticipants = async (kind: MrParticipantKind, userIds: number[], expectedUserIds: number[]): Promise<MrParticipantsResult> => {
+    const expected = participantContext();
+    if (kind !== 'assignee' && kind !== 'reviewer') throw new Error(tx("合并请求成员类型无效"));
+    const validIds = (ids: number[]) => Array.isArray(ids)
+      && ids.every((id) => Number.isSafeInteger(id) && id > 0) && new Set(ids).size === ids.length;
+    if (!validIds(userIds) || !validIds(expectedUserIds)) throw new Error(tx("请选择有效的项目成员"));
+    const currentIds = (kind === 'assignee' ? expected.detail.assignees : expected.detail.reviewers).map((user) => user.id);
+    if (currentIds.length !== expectedUserIds.length || currentIds.some((id) => !expectedUserIds.includes(id)))
+      throw new Error(tx("指派人或审核者已变化，请刷新后重新选择"));
+    if (participantsInFlight.current) throw new Error(tx("正在保存合并请求成员，请稍候"));
+    const stillSelected = () => {
+      const current = storeRef.current;
+      return keyRef.current === expected.key && epochRef.current === expected.epoch
+        && selectionRequest.current === expected.selection && current.key === expected.key
+        && current.selectedId === expected.mrId;
+    };
+    participantsInFlight.current = true;
+    participantRequest.current++;
+    // Assignment changes update the current remote detail while the reviewed source stays pinned.
+    const request = ++detailRequest.current;
+    try {
+      let result: MrParticipantsResult;
+      try {
+        result = await invoke<MrParticipantsResult>("mr_update_participants", {
+          mrId:expected.mrId,epoch:expected.epoch,kind,userIds:[...userIds],expectedUserIds:[...expectedUserIds],
+        });
+      } catch (error) {
+        if (typeof error === 'object' && error && 'kind' in error && error.kind === 'uncertain')
+          result = {state:'uncertain',message:mrErrorMessage(error),detail:null};
+        else throw error;
+      }
+      if (!stillSelected()) return {
+        state:'uncertain',message:tx("账号或合并请求已切换，请到原 GitLab 项目核实成员修改结果，勿重复提交"),detail:null,
+      };
+      if (result.detail && (result.detail.summary.id !== expected.mrId
+        || result.detail.summary.projectId !== expected.detail.summary.projectId
+        || result.detail.summary.iid !== expected.detail.summary.iid)) result = {
+        state:'uncertain',message:tx("无法确认合并请求成员修改结果，请刷新核实，勿重复提交"),detail:null,
+      };
+      // Discard detail reads started before or during this mutation so they cannot restore old members.
+      detailRequest.current++;
+      participantRequest.current++;
+      setStored((previous) => {
+        if (previous.key !== expected.key || previous.selectedId !== expected.mrId) return previous;
+        const snapshotDetail = previous.snapshot?.selectedDetail;
+        const latest = snapshotDetail?.summary.id === expected.mrId && result.detail
+          && Date.parse(snapshotDetail.summary.updatedAt) > Date.parse(result.detail.summary.updatedAt)
+          ? snapshotDetail : result.detail ?? previous.latest;
+        return {...previous,latest,loading:false,error:null};
+      });
+      return result;
+    } finally {
+      participantsInFlight.current = false;
+      if (request === detailRequest.current) {
+        detailRequest.current++;
+        if (stillSelected()) setStored((previous) => previous.key === expected.key && previous.selectedId === expected.mrId
+          ? {...previous,loading:false} : previous);
+      }
+    }
   };
 
   const createDiffComment = async (position: MrDiffCommentPosition, body: string): Promise<MrDiffCommentResult> => {
@@ -402,11 +495,12 @@ export function useMergeRequests({ url, token, credentialRevision }: {
   };
   const backWorkspace = () => {
     selectionRequest.current++;
+    participantRequest.current++;
     detailRequest.current++; diffRequest.current++; discussionRequest.current++;
     setStored((previous) => ({...empty(key),snapshot:previous.snapshot}));
     setListState({key,open:false});
   };
-  return {...value,error:value.error || value.syncError,enabled,listOpen,anchorRef,select,refresh,onTabChange,reviewLatest,downloadDiff,createDiffComment,merge,close,approve,commitMessages,openExternal,backWorkspace,
+  return {...value,error:value.error || value.syncError,enabled,listOpen,anchorRef,select,refresh,onTabChange,reviewLatest,downloadDiff,createDiffComment,participantCandidates,updateParticipants,merge,close,approve,commitMessages,openExternal,backWorkspace,
     toggleList:()=>setListState({key,open:hasRequests && !listOpen}),closeList:()=>setListState({key,open:false}),
     backList:()=>hasRequests ? setListState({key,open:true}) : backWorkspace()};
 }
