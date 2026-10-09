@@ -47,6 +47,7 @@ import { ToolbarText } from "./ToolbarText";
 import { Skeleton, CodeSkeleton } from "./Skeleton";
 import { useProjectOverview } from "./useProjectOverview";
 import { useAppForeground } from "./useAppForeground";
+import { useHistoryModeTransition } from "./useHistoryModeTransition";
 import { useProjectActivity } from "./useProjectActivity";
 import { applyOverviewToProjects, overviewAttentionCount } from "./projectOverview";
 import { MergeRequestEntry, MergeRequestPopover, MergeRequestDetail } from "./MergeRequests";
@@ -3021,6 +3022,41 @@ function WorkingFileRow({ file, selected, disabled, onSelect, onStage, onUnstage
 
 // ─── ChangesPanel ─────────────────────────────────────────────────────────────
 
+function ChangesSectionHeader({ label, count, action, onAction, onReset, disabled }: {
+  label: string; count: number; action: string; onAction: () => void; onReset?: () => void; disabled: boolean;
+}) {
+  const t = useTheme();
+  return (
+    <div className="flex items-center justify-between px-4 py-2.5 gap-2"
+      style={{ borderBottom: `0.5px solid ${t.border}` }}>
+      <span className="text-[12px] font-semibold flex-1 min-w-0 truncate" style={{ color: t.textMuted }}>
+        {label} <span style={{ color: t.textFaint }}>({count})</span>
+      </span>
+      {onReset && (
+        <button disabled={disabled} onClick={onReset}
+          className="text-[12px] px-2 py-0.5 transition-colors cursor-pointer flex-shrink-0"
+          title={tx("丢弃工作区的所有更改（reset --hard + clean）")}
+          style={{ color: t.red, background: t.redBg, borderRadius: R - 4,
+            border: `0.5px solid ${t.red}33` }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = t.red + "22")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = t.redBg)}>
+          {tx("全部重置")}
+        </button>
+      )}
+      {count > 0 && (
+        <button disabled={disabled} onClick={onAction}
+          className="text-[12px] px-2 py-0.5 transition-colors cursor-pointer flex-shrink-0"
+          style={{ color: t.textMuted, background: t.inputBg, borderRadius: R - 4,
+            border: `0.5px solid ${t.inputBorder}` }}
+          onMouseEnter={(e) => (e.currentTarget.style.color = t.text)}
+          onMouseLeave={(e) => (e.currentTarget.style.color = t.textMuted)}>
+          {action}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStage, onUnstage, busy, operationActive,
   identities, defaultIdentityId, projectKey, onCommit, onConfigureIdentity, onDiscard, onDiscardAll }: {
   files: WorkingFile[]; selectedFile: WorkingFile | null;
@@ -3084,44 +3120,12 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
       setCommitting(false);
     }
   };
-  const SectionHdr = ({ label, count, action, onAction, onReset }: {
-    label: string; count: number; action: string; onAction: () => void; onReset?: () => void;
-  }) => (
-    <div className="flex items-center justify-between px-4 py-2.5 gap-2"
-      style={{ borderBottom: `0.5px solid ${t.border}` }}>
-      <span className="text-[12px] font-semibold flex-1 min-w-0 truncate" style={{ color: t.textMuted }}>
-        {label} <span style={{ color: t.textFaint }}>({count})</span>
-      </span>
-      {onReset && (
-        <button disabled={locked} onClick={onReset}
-          className="text-[12px] px-2 py-0.5 transition-colors cursor-pointer flex-shrink-0"
-          title={tx("丢弃工作区的所有更改（reset --hard + clean）")}
-          style={{ color: t.red, background: t.redBg, borderRadius: R - 4,
-            border: `0.5px solid ${t.red}33` }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = t.red + "22")}
-          onMouseLeave={(e) => (e.currentTarget.style.background = t.redBg)}>
-          {tx("全部重置")}
-        </button>
-      )}
-      {count > 0 && (
-        <button disabled={locked} onClick={onAction}
-          className="text-[12px] px-2 py-0.5 transition-colors cursor-pointer flex-shrink-0"
-          style={{ color: t.textMuted, background: t.inputBg, borderRadius: R - 4,
-            border: `0.5px solid ${t.inputBorder}` }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = t.text)}
-          onMouseLeave={(e) => (e.currentTarget.style.color = t.textMuted)}>
-          {action}
-        </button>
-      )}
-    </div>
-  );
-
   return (
     <div className="flex-shrink-0 flex flex-col overflow-hidden"
       style={{ background: t.bgPanel, width: "clamp(260px, 23vw, 300px)",
         borderRight: `0.5px solid ${t.border}` }}>
       <div className="flex-shrink-0" style={{ maxHeight: "42%", minHeight: 80, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <SectionHdr label={tx("已暂存")} count={staged.length} action={tx("全部取消")} onAction={unstageAll} />
+        <ChangesSectionHeader label={tx("已暂存")} count={staged.length} action={tx("全部取消")} onAction={unstageAll} disabled={locked} />
         <div className="overflow-y-auto flex-1 py-1">
           {staged.length === 0
             ? <div className="px-4 py-3 text-[12px]" style={{ color: t.textFaint }}>{tx("暂无已暂存的文件")}</div>
@@ -3135,7 +3139,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
       </div>
 
       <div className="flex-1 flex flex-col overflow-hidden" style={{ borderTop: `0.5px solid ${t.border}` }}>
-        <SectionHdr label={tx("未暂存")} count={unstaged.length} action={tx("全部暂存")} onAction={stageAll}
+        <ChangesSectionHeader label={tx("未暂存")} count={unstaged.length} action={tx("全部暂存")} onAction={stageAll} disabled={locked}
           onReset={!operationActive && files.length > 0 ? onDiscardAll : undefined} />
         <div className="overflow-y-auto flex-1 py-1">
           {unstaged.length === 0
@@ -6466,9 +6470,6 @@ export default function App() {
   const [commitFilesReading, setCommitFilesReading] = useState<{ path: string; hash: string; requestId: number } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [smartMerge, setSmartMerge] = useState(() => localStorage.getItem("gitkit.smartMerge") !== "0");
-  const [historyMode, setHistoryMode] = useState<"list" | "topology">(() =>
-    localStorage.getItem("gitkit.historyMode") === "topology" ? "topology" : "list");
-  useEffect(() => { localStorage.setItem("gitkit.historyMode", historyMode); }, [historyMode]);
   const [expandedSmartRows, setExpandedSmartRows] = useState<Set<string>>(() => new Set());
   useEffect(() => { localStorage.setItem("gitkit.smartMerge", smartMerge ? "1" : "0"); }, [smartMerge]);
   const [selectedFile, setSelectedFile]       = useState<CommitFile | null>(null);
@@ -6485,6 +6486,13 @@ export default function App() {
   const [branchViewLoading, setBranchViewLoading] = useState(false);
   const [pinnedBranches, setPinnedBranches]   = useState<string[]>([]);
   const [collapsedFolders, setCollapsedFolders] = useState<string[]>([]);
+  const historyContextKey = `${activeProject?.path}:${focusBranch}:${timelineHiddenBranches.join("\u0000")}`;
+  const { mode: historyLayoutMode, renderedMode: historyMode, moving: historySidebarMoving,
+    changing: historyModeChanging, phase: historyContentPhase,
+    viewportWidth: historyViewportWidth, revealContext: historyRevealContext,
+    workspaceRef: historyWorkspaceRef, timelineRef: timelineScrollRef,
+    changeMode: changeHistoryMode, onTransitionEnd: finishHistoryModeTransition,
+    onContentTransitionEnd: finishHistoryContentTransition } = useHistoryModeTransition(historyContextKey);
   const [selectedWorkingFile, setSelectedWorkingFile] = useState<WorkingFile | null>(null);
   const workingDiffRequestRef = useRef(0);
   const selectedWorkingRef = useRef(selectedWorkingFile);
@@ -6657,7 +6665,6 @@ export default function App() {
   const lastLoadedPath = useRef<string | null>(null);   // to tell a switch from a refresh
   const pendingViewReset = useRef(false);                // branch-changing reloads force a view reset
   const pendingJumpLatest = useRef(false);               // fetch/pull → jump to the newest commit
-  const timelineScrollRef = useRef<HTMLDivElement>(null);
   const hiddenBranchesRef = useRef(hiddenBranches);
   hiddenBranchesRef.current = hiddenBranches;
   const focusBranchRef = useRef(focusBranch);
@@ -9079,12 +9086,14 @@ export default function App() {
               onCreateDiffComment={mr.createDiffComment}
               renderDiff={(files, selected, onSelect, sourceKey, lineComments) => <FileDiffView files={files} selectedFile={selected}
                 onFileSelect={onSelect} repoPath="" sourceKey={sourceKey} compact lineComments={lineComments} />} />}
-            <div className="gk-history-workspace flex-1 min-w-0 min-h-0 overflow-hidden" data-history-mode={historyMode}
+            <div className="gk-history-workspace flex-1 min-w-0 min-h-0 overflow-hidden" data-history-mode={historyLayoutMode}
+              data-history-moving={historySidebarMoving}
+              onTransitionEnd={finishHistoryModeTransition}
               aria-hidden={mr.selectedId !== null}
-              ref={(element) => { if (element) element.inert = mr.selectedId !== null; }}
+              ref={(element) => { historyWorkspaceRef.current = element; if (element) element.inert = mr.selectedId !== null; }}
               style={{ display: mr.selectedId !== null ? "none" : undefined }}>
-            <div className="gk-branch-disclosure min-w-0 min-h-0 overflow-hidden" aria-hidden={historyMode === "topology"}
-              ref={(element) => { if (element) element.inert = historyMode === "topology"; }}>
+            <div className="gk-branch-disclosure min-w-0 min-h-0 overflow-hidden" aria-hidden={historyLayoutMode === "topology" || historyModeChanging}
+              ref={(element) => { if (element) element.inert = historyLayoutMode === "topology" || historyModeChanging; }}>
             <Sidebar branches={branches} remotes={remotes} stashes={stashes}
               currentBranch={currentBranch} focusBranch={focusBranch}
               hidden={hiddenBranches} setHidden={updateHiddenBranches}
@@ -9142,7 +9151,7 @@ export default function App() {
               <div className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5"
                 style={{ borderBottom: `0.5px solid ${theme.border}`, background: "transparent" }}>
                 <span className="text-xs font-medium" style={{ color: theme.textSec }}>{tx("提交历史")}</span>
-                <HistoryModeSwitch mode={historyMode} onChange={(mode) => startTransition(() => setHistoryMode(mode))} />
+                <HistoryModeSwitch mode={historyLayoutMode} onChange={changeHistoryMode} />
                 {historyMode === "list" && !focusActive && smartMergeResult.mergedGroups > 0 && (
                   <button type="button" aria-pressed={smartMerge}
                     title={tx("仅合并相同变更的展示，不会修改 Git 历史")}
@@ -9188,9 +9197,10 @@ export default function App() {
                 </div>
               )}
               <BranchFocusBanner branch={focusActive ? focusBranch : null} onClear={() => setFocus(null)} />
-              <div ref={timelineScrollRef} className={`flex-1 min-h-0 ${historyMode === "topology" ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}
-                aria-busy={!dataReady || switching || branchViewLoading}
-                style={{ overscrollBehaviorY: "none" }}>
+              <div ref={timelineScrollRef} className={`gk-history-content flex-1 min-h-0 ${historyMode === "topology" ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}
+                data-history-phase={historyContentPhase} onTransitionEnd={finishHistoryContentTransition}
+                aria-busy={!dataReady || switching || branchViewLoading || historyModeChanging}
+                style={{ overscrollBehaviorY: "none", width: historyViewportWidth ?? undefined }}>
                 {errored ? (
                   <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center" style={{ color: theme.red }}>
                     <span className="text-xs font-medium">{tx("读取失败")}</span>
@@ -9234,7 +9244,7 @@ export default function App() {
                   <CommitTopology key={`${activeProject?.path}:${focusBranch}:${timelineHiddenBranches.join("\u0000")}`}
                     commits={scopedCommits} graph={topologyGraph} theme={theme} hoverBranch={hoverBranch}
                     detailPanelRef={detailPanelRef} detailFullWidth={topologyDetailFullWidth || !!fileTrace}
-                    pulseActive={appForeground && mr.selectedId === null && !settingsOpen && !diffExpanded && !fileTrace && !topologyCovered}
+                    pulseActive={appForeground && mr.selectedId === null && !settingsOpen && !diffExpanded && !fileTrace && !topologyCovered && !historyModeChanging}
                     selectedHash={detailOpen && !viewChanges ? inspectedTopologyCommit?.fullHash ?? null : null}
                     onSelect={commit => {
                       if (commit.isStash) openStash({ index: commit.stashIndex ?? 0, message: commit.message,
@@ -9249,7 +9259,8 @@ export default function App() {
                       ...(isReal ? [{ label: tx("Cherry-pick 到当前分支"), Icon: GitCommit, onClick: () => requestCherryPick(commit) } as CtxItem] : []),
                     ])} />
                 ) : (
-                  <div key={`${activeProject?.path}:${timelineHiddenBranches.join("\u0000")}`} className="gk-reveal">
+                  <div key={`${activeProject?.path}:${timelineHiddenBranches.join("\u0000")}`}
+                    className={historyRevealContext === historyContextKey ? "gk-history-mode-reveal" : "gk-reveal"}>
                     {/* A branch sitting exactly on its base has no commits of its
                         own — say so instead of rendering an empty timeline. */}
                     {focusActive && displayCommits.length === 0 && (

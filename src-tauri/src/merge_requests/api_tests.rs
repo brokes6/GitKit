@@ -429,7 +429,7 @@ fn graphql_messages() -> Value {
         "project": {"id": "gid://gitlab/Project/9", "fullPath": "team/sub/app", "mergeRequest": {
             "id": "gid://gitlab/MergeRequest/101", "iid": "1", "diffHeadSha": SHA,
             "sourceBranch": "feature/ui", "targetBranch": "main", "title": "MR 1",
-            "description": "Only loaded for details", "updatedAt": "2026-10-06T00:00:00.000Z",
+            "description": "Only loaded for details", "updatedAt": "2026-10-06T00:00:00Z",
             "defaultMergeCommitMessage": "Release: MR 1\n\nCloses #42\n\nProject template footer",
             "defaultSquashCommitMessage": "Custom squash title\n\nCommit details from GitLab",
         }},
@@ -474,6 +474,125 @@ fn default_messages_use_graphql_named_fields_and_preserve_expanded_project_templ
         json!({"projectPath": "team/sub/app", "iid": "1"})
     );
     assert!(!body.to_string().contains("fixture-secret"));
+}
+
+#[test]
+fn default_messages_accept_rest_milliseconds_at_graphql_second_precision() {
+    for updated_at in ["2026-10-06T00:00:00.123Z", "2026-10-06T00:00:00.999Z"] {
+        let (config, requests, server) = mock(vec![step(
+            "POST",
+            "/gitlab/api/graphql",
+            graphql_messages(),
+        )]);
+        let mut known = message_summary(&config);
+        known.updated_at = updated_at.into();
+        let result = run(commit_messages(&config, &known, 7)).unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            result.merge_commit_message,
+            "Release: MR 1\n\nCloses #42\n\nProject template footer"
+        );
+        assert_eq!(
+            result.squash_commit_message,
+            "Custom squash title\n\nCommit details from GitLab"
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn default_messages_accept_equivalent_timestamp_timezones() {
+    for (graphql_updated_at, rest_updated_at) in [
+        ("2026-10-06T08:00:00+08:00", "2026-10-06T00:00:00.123Z"),
+        ("2026-10-06T00:00:00Z", "2026-10-06T08:00:00.123+08:00"),
+    ] {
+        let mut value = graphql_messages();
+        value["data"]["project"]["mergeRequest"]["updatedAt"] = json!(graphql_updated_at);
+        let (config, _, server) = mock(vec![step("POST", "/gitlab/api/graphql", value)]);
+        let mut known = message_summary(&config);
+        known.updated_at = rest_updated_at.into();
+        let result = run(commit_messages(&config, &known, 7)).unwrap();
+        server.join().unwrap();
+        assert_eq!(
+            result.merge_commit_message,
+            "Release: MR 1\n\nCloses #42\n\nProject template footer"
+        );
+    }
+}
+
+#[test]
+fn default_messages_reject_timestamp_changes_across_seconds() {
+    for (graphql_updated_at, rest_updated_at) in [
+        ("2026-10-06T00:00:01Z", "2026-10-06T00:00:00.999Z"),
+        ("2026-10-05T23:59:59Z", "2026-10-06T00:00:00.123Z"),
+    ] {
+        let mut value = graphql_messages();
+        value["data"]["project"]["mergeRequest"]["updatedAt"] = json!(graphql_updated_at);
+        let (config, requests, server) = mock(vec![step("POST", "/gitlab/api/graphql", value)]);
+        let mut known = message_summary(&config);
+        known.updated_at = rest_updated_at.into();
+        let error = run(commit_messages(&config, &known, 7)).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(error.kind, "conflict");
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn default_messages_reject_missing_or_invalid_timestamps() {
+    for change in ["missing", "null", "invalid", "empty", "matching_invalid"] {
+        let mut value = graphql_messages();
+        let request = value["data"]["project"]["mergeRequest"]
+            .as_object_mut()
+            .unwrap();
+        match change {
+            "missing" => {
+                request.remove("updatedAt");
+            }
+            "null" => {
+                request.insert("updatedAt".into(), Value::Null);
+            }
+            "invalid" | "matching_invalid" => {
+                request.insert("updatedAt".into(), json!("invalid-timestamp"));
+            }
+            "empty" => {
+                request.insert("updatedAt".into(), json!(""));
+            }
+            _ => unreachable!(),
+        }
+        let (config, requests, server) = mock(vec![step("POST", "/gitlab/api/graphql", value)]);
+        let mut known = message_summary(&config);
+        if change == "matching_invalid" {
+            known.updated_at = "invalid-timestamp".into();
+        }
+        let error = run(commit_messages(&config, &known, 7)).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(
+            error.kind,
+            if matches!(change, "missing" | "null") {
+                "invalid_response"
+            } else {
+                "conflict"
+            }
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn cached_message_revisions_preserve_rest_millisecond_precision() {
+    let config = Config {
+        url: "https://gitlab.example.test/".into(),
+        token: "fixture-secret".into(),
+    };
+    let mut known = message_summary(&config);
+    known.updated_at = "2026-10-06T00:00:00.123Z".into();
+    let mut changed = known.clone();
+    changed.updated_at = "2026-10-06T00:00:00.999Z".into();
+    assert!(!same_message_revision(&known, &changed));
+
+    changed.updated_at = "2026-10-06T08:00:00.123+08:00".into();
+    assert!(same_message_revision(&known, &changed));
 }
 
 #[test]

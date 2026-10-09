@@ -1448,6 +1448,16 @@ fn same_timestamp(left: &str, right: &str) -> bool {
             .is_some_and(|(left, right)| left == right)
 }
 
+fn same_graphql_timestamp(graphql: &str, rest: &str) -> bool {
+    // GitLab's GraphQL Time scalar uses iso8601 without fractional seconds,
+    // while REST retains milliseconds. Compare only their shared precision;
+    // REST-to-REST cache revision checks must keep using same_timestamp.
+    chrono::DateTime::parse_from_rfc3339(graphql)
+        .ok()
+        .zip(chrono::DateTime::parse_from_rfc3339(rest).ok())
+        .is_some_and(|(graphql, rest)| graphql.timestamp() == rest.timestamp())
+}
+
 pub fn same_message_revision(left: &Summary, right: &Summary) -> bool {
     left.id == right.id
         && left.project_id == right.project_id
@@ -1543,7 +1553,7 @@ pub async fn commit_messages(
         || request.source_branch != known.source_branch
         || request.title != known.title
         || request.description != known.description
-        || !same_timestamp(&request.updated_at, &known.updated_at)
+        || !same_graphql_timestamp(&request.updated_at, &known.updated_at)
     {
         return Err(ApiError::new(
             "conflict",

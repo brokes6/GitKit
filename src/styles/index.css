@@ -134,6 +134,12 @@ select:focus-visible,
   to   { opacity: 1; filter: blur(0); }
 }
 .gk-reveal { animation: gk-reveal 0.26s cubic-bezier(0.32, 0.72, 0, 1); }
+/* The persistent viewport fades around the content swap; the sidebar and
+   history controls retain their own layout motion and stay fully visible. */
+.gk-history-content { opacity: 1; }
+.gk-history-content[data-history-phase="fade-out"] { opacity: 0; transition: opacity 100ms ease-in; }
+.gk-history-content[data-history-phase="fade-in"],
+.gk-history-content[data-history-phase="layout"] { transition: opacity 160ms ease-out; }
 
 @keyframes gk-skeleton-in {
   from { opacity: 0; }
@@ -243,13 +249,14 @@ select:focus-visible,
 .gk-project-sidebar { width: var(--gk-project-width); height: 100%; padding-top: 8px; }
 .gk-history-workspace {
   --gk-branch-width: 168px;
+  --gk-history-motion-duration: 280ms;
   display: grid;
   grid-template-columns: var(--gk-branch-width) minmax(0, 1fr);
-  transition: grid-template-columns 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: grid-template-columns var(--gk-history-motion-duration) cubic-bezier(0.16, 1, 0.3, 1);
 }
 .gk-history-workspace[data-history-mode="topology"] {
+  --gk-history-motion-duration: 340ms;
   grid-template-columns: 0px minmax(0, 1fr);
-  transition-duration: 200ms;
 }
 .gk-branch-disclosure {
   visibility: visible;
@@ -258,18 +265,20 @@ select:focus-visible,
 .gk-history-workspace[data-history-mode="topology"] .gk-branch-disclosure {
   visibility: hidden;
   pointer-events: none;
-  transition: visibility 0s linear 200ms;
+  transition: visibility 0s linear var(--gk-history-motion-duration);
 }
 .gk-branch-sidebar {
   width: var(--gk-branch-width);
   height: 100%;
   transform: translateX(0);
-  transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform var(--gk-history-motion-duration) cubic-bezier(0.16, 1, 0.3, 1);
 }
 .gk-history-workspace[data-history-mode="topology"] .gk-branch-sidebar {
   transform: translateX(-100%);
-  transition-duration: 200ms;
 }
+.gk-history-workspace[data-history-moving="false"],
+.gk-history-workspace[data-history-moving="false"] .gk-branch-disclosure,
+.gk-history-workspace[data-history-moving="false"] .gk-branch-sidebar { transition: none; }
 .gk-workspace-card { margin: 12px 12px 12px 0; border-radius: 14px; }
 
 /* Paused Git operations float below the workspace toolbar without changing
@@ -659,6 +668,7 @@ select:focus-visible,
   .gk-history-workspace[data-history-mode],
   .gk-history-workspace[data-history-mode] .gk-branch-disclosure,
   .gk-history-workspace[data-history-mode] .gk-branch-sidebar { transition: none; }
+  .gk-history-content[data-history-phase] { transition: none; }
   .gk-project-item { transition-duration: 80ms; }
   .gk-project-item[data-project-active] { animation: none; }
   .gk-primary-sweep::after { display: none; }
