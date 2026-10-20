@@ -66,6 +66,66 @@ impl Drop for StagingRepo {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn has_changes_ignores_cached_empty_untracked_directories_without_rewriting_index() {
+    let repo = StagingRepo::new(true);
+    repo.write("tracked.txt", "base\n");
+    repo.commit(&repo.stage(&["tracked.txt"]).revision);
+    repo.git(&["config", "core.untrackedCache", "true"]);
+    let sessions = repo.0.join(".kotlin/sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    repo.write(".kotlin/sessions/session.txt", "temporary\n");
+    // Older mtimes let Git reuse its directory cache instead of treating the
+    // freshly created directories as racily modified during this test.
+    let times = std::fs::FileTimes::new()
+        .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000));
+    for directory in [&sessions, &repo.0.join(".kotlin"), &repo.0] {
+        std::fs::File::open(directory)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+    }
+    repo.git(&["status", "--porcelain"]); // Populate the untracked-directory cache.
+    std::fs::remove_file(sessions.join("session.txt")).unwrap();
+    let index = repo.0.join(".git/index");
+    let before = std::fs::read(&index).unwrap();
+    assert!(read_git_status(repo.path(), &[]).unwrap().is_empty());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert!(!runtime.block_on(git_has_changes(repo.path().into())).unwrap());
+    assert_eq!(std::fs::read(&index).unwrap(), before);
+}
+
+#[test]
+fn has_changes_detects_staged_unstaged_deleted_and_hidden_untracked_files() {
+    let repo = StagingRepo::new(true);
+    repo.write("tracked.txt", "base\n");
+    repo.commit(&repo.stage(&["tracked.txt"]).revision);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let has_changes = || runtime.block_on(git_has_changes(repo.path().into())).unwrap();
+    assert!(!has_changes());
+    repo.write("tracked.txt", "changed\n");
+    assert!(has_changes());
+    let staged = repo.stage(&["tracked.txt"]);
+    assert!(has_changes());
+    repo.commit(&staged.revision);
+    assert!(!has_changes());
+    std::fs::remove_file(repo.0.join("tracked.txt")).unwrap();
+    assert!(has_changes());
+    repo.write("tracked.txt", "changed\n");
+    assert!(!has_changes());
+    repo.git(&["config", "status.showUntrackedFiles", "no"]);
+    std::fs::create_dir_all(repo.0.join(".kotlin/sessions")).unwrap();
+    repo.write(".kotlin/sessions/session.txt", "untracked\n");
+    assert!(has_changes());
+}
+
 #[test]
 fn staged_snapshot_and_source_specific_diffs_survive_later_working_edits() {
     let repo = StagingRepo::new(true);

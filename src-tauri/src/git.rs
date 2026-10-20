@@ -1341,14 +1341,10 @@ mod file_content_tests {
     }
 }
 
-/// True if the working tree has any staged or unstaged changes.
+/// Use the same file-level status as the changes list, including untracked files.
 #[tauri::command]
 pub async fn git_has_changes(path: String) -> Result<bool, String> {
-    run_blocking(move || {
-        let out = run_git(&path, &["status", "--porcelain"])?;
-        Ok(!out.trim().is_empty())
-    })
-    .await
+    run_blocking(move || Ok(!read_git_status(&path, &[])?.is_empty())).await
 }
 
 /// Discard working-tree changes to a single file. A tracked file is reset to its
