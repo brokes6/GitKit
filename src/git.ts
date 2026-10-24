@@ -17,6 +17,9 @@ import { mapWorkingStatus } from "./workingStatus.ts";
 import type { WorkingFile, StagingStatus, WorkingStatusSnapshot } from "./workingStatus";
 import type { ProjectOverviewSummary, ProjectStatusSummary } from "./projectOverview";
 import type { ProjectActivitySummary } from "./projectActivity";
+import { branchColor } from "./branchColors.ts";
+import type { BranchColors } from "./branchColors";
+export { branchColor, createBranchColors } from "./branchColors.ts";
 
 export function loadProjectOverview(path: string): Promise<ProjectOverviewSummary> {
   return invoke<ProjectOverviewSummary>("git_project_overview", { path });
@@ -91,16 +94,8 @@ interface RFileStat {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
-// Branch / lane / author palette. Warm-biased and muted to sit inside the Claude
-// terracotta theme: cool hues (blue/teal/plum) are grayed so they read as part of
-// the same earthy family instead of clashing neon. Mid lightness → legible on both
-// the dark and the cream backgrounds. Kept in sync with LANE_COLORS in App.tsx.
-// Branch identity palette — one fixed colour per branch, SHARED by the label
-// capsule, the graph lane line, and the sidebar dot (all resolve through
-// branchColor). Chosen for high hue separation so branches are told apart at a
-// glance and a lane can be traced by colour; each hue reads the same as a 2px
-// line, a thin outline, and a dot on both dark and light backgrounds.
-// Kept in sync with LANE_COLORS in App.tsx.
+// Author avatars retain their existing palette. Branch identities use the
+// repository's generated color snapshot from branchColors.ts instead.
 const PALETTE = [
   "#5E78C7", // blue
   "#B78338", // amber
@@ -137,22 +132,14 @@ function cleanRefs(refs: string[]): string[] {
 
 const NEUTRAL = "#8A857C";
 
-/** Stable colour for a branch name — shared by the sidebar dots and the graph. */
-export function branchColor(name: string): string {
-  if (!name) return NEUTRAL;
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
-  return PALETTE[h % PALETTE.length];
-}
-
 // ── graph layout: assign lanes from parent topology (commits are topo-ordered,
 //    newest first, so every child is processed before its parents). Each drawn
 //    element is coloured by the branch it belongs to (via commit.branchLabel). ──
-export function computeGraph(commits: Commit[]): GraphRowInfo[] {
+export function computeGraph(commits: Commit[], colors?: BranchColors): GraphRowInfo[] {
   const byHash = new Map(commits.map((c) => [c.fullHash, c]));
   const indexByHash = new Map(commits.map((c, index) => [c.fullHash, index]));
   const colorOf = (hash: string | null | undefined): string =>
-    hash ? branchColor(byHash.get(hash)?.branchLabel ?? "") : NEUTRAL;
+    hash ? branchColor(byHash.get(hash)?.branchLabel ?? "", colors) : NEUTRAL;
 
   const lanes: (string | null)[] = []; // lanes[i] = commit hash that lane i currently heads toward
   const rows: GraphRowInfo[] = [];

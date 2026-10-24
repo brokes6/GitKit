@@ -27,7 +27,7 @@ import {
   loadStatus, loadWorkingStatus, stageFiles, unstageFiles, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
   attributeBranches, filterHistoryByHiddenBranches, historyBranchContext, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
   createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, undoCommitPreview, undoLastCommit, fetchAll, pull, push, forcePushTarget, forcePushPreview, forcePush, gitlabTest, gitlabTokenInfo, githubTokenInfo,
-  createPullRequest, branchColor, checkForUpdate, getAppVersion, discardFile, discardAll,
+  createPullRequest, branchColor, createBranchColors, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitlabCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
   cancelGitOp, isCancelled, syncLocal, revealInFileManager, openRepositoryRemote, openProviderTokenSettings,
@@ -42,6 +42,7 @@ import { isMrCommentableLine, mrCommentLineKey, mrLineDiscussionIndex } from "./
 import type { DiffSyntaxToken, DiffSyntaxPalette } from "./diffSyntax";
 import { workingFileKey, workingFileCount, sameWorking, mergeWorkingPaths, shouldRefreshWorkingFile } from "./workingStatus";
 import type { WorkingFile } from "./workingStatus";
+import type { BranchColors } from "./branchColors";
 import { ProjectOverview, WorkbenchActionBar } from "./Workbench";
 import { ToolbarText } from "./ToolbarText";
 import { useToolbarLayoutMotion } from "./useToolbarLayoutMotion";
@@ -398,6 +399,7 @@ const PALETTES: Record<PaletteId, Palette> = {
 
 const ThemeCtx = createContext<ThemeColors>(DARK);
 const useTheme = () => useContext(ThemeCtx);
+const BranchColorsCtx = createContext<BranchColors | undefined>(undefined);
 type ThemeMode = "dark" | "light" | "system";
 
 // ─── constants ────────────────────────────────────────────────────────────────
@@ -414,7 +416,7 @@ const LANE_RIGHT = 12;      // gap between the last lane and the message column
 const GRAPH_W_MIN = 44;     // sparse views: message column hugs the few lanes (little indent)
 const GRAPH_W_MAX = 100;    // busy views: cap here — lanes compress instead of pushing text right
 const laneXAt = (lane: number, step: number) => GRAPH_LEFT + lane * step;
-// Fallback lane colours — mirror git.ts PALETTE (keep in sync).
+// Legacy graph rows without branch metadata retain their fallback lane colors.
 const LANE_COLORS = ["#5E78C7", "#B78338", "#4F8A6B", "#B95D58", "#7D70AE", "#4E8989", "#B66C4C", "#A56380"];
 const R = 10; // unified border-radius base
 const getLC = (lane: number) => LANE_COLORS[lane % LANE_COLORS.length];
@@ -1416,6 +1418,7 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
   selectedStashIndex?: number | null;
 }) {
   const t = useTheme();
+  const colors = useContext(BranchColorsCtx);
   const [branchesOpen, setBranchesOpen] = useState(true);
   const [stashesOpen,  setStashesOpen]  = useState(true);
   const [remotesOpen,  setRemotesOpen]  = useState(false);
@@ -1459,7 +1462,7 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
         onMouseEnter={(e) => { onHoverBranch(b.name); if (!active) e.currentTarget.style.background = b.current ? currentBgHover : t.rowHover; }}
         onMouseLeave={(e) => { onHoverBranch(null); if (!active) e.currentTarget.style.background = baseBg; }}>
         <GitBranch size={12} className="flex-shrink-0" aria-hidden="true"
-          style={{ color: active ? t.accent : b.current ? b.color : t.textMuted }} />
+          style={{ color: b.color }} />
         <span className="text-xs flex-1 truncate"
           style={{ color: active ? t.accentFg : b.current ? t.text : t.textSec, fontWeight: b.current ? 600 : 400 }}>
           {leaf ?? b.name}
@@ -1507,7 +1510,7 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
         title={hasLocal ? tf("双击切换到本地分支 {0}", leaf) : tf("双击将 {0}/{1} 同步到本地并检出", remoteName, leaf)}
         onMouseEnter={(e) => { e.currentTarget.style.background = t.rowHover; }}
         onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
-        <GitBranch size={12} className="flex-shrink-0" style={{ color: isCurrent ? t.accent : t.textFaint }} />
+        <GitBranch size={12} className="flex-shrink-0" style={{ color: branchColor(`${remoteName}/${leaf}`, colors) }} />
         <span className="text-xs truncate flex-1" style={{ color: isCurrent ? t.accentFg : t.textSec }}>{label}</span>
         {hasLocal
           ? <Laptop size={10} className="flex-shrink-0" style={{ color: t.textFaint }} />
@@ -1809,6 +1812,7 @@ function RefPill({ b, onDblClick }: {
   b: { kind: string; name: string; colorName?: string }; onDblClick?: (name: string) => void;
 }) {
   const t = useTheme();
+  const colors = useContext(BranchColorsCtx);
   const ref = useRef<HTMLSpanElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
   useEffect(() => {
@@ -1824,7 +1828,7 @@ function RefPill({ b, onDblClick }: {
       document.removeEventListener("scroll", dismiss, true);
     };
   }, [pos]);
-  const c = b.kind === "tag" ? t.amber : branchColor(b.colorName ?? b.name);
+  const c = b.kind === "tag" ? t.amber : branchColor(b.colorName ?? b.name, colors);
   const hasLocal = b.kind === "local" || b.kind === "both";
   const hasRemote = b.kind === "remote" || b.kind === "both";
   const tip = b.kind === "both" ? tx("本地 + 远端(已同步)") : b.kind === "local" ? tx("仅本地(未推送)")
@@ -1873,6 +1877,7 @@ function CommitRow({ commit, branchContext, graphInfo, selected, highlight = fal
   onContextMenu?: (e: React.MouseEvent) => void;
 }) {
   const t = useTheme();
+  const colors = useContext(BranchColorsCtx);
   const laneColor = graphInfo.colors?.dot ?? getLC(graphInfo.dotLane);
   const isMerge = commit.parents.length > 1;
   const equivalents = orderedEquivalentCommits(commit);
@@ -1968,7 +1973,7 @@ function CommitRow({ commit, branchContext, graphInfo, selected, highlight = fal
                       className="flex items-center gap-1 min-w-0 px-1.5 py-0.5 cursor-pointer"
                       style={{ color: t.textSec, background: t.inputBg, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 4 }}>
                       <GitBranch size={10} aria-hidden="true" className="flex-shrink-0"
-                        style={{ color: branchColor(commitBranchName(occurrence)) }} />
+                        style={{ color: branchColor(commitBranchName(occurrence), colors) }} />
                       <span className="text-[11px] truncate">{commitBranchName(occurrence)}</span>
                       <span className="text-[10px] font-mono flex-shrink-0" style={{ color: t.textFaint }}>{occurrence.hash}</span>
                     </button>
@@ -1993,7 +1998,7 @@ function CommitRow({ commit, branchContext, graphInfo, selected, highlight = fal
                           {index === 0 ? tx("来源") : tx("Cherry-pick")}
                         </span>
                         <GitBranch size={10} aria-hidden="true" className="flex-shrink-0"
-                          style={{ color: branchColor(commitBranchName(occurrence)) }} />
+                          style={{ color: branchColor(commitBranchName(occurrence), colors) }} />
                         <span className="text-[11px] truncate" style={{ color: t.textSec }}>{commitBranchName(occurrence)}</span>
                         <span className="text-[10px] font-mono flex-shrink-0" style={{ color: t.textFaint }}>{occurrence.hash}</span>
                         <span className="text-[10px] ml-auto flex-shrink-0" style={{ color: t.textFaint }}>
@@ -6459,7 +6464,7 @@ function UpdatesDialog({ rows, busy, onPull, onClose }: {
   );
 }
 
-type RealData = { path: string; initialized: boolean; hasHead: boolean; currentBranch: string; branches: Branch[]; remotes: Remote[]; commits: Commit[]; graph: GraphRowInfo[]; working: WorkingFile[]; stashes: Stash[] };
+type RealData = { path: string; initialized: boolean; hasHead: boolean; currentBranch: string; branches: Branch[]; branchColors: BranchColors; remotes: Remote[]; commits: Commit[]; graph: GraphRowInfo[]; working: WorkingFile[]; stashes: Stash[] };
 
 // ─── ContextMenu ────────────────────────────────────────────────────────────────
 // A single right-click menu, positioned at the cursor and clamped to the viewport.
@@ -6927,6 +6932,7 @@ export default function App() {
   const errored = !!loadError && loadError.path === activeProject?.path;
   const historyRefreshing = dataReady && historyReadPath === activeProject?.path && !errored;
   const branches   = view?.branches ?? [];
+  const branchColors = view?.branchColors;
   const remotes    = view?.remotes ?? [];
   const commits    = view?.commits ?? [];
   const graphRows  = view?.graph ?? [];
@@ -7070,10 +7076,10 @@ export default function App() {
   const displayGraph = useMemo(() => {
     if (!smartMergeActive && (!isReal || (!focusActive && timelineHiddenBranches.length === 0))) return graphRows;
     const set = new Set(displayCommits.map((c) => c.fullHash));
-    return computeGraph(displayCommits.map((c) => ({ ...c, parents: c.parents.filter((p) => set.has(p)) })));
-  }, [smartMergeActive, isReal, focusActive, timelineHiddenBranches.length, graphRows, displayCommits]);
-  const topologyGraph = useMemo(() => historyMode === "topology" ? computeGraph(scopedCommits) : [],
-    [historyMode, scopedCommits]);
+    return computeGraph(displayCommits.map((c) => ({ ...c, parents: c.parents.filter((p) => set.has(p)) })), branchColors);
+  }, [smartMergeActive, isReal, focusActive, timelineHiddenBranches.length, graphRows, displayCommits, branchColors]);
+  const topologyGraph = useMemo(() => historyMode === "topology" ? computeGraph(scopedCommits, branchColors) : [],
+    [historyMode, scopedCommits, branchColors]);
   const inspectedTopologyIndex = !viewChanges ? scopedCommits.findIndex(commit => selectedStash
     ? commit.isStash && commit.stashIndex === selectedStash.index
     : commit.fullHash === selectedCommit?.fullHash) : -1;
@@ -7665,7 +7671,7 @@ export default function App() {
         if (cancelled) return;
         if (!info.initialized) {
           const data: RealData = { path, initialized: false, hasHead: false, currentBranch: "",
-            branches: [], remotes: [], commits: [], graph: [], working: [], stashes: [] };
+            branches: [], branchColors: createBranchColors([]), remotes: [], commits: [], graph: [], working: [], stashes: [] };
           cacheRealData(realCache.current, path, data);
           applyWorkingStatusRef.current(path, []);
           setRealData(data);
@@ -7683,12 +7689,15 @@ export default function App() {
         ]);
         if (cancelled) return;
         attributeBranches(commitList, historyBranches);
-        const branchList = historyBranches.filter((b) => !b.isRemote);
-        const graph = computeGraph(commitList);
+        const colors = createBranchColors(historyBranches, realData?.path === path ? realData.branchColors : undefined,
+          historyBranches.filter(branch => !branch.isRemote && !hiddenBranchesRef.current.includes(branch.name)).map(branch => branch.name));
+        const branchList = historyBranches.filter((b) => !b.isRemote)
+          .map(branch => ({ ...branch, color: branchColor(branch.name, colors) }));
+        const graph = computeGraph(commitList, colors);
         // A watcher event may have produced a newer status while history loaded.
         const latestWorking = workingCache.current.get(path) ?? working;
         const data: RealData = { path, initialized: true, hasHead: info.has_head, currentBranch: info.current_branch,
-          branches: branchList, remotes: remoteList, commits: commitList, graph, working: latestWorking, stashes: stashList_ };
+          branches: branchList, branchColors: colors, remotes: remoteList, commits: commitList, graph, working: latestWorking, stashes: stashList_ };
         cacheRealData(realCache.current, path, data);
         if (cancelled) return;
         const apply = () => {
@@ -8390,9 +8399,10 @@ export default function App() {
       if (committedBranch) {
         setRealData((prev) => {
           if (!prev || prev.path !== repoPath) return prev;
+          const color = branchColor(committedBranch.name, prev.branchColors);
           const branches = prev.branches.map((branch) => branch.name === committedBranch.name
-            ? { ...branch, ...committedBranch } : branch.current ? { ...branch, current: false } : branch);
-          if (!branches.some((branch) => branch.name === committedBranch.name)) branches.push(committedBranch);
+            ? { ...branch, ...committedBranch, color } : branch.current ? { ...branch, current: false } : branch);
+          if (!branches.some((branch) => branch.name === committedBranch.name)) branches.push({ ...committedBranch, color });
           return { ...prev, hasHead: true, currentBranch: committedBranch.name, branches };
         });
         if (activePathRef.current === repoPath) setCurrentBranch(committedBranch.name);
@@ -9042,6 +9052,7 @@ export default function App() {
 
   return (
     <ThemeCtx.Provider value={theme}>
+    <BranchColorsCtx.Provider value={branchColors}>
       {/* Fills the native macOS window */}
       <div className="flex flex-col w-full h-[100dvh] overflow-hidden"
         style={{ background: theme.bg, isolation: "isolate", colorScheme: effectiveDark ? "dark" : "light",
@@ -9450,9 +9461,9 @@ export default function App() {
                     style={{ borderTop: `0.5px solid ${theme.border}` }}
                     onMouseEnter={(e) => (e.currentTarget.style.background = theme.rowHover)}
                     onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                    <GitBranch size={12} className="flex-shrink-0" style={{ color: branchColor(focusInfo.base) }} />
+                    <GitBranch size={12} className="flex-shrink-0" style={{ color: branchColor(focusInfo.base, branchColors) }} />
                     <span className="text-[12px] flex-1 truncate" style={{ color: theme.textMuted }}>
-                      {tx("从")} <span className="font-medium" style={{ color: branchColor(focusInfo.base) }}>{focusInfo.base}</span> {tx("创建 · 点击查看该分支")}
+                      {tx("从")} <span className="font-medium" style={{ color: `color-mix(in srgb, ${branchColor(focusInfo.base, branchColors)} 65%, ${theme.text})` }}>{focusInfo.base}</span> {tx("创建 · 点击查看该分支")}
                     </span>
                     <ChevronRight size={13} className="flex-shrink-0" style={{ color: theme.textFaint }} />
                   </button>
@@ -9821,6 +9832,7 @@ export default function App() {
         {ctxMenu && (
           <ContextMenu x={ctxMenu.x} y={ctxMenu.y} items={ctxMenu.items} onClose={() => setCtxMenu(null)} />
         )}
+    </BranchColorsCtx.Provider>
     </ThemeCtx.Provider>
   );
 }

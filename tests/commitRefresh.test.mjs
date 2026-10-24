@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import ts from "typescript";
+import { branchColor } from "../src/branchColors.ts";
 
 const app = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"),
   ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -23,7 +24,7 @@ function harness(commit = async () => branch, data = {}) {
   const state = { view: { path: "/repo", hasHead: true, branches: [{ ...branch, head: "old-head", ahead: 0 }], ...data },
     reloads: [], successes: [], statusReads: [] };
   const context = {
-    identities: [{}], activeProject: { path: "/repo" }, activePathRef: { current: "/repo" },
+    identities: [{}], activeProject: { path: "/repo" }, activePathRef: { current: "/repo" }, branchColor,
     currentBranch: "main", gitBusy: null, busyLabel: null,
     workingOperationRef: { current: false }, workingMutationEpoch: { current: new Map() },
     realCache: { current: new Map([["/repo", state.view]]) },
@@ -61,6 +62,14 @@ test("commit uses the returned ahead and behind counts instead of incrementing s
   await run();
   assert.equal(state.view.branches[0].ahead, 4);
   assert.equal(state.view.branches[0].behind, 2);
+});
+
+test("commit preserves the repository's assigned branch color while updating the push count", async () => {
+  const colors = new Map([["main", "#7d70ae"]]);
+  const { state, run } = harness(async () => branch, { branchColors: colors });
+  await run();
+  assert.equal(state.view.branches[0].color, colors.get("main"));
+  assert.equal(state.view.branchColors, colors);
 });
 
 test("the first commit immediately creates its local branch state", async () => {

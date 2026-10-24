@@ -4,6 +4,8 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import React from "react";
 import ts from "typescript";
+import { branchColor, createBranchColors } from "../src/branchColors.ts";
+import { attributeBranches, computeGraph } from "../src/git.ts";
 
 const app = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"),
   ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -34,6 +36,7 @@ function harness(history = async () => [], info = { initialized: true, has_head:
   const state = { loadingPath: null, error: null, data: { path: "/repo", commits: [selection] }, selection, opens: 0 };
   const context = {
     React, useTheme: () => ({}), tx: value => value, Skeleton: () => null,
+    branchColor, createBranchColors, realData: state.data, hiddenBranchesRef: { current: [] },
     path: "/repo", lastLoadedPath: { current: "/repo" },
     pendingViewReset: { current: false }, pendingJumpLatest: { current: false },
     commitDiffRequestRef: { current: 0 }, activePathRef: { current: "/repo" },
@@ -42,7 +45,7 @@ function harness(history = async () => [], info = { initialized: true, has_head:
     openRepo: async () => { state.opens++; return info; },
     loadHistory: history, loadBranches: async () => [], loadRemotes: async () => [], stashList: async () => [],
     requestWorkingStatusRef: { current: async () => [] }, applyWorkingStatusRef: { current() {} },
-    attributeBranches() {}, computeGraph: () => [], startSwitch: apply => apply(),
+    attributeBranches, computeGraph, startSwitch: apply => apply(),
     setHistoryReadPath: value => { state.loadingPath = value; },
     setLoadError: value => { state.error = value; }, setRealData: value => { state.data = value; },
     setSelectedCommit: value => { state.selection = value; },
@@ -66,6 +69,19 @@ test("a same-repository refresh loads until history is ready and preserves the s
   assert.equal(state.loadingPath, null);
   assert.equal(state.data.path, "/repo");
   assert.equal(state.selection, selection);
+});
+
+test("repository loading publishes one shared palette for its branch list and graph", async () => {
+  const branches = [{ name: "master", head: "master-tip", current: true },
+    { name: "test", head: "test-tip" }, { name: "feature/rpc-proxy-fallback", head: "feature-tip" }];
+  const commits = branches.map(branch => ({ fullHash: branch.head, parents: [] }));
+  const { state, context, start } = harness(async () => commits);
+  context.loadBranches = async () => branches;
+  start(); await flush();
+  const colors = state.data.branchColors;
+  assert.equal(new Set(state.data.branches.map(branch => branch.color)).size, 3);
+  state.data.branches.forEach(branch => assert.equal(branch.color, colors.get(branch.name)));
+  commits.forEach((commit, index) => assert.equal(state.data.graph[index].colors.dot, colors.get(commit.branchLabel)));
 });
 
 test("a failed history refresh ends loading and exposes the error", async () => {
