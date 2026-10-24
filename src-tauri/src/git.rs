@@ -1634,12 +1634,51 @@ pub async fn git_cherry_pick(
     .await
 }
 
+#[derive(Debug, Serialize)]
+pub struct CommittedBranch {
+    pub name: String,
+    pub head_hash: String,
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+/// Read only the current branch after a commit, without loading other branches,
+/// history, worktrees or working files.
+fn committed_branch(path: &str) -> Result<CommittedBranch, String> {
+    let reference = run_git(path, &["symbolic-ref", "--quiet", "HEAD"])?;
+    let reference = reference.trim();
+    let format = "--format=%(refname)%1f%(refname:short)%1f%(objectname)%1f%(upstream)%1f%(upstream:short)";
+    let refs = run_git(path, &["for-each-ref", format, reference])?;
+    let fields = refs.lines().find_map(|line| {
+        let fields: Vec<_> = line.split('\x1f').collect();
+        (fields.len() == 5 && fields[0] == reference).then_some(fields)
+    }).ok_or("无法读取分支信息")?;
+    let (ahead, behind) = if fields[3].is_empty() {
+        (0, 0)
+    } else {
+        let comparison = format!("{}...{}", fields[2], fields[3]);
+        let output = run_git(path, &["rev-list", "--left-right", "--count", &comparison, "--"])?;
+        let counts = output.split_whitespace().map(str::parse::<u32>)
+            .collect::<Result<Vec<_>, _>>().map_err(|_| "无法读取分支提交数量")?;
+        if counts.len() != 2 { return Err("无法读取分支提交数量".into()); }
+        (counts[0], counts[1])
+    };
+    Ok(CommittedBranch {
+        name: fields[1].to_string(),
+        head_hash: fields[2].to_string(),
+        upstream: if fields[4].is_empty() { None } else { Some(fields[4].to_string()) },
+        ahead,
+        behind,
+    })
+}
+
 /// Commit the reviewed index as-is. Identity overrides remain per-command and
 /// never modify repository or global configuration.
 fn commit_index_inner(
     path: &str, message: &str, expected_revision: &str,
     name: Option<&str>, email: Option<&str>,
-) -> Result<(), String> {
+) -> Result<Option<CommittedBranch>, String> {
     if local_merge::active_operation_kind(path)?.is_some() {
         return Err("请先完成当前 Git 操作；合并请使用继续合并".into());
     }
@@ -1665,14 +1704,16 @@ fn commit_index_inner(
     }
     args.extend(["commit", "-m", message.trim()]);
     run_git(path, &args)?;
-    Ok(())
+    // Once Git committed, a failed status read must not report a failed commit
+    // and invite a duplicate retry. The normal repository refresh is a fallback.
+    Ok(committed_branch(path).ok())
 }
 
 #[tauri::command]
 pub async fn git_commit(
     path: String, message: String, expected_revision: String,
     name: Option<String>, email: Option<String>,
-) -> Result<(), String> {
+) -> Result<Option<CommittedBranch>, String> {
     run_blocking(move || with_staging_lock(&path, || {
         commit_index_inner(&path, &message, &expected_revision, name.as_deref(), email.as_deref())
     })).await

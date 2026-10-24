@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { loadStatus, loadWorkingStatus, stageFiles, unstageFiles, workingFileDiff, commit } from "../src/git.ts";
+import { loadStatus, loadWorkingStatus, stageFiles, unstageFiles, workingFileDiff, commit, branchColor } from "../src/git.ts";
 
 const previousWindow = globalThis.window;
 test.after(() => { if (previousWindow === undefined) delete globalThis.window; else globalThis.window = previousWindow; });
@@ -50,8 +50,20 @@ test("commit sends only the reviewed revision and chosen identity without stagin
   mock(async (command, args) => {
     assert.equal(command, "git_commit");
     assert.deepEqual(args, { path: "/repo", message: "snapshot", expectedRevision: "reviewed-index", name: "Author", email: "author@example.invalid" });
+    return { name: "main", head_hash: "new-head", upstream: "origin/main", ahead: 3, behind: 2 };
   });
-  await commit("/repo", "snapshot", "reviewed-index", "Author", "author@example.invalid");
+  assert.deepEqual(await commit("/repo", "snapshot", "reviewed-index", "Author", "author@example.invalid"), {
+    name: "main", head: "new-head", remote: "origin/main", ahead: 3, behind: 2, current: true, color: branchColor("main"),
+  });
+});
+
+test("commit preserves branches without an upstream and unavailable snapshots", async () => {
+  mock(async () => ({ name: "main", head_hash: "initial-head", upstream: null, ahead: 0, behind: 0 }));
+  const branch = await commit("/repo", "initial", "reviewed-index");
+  assert.equal(branch.remote, undefined);
+  assert.equal(branch.ahead, 0);
+  mock(async () => null);
+  assert.equal(await commit("/repo", "committed without snapshot", "reviewed-index"), null);
 });
 
 test("a rejected commit stays rejected so the composer retains its draft", async () => {

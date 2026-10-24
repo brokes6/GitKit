@@ -787,8 +787,13 @@ export async function checkoutSync(path: string, branch: string, hash: string): 
 export async function commit(
   path: string, message: string, expectedRevision: string,
   name?: string, email?: string,
-): Promise<void> {
-  await invoke("git_commit", { path, message, expectedRevision, name: name ?? null, email: email ?? null });
+): Promise<Branch | null> {
+  const branch = await invoke<Pick<RBranch, "name" | "head_hash" | "upstream" | "ahead" | "behind"> | null>(
+    "git_commit", { path, message, expectedRevision, name: name ?? null, email: email ?? null });
+  return branch ? {
+    name: branch.name, head: branch.head_hash, remote: branch.upstream ?? undefined,
+    ahead: branch.ahead, behind: branch.behind, current: true, color: branchColor(branch.name),
+  } : null;
 }
 
 export interface UndoCommitPreview {

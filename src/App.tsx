@@ -3283,6 +3283,38 @@ function WorkingFileDiff({ file, repoPath }: { file: WorkingFile; repoPath: stri
 
 // ─── App ──────────────────────────────────────────────────────────────────────
 
+function CommitHistorySkeleton() {
+  const t = useTheme();
+  return <div className="gk-timeline-skeleton py-1" role="status" aria-label={tx("正在更新提交历史")} aria-busy="true">
+    {Array.from({ length: 7 }).map((_, i) => (
+      <div key={i} className="flex items-start gap-3 px-4"
+        style={{ height: 74, borderBottom: `0.5px solid ${t.border}` }}>
+        <Skeleton circle width={12} height={12} color={t.rowHover} className="mt-3.5"
+          style={{ animationDelay: `${i * 90}ms` }} />
+        <div className="flex-1 flex flex-col gap-2 py-3.5 min-w-0">
+          <Skeleton height={12} width={`${68 - i * 6}%`} color={t.rowHover} style={{ animationDelay: `${i * 90}ms` }} />
+          <Skeleton height={10} width="42%" color={t.rowHover} style={{ animationDelay: `${i * 90 + 45}ms` }} />
+        </div>
+      </div>
+    ))}
+  </div>;
+}
+
+/** Keep the scroll viewport and topology camera mounted while refreshing. */
+function HistoryRefreshBoundary({ refreshing, children }: { refreshing: boolean; children: React.ReactNode }) {
+  const t = useTheme();
+  return <div className="relative flex flex-1 min-w-0 min-h-0 overflow-hidden">
+    <div className="flex flex-1 flex-col min-w-0 min-h-0" aria-hidden={refreshing || undefined}
+      ref={element => { if (element) element.inert = refreshing; }}
+      style={{ visibility: refreshing ? "hidden" : undefined }}>
+      {children}
+    </div>
+    {refreshing && <div className="absolute inset-0 overflow-hidden" style={{ background: t.bgPanel }}>
+      <CommitHistorySkeleton />
+    </div>}
+  </div>;
+}
+
 // First file worth previewing: skip binary/no-diff entries (0 add + 0 del),
 // falling back to the very first file if none look "readable".
 function firstReadableFile(files: CommitFile[]): CommitFile | null {
@@ -6618,6 +6650,7 @@ export default function App() {
   const [overviewIntent, setOverviewIntent] = useState<{ id: string; path: string; target: OverviewTarget } | null>(null);
   const overviewActionRef = useRef(0);
   const [loadError, setLoadError] = useState<{ path: string; msg: string } | null>(null);
+  const [historyReadPath, setHistoryReadPath] = useState<string | null>(null);
   const [reloadTick, setReloadTick] = useState(0);
   const [checkoutTarget, setCheckoutTarget] = useState<{ branch: string; dirty: boolean } | null>(null);
   const [cherryTarget, setCherryTarget] = useState<{ path: string; commit: Commit } | null>(null);
@@ -6892,6 +6925,7 @@ export default function App() {
   const uninitializedRef = useRef(false);
   uninitializedRef.current = dataReady && !gitAvailable;
   const errored = !!loadError && loadError.path === activeProject?.path;
+  const historyRefreshing = dataReady && historyReadPath === activeProject?.path && !errored;
   const branches   = view?.branches ?? [];
   const remotes    = view?.remotes ?? [];
   const commits    = view?.commits ?? [];
@@ -7525,6 +7559,7 @@ export default function App() {
 
   useEffect(() => {
     if (!path) {
+      setHistoryReadPath(null);
       setSelectedCommit(null); setSelectedFile(null); setSelectedWorkingFile(null);
       setSelectedStash(null); setSelectedStashFile(null);
       return;
@@ -7600,6 +7635,7 @@ export default function App() {
 
     const cached = realCache.current.get(path);
     if (cached) {
+      setHistoryReadPath(null);
       // A cache hit is a real user access, so promote it in the bounded LRU.
       cacheRealData(realCache.current, path, cached);
       const apply = () => {
@@ -7621,6 +7657,7 @@ export default function App() {
       setSelectedStash(null); setSelectedStashFile(null);
       setDetailOpen(false); setDetailClosing(false);
     }
+    setHistoryReadPath(path);
     (async () => {
       try {
         setLoadError(null);
@@ -7663,6 +7700,8 @@ export default function App() {
         if (isSwitch) startSwitch(apply); else apply();
       } catch (e) {
         if (!cancelled) setLoadError({ path, msg: String(e) });
+      } finally {
+        if (!cancelled) setHistoryReadPath(null);
       }
     })();
     return () => { cancelled = true; };
@@ -8346,7 +8385,18 @@ export default function App() {
         setReloadTick((n) => n + 1);
         throw new Error(tx("当前分支已变化，请检查刷新后的改动再提交"));
       }
-      await gitCommit(repoPath, message, revision, identity?.name, identity?.email);
+      const committedBranch = await gitCommit(repoPath, message, revision, identity?.name, identity?.email);
+      // Publish the authoritative push count before history/graph refresh finishes.
+      if (committedBranch) {
+        setRealData((prev) => {
+          if (!prev || prev.path !== repoPath) return prev;
+          const branches = prev.branches.map((branch) => branch.name === committedBranch.name
+            ? { ...branch, ...committedBranch } : branch.current ? { ...branch, current: false } : branch);
+          if (!branches.some((branch) => branch.name === committedBranch.name)) branches.push(committedBranch);
+          return { ...prev, hasHead: true, currentBranch: committedBranch.name, branches };
+        });
+        if (activePathRef.current === repoPath) setCurrentBranch(committedBranch.name);
+      }
       realCache.current.delete(repoPath);
       setReloadTick((n) => n + 1);
       toast.success(tf("已提交 {0} 个文件", workingFileCount(files)));
@@ -9277,9 +9327,10 @@ export default function App() {
                 </div>
               )}
               <BranchFocusBanner branch={focusActive ? focusBranch : null} onClear={() => setFocus(null)} />
+              <HistoryRefreshBoundary refreshing={historyRefreshing}>
               <div ref={timelineScrollRef} className={`gk-history-content flex-1 min-h-0 ${historyMode === "topology" ? "flex flex-col overflow-hidden" : "overflow-y-auto"}`}
                 data-history-phase={historyContentPhase} onTransitionEnd={finishHistoryContentTransition}
-                aria-busy={!dataReady || switching || branchViewLoading || historyModeChanging}
+                aria-busy={!dataReady || switching || branchViewLoading || historyModeChanging || historyRefreshing}
                 style={{ overscrollBehaviorY: "none", width: historyViewportWidth ?? undefined }}>
                 {errored ? (
                   <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center" style={{ color: theme.red }}>
@@ -9287,19 +9338,7 @@ export default function App() {
                     <span className="text-[11px]" style={{ color: theme.textMuted }}>{loadError && translateNativeMessage(loadError.msg)}</span>
                   </div>
                 ) : (!dataReady || switching || branchViewLoading) ? (
-                  <div className="gk-timeline-skeleton py-1" role="status" aria-label={tx("正在更新提交历史")}>
-                    {Array.from({ length: 7 }).map((_, i) => (
-                      <div key={i} className="flex items-start gap-3 px-4"
-                        style={{ height: 74, borderBottom: `0.5px solid ${theme.border}` }}>
-                        <Skeleton circle width={12} height={12} color={theme.rowHover} className="mt-3.5"
-                          style={{ animationDelay: `${i * 90}ms` }} />
-                        <div className="flex-1 flex flex-col gap-2 py-3.5 min-w-0">
-                          <Skeleton height={12} width={`${68 - i * 6}%`} color={theme.rowHover} style={{ animationDelay: `${i * 90}ms` }} />
-                          <Skeleton height={10} width="42%" color={theme.rowHover} style={{ animationDelay: `${i * 90 + 45}ms` }} />
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  <CommitHistorySkeleton />
                 ) : !gitAvailable ? (
                   <div className="flex flex-col items-center justify-center gap-2 px-6 py-16 text-center">
                     <FolderOpen size={24} aria-hidden="true" style={{ color: theme.textMuted }} />
@@ -9324,7 +9363,7 @@ export default function App() {
                   <CommitTopology key={`${activeProject?.path}:${focusBranch}:${timelineHiddenBranches.join("\u0000")}`}
                     commits={scopedCommits} graph={topologyGraph} theme={theme} hoverBranch={hoverBranch}
                     detailPanelRef={detailPanelRef} detailFullWidth={topologyDetailFullWidth || !!fileTrace}
-                    pulseActive={appForeground && mr.selectedId === null && !settingsOpen && !diffExpanded && !fileTrace && !topologyCovered && !historyModeChanging}
+                    pulseActive={appForeground && mr.selectedId === null && !settingsOpen && !diffExpanded && !fileTrace && !topologyCovered && !historyModeChanging && !historyRefreshing}
                     selectedHash={detailOpen && !viewChanges ? inspectedTopologyCommit?.fullHash ?? null : null}
                     onSelect={commit => {
                       if (commit.isStash) openStash({ index: commit.stashIndex ?? 0, message: commit.message,
@@ -9419,6 +9458,7 @@ export default function App() {
                   </button>
                 )}
               </div>
+              </HistoryRefreshBoundary>
             </div>
 
             {/* Keep timeline context when space allows; on narrower content

@@ -191,6 +191,69 @@ fn externally_staged_partial_contents_are_committed_without_restaging() {
 }
 
 #[test]
+fn commits_return_current_upstream_counts_without_waiting_for_history() {
+    let repo = StagingRepo::new(true);
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    repo.git(&["remote", "add", "origin", "https://example.invalid/repo.git"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", base.trim()]);
+    repo.git(&["branch", "--set-upstream-to=origin/main", "main"]);
+    for ahead in 1..=2 {
+        repo.write("file.txt", &format!("change {ahead}\n"));
+        let staged = repo.stage(&["file.txt"]);
+        let branch = commit_index_inner(repo.path(), "local change", &staged.revision, None, None)
+            .unwrap().unwrap();
+        assert_eq!(branch.name, "main");
+        assert_eq!(branch.head_hash, repo.git(&["rev-parse", "HEAD"]).trim());
+        assert_eq!(branch.upstream.as_deref(), Some("origin/main"));
+        assert_eq!((branch.ahead, branch.behind), (ahead, 0));
+    }
+    assert_eq!(repo.git(&["rev-parse", "refs/remotes/origin/main"]), base);
+}
+
+#[test]
+fn commit_counts_preserve_upstream_divergence() {
+    let repo = StagingRepo::new(true);
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    let tree = repo.git(&["rev-parse", "HEAD^{tree}"]);
+    let remote = repo.git(&["commit-tree", tree.trim(), "-p", base.trim(), "-m", "upstream change"]);
+    repo.git(&["remote", "add", "origin", "https://example.invalid/repo.git"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", remote.trim()]);
+    repo.git(&["branch", "--set-upstream-to=origin/main", "main"]);
+    repo.write("local.txt", "local change\n");
+    let staged = repo.stage(&["local.txt"]);
+    let branch = commit_index_inner(repo.path(), "local change", &staged.revision, None, None)
+        .unwrap().unwrap();
+    assert_eq!((branch.ahead, branch.behind), (1, 1));
+}
+
+#[test]
+fn unavailable_upstream_snapshot_does_not_reject_a_successful_commit() {
+    let repo = StagingRepo::new(true);
+    let base = repo.git(&["rev-parse", "HEAD"]);
+    repo.git(&["remote", "add", "origin", "https://example.invalid/repo.git"]);
+    repo.git(&["update-ref", "refs/remotes/origin/main", base.trim()]);
+    repo.git(&["branch", "--set-upstream-to=origin/main", "main"]);
+    repo.git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+    repo.write("local.txt", "committed\n");
+    let staged = repo.stage(&["local.txt"]);
+    assert!(commit_index_inner(repo.path(), "keep success", &staged.revision, None, None)
+        .unwrap().is_none());
+    assert_eq!(repo.git(&["show", "HEAD:local.txt"]), "committed\n");
+    assert_eq!(repo.git(&["log", "-1", "--format=%s"]).trim(), "keep success");
+}
+
+#[test]
+fn detached_head_commit_still_succeeds_without_a_branch_snapshot() {
+    let repo = StagingRepo::new(true);
+    repo.git(&["checkout", "--detach", "HEAD"]);
+    repo.write("local.txt", "detached change\n");
+    let staged = repo.stage(&["local.txt"]);
+    assert!(commit_index_inner(repo.path(), "detached change", &staged.revision, None, None)
+        .unwrap().is_none());
+    assert_eq!(repo.git(&["show", "HEAD:local.txt"]), "detached change\n");
+}
+
+#[test]
 fn actual_unstage_preserves_working_contents_and_excludes_file_from_commit() {
     let repo = StagingRepo::new(true);
     repo.write("a.txt", "a\n");
@@ -233,7 +296,12 @@ fn unborn_staging_unstaging_and_initial_commit_preserve_new_files() {
     );
     assert!(repo.git(&["ls-files"]).is_empty());
     assert_ne!(staged.revision, unstaged.revision);
-    repo.commit(&repo.stage(&["initial.txt"]).revision);
+    let staged = repo.stage(&["initial.txt"]);
+    let branch = commit_index_inner(repo.path(), "initial", &staged.revision, None, None).unwrap().unwrap();
+    assert_eq!(branch.name, "main");
+    assert_eq!(branch.head_hash, repo.git(&["rev-parse", "HEAD"]).trim());
+    assert!(branch.upstream.is_none());
+    assert_eq!((branch.ahead, branch.behind), (0, 0));
     assert_eq!(repo.git(&["show", "HEAD:initial.txt"]), "working\n");
 }
 
