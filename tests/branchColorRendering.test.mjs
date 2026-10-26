@@ -17,15 +17,28 @@ const descendants = node => React.isValidElement(node)
 
 function harness() {
   const palette = new Map([["master", "#aa6611"], ["origin/master", "#aa6611"], ["test", "#1188aa"]]);
+  let pos = null, refreshing = false;
+  const effects = [];
+  let cleanups = [];
   const context = {
-    React, R: 10, BranchColorsCtx: {}, useTheme: () => ({ amber: "#b78338" }),
-    useContext: () => palette, useEffect() {}, useRef: () => ({ current: null }),
-    useState: value => [value, () => {}], tx: value => value, tf: value => value,
+    React, R: 10, BranchColorsCtx: {}, HistoryRefreshCtx: {}, useTheme: () => ({ amber: "#b78338" }),
+    useContext: ctx => ctx === context.BranchColorsCtx ? palette : refreshing,
+    useEffect: effect => effects.push(effect),
+    useRef: () => ({ current: { getBoundingClientRect: () => ({ left: 80, top: 120 }) } }),
+    useState: () => [pos, value => { pos = value; }], tx: value => value, tf: value => value,
     Laptop: () => null, Cloud: () => null,
+    window: { addEventListener() {}, removeEventListener() {} },
+    document: { body: {}, addEventListener() {}, removeEventListener() {} },
+    createPortal: children => React.createElement("portal", null, children),
     branchColor: (name, colors) => { assert.equal(colors, palette); return colors.get(name); },
   };
   runInNewContext(source, context);
-  return { context, palette, render: b => descendants(context.RefPill({ b })) };
+  return { context, palette, setRefreshing: value => { refreshing = value; }, render(b) {
+    const tree = context.RefPill({ b });
+    cleanups.forEach(cleanup => cleanup?.());
+    cleanups = effects.splice(0).map(effect => effect());
+    return descendants(tree);
+  } };
 }
 
 test("local and remote ref icons use the active repository's shared color snapshot", () => {
@@ -44,4 +57,26 @@ test("tags retain the existing tag color rather than receiving a branch color", 
   const { render } = harness();
   const nodes = render({ kind: "tag", name: "v1.0" });
   assert.ok(nodes.some(node => node.type === "span" && node.props.style?.color === "#b78338"));
+});
+
+test("collapsed ref labels inherit visibility from a hidden history or detail layer", () => {
+  const { render } = harness();
+  const nodes = render({ kind: "both", name: "master" });
+  const label = nodes.find(node => node.props.className?.includes("w-full"));
+  assert.notEqual(label.props.style.visibility, "visible");
+});
+
+test("refreshing immediately removes an open hover portal and prevents it from reappearing", () => {
+  const { render, setRefreshing } = harness();
+  const branch = { kind: "both", name: "master" };
+  render(branch)[0].props.onMouseEnter();
+  assert.ok(render(branch).some(node => node.type === "portal"));
+  setRefreshing(true);
+  const refreshing = render(branch);
+  assert.ok(!refreshing.some(node => node.type === "portal"));
+  refreshing[0].props.onMouseEnter();
+  setRefreshing(false);
+  assert.ok(!render(branch).some(node => node.type === "portal"));
+  render(branch)[0].props.onMouseEnter();
+  assert.ok(render(branch).some(node => node.type === "portal"));
 });

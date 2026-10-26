@@ -35,7 +35,7 @@ function harness(history = async () => [], info = { initialized: true, has_head:
   const selection = { fullHash: "selected-commit" };
   const state = { loadingPath: null, error: null, data: { path: "/repo", commits: [selection] }, selection, opens: 0 };
   const context = {
-    React, useTheme: () => ({}), tx: value => value, Skeleton: () => null,
+    React, HistoryRefreshCtx: React.createContext(false), useTheme: () => ({}), tx: value => value, Skeleton: () => null,
     branchColor, createBranchColors, realData: state.data, hiddenBranchesRef: { current: [] },
     path: "/repo", lastLoadedPath: { current: "/repo" },
     pendingViewReset: { current: false }, pendingJumpLatest: { current: false },
@@ -140,18 +140,34 @@ test("the refresh skeleton retains the mounted viewport and blocks hidden intera
   const viewport = React.createElement("div", { key: "viewport" });
   const loading = context.HistoryRefreshBoundary({ refreshing: true, children: viewport });
   const [content, overlay] = React.Children.toArray(loading.props.children);
-  assert.equal(content.props.children, viewport);
+  assert.equal(content.props.children.type, context.HistoryRefreshCtx.Provider);
+  assert.equal(content.props.children.props.value, true);
+  assert.equal(content.props.children.props.children, viewport);
   assert.equal(content.props.style.visibility, "hidden");
+  assert.equal(content.props.style.opacity, 0);
+  assert.equal(loading.props.style.isolation, "isolate");
+  assert.equal(loading.props["data-refreshing"], true);
   assert.equal(content.props["aria-hidden"], true);
   const element = {};
   content.ref(element);
   assert.equal(element.inert, true);
   assert.equal(overlay.props.children.type, context.CommitHistorySkeleton);
+  assert.equal(overlay.props.style.zIndex, 1);
+  assert.equal(overlay.props["aria-hidden"], false);
   const ready = context.HistoryRefreshBoundary({ refreshing: false, children: viewport });
-  const [visible, removedOverlay] = React.Children.toArray(ready.props.children);
-  assert.equal(visible.props.children, viewport);
+  const [visible, fadingOverlay] = React.Children.toArray(ready.props.children);
+  assert.equal(visible.props.children.props.value, false);
+  assert.equal(visible.props.children.props.children, viewport);
   visible.ref(element);
   assert.equal(element.inert, false);
   assert.equal(visible.props.style.visibility, undefined);
-  assert.equal(removedOverlay, undefined);
+  assert.equal(visible.props.style.opacity, undefined);
+  assert.equal(ready.props["data-refreshing"], false);
+  assert.equal(fadingOverlay.props["aria-hidden"], true);
+  assert.equal(fadingOverlay.props.children.type, context.CommitHistorySkeleton);
+  assert.equal(fadingOverlay.type, overlay.type);
+  const restarted = context.HistoryRefreshBoundary({ refreshing: true, children: viewport });
+  const [hiddenAgain, resumedOverlay] = React.Children.toArray(restarted.props.children);
+  assert.equal(hiddenAgain.props.style.opacity, 0);
+  assert.equal(resumedOverlay.props["aria-hidden"], false);
 });

@@ -10,10 +10,34 @@
 .gk-code-skeleton { min-width: 0; }
 .gk-code-skeleton-row { display: flex; align-items: center; gap: 12px; height: 24px; padding: 0 16px; }
 .gk-code-skeleton-row > .gk-skeleton:last-child { flex-shrink: 1; }
+.gk-history-refresh-content {
+  opacity: 1;
+  transition: opacity 160ms cubic-bezier(0.16, 1, 0.3, 1) 60ms;
+}
+.gk-history-refresh-overlay {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 140ms ease-out, visibility 0s linear 140ms;
+}
+.gk-history-refresh[data-refreshing="true"] > .gk-history-refresh-content {
+  transition: none;
+}
+.gk-history-refresh[data-refreshing="true"] > .gk-history-refresh-overlay {
+  opacity: 1;
+  visibility: inherit;
+  transition: none;
+}
+.gk-history-refresh-overlay .gk-timeline-skeleton { animation: none; }
+.gk-history-refresh-overlay .gk-skeleton { animation-play-state: paused; }
+.gk-history-refresh[data-refreshing="true"] .gk-history-refresh-overlay .gk-skeleton {
+  animation-play-state: running;
+}
 @keyframes gk-skeleton-pulse {
   0%, 100% { opacity: .9; }
   50% { opacity: .45; }
 }
 @media (prefers-reduced-motion: reduce) {
   .gk-skeleton { animation: none; }
+  .gk-history-refresh-content, .gk-history-refresh-overlay { transition: none; }
 }

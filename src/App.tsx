@@ -400,6 +400,7 @@ const PALETTES: Record<PaletteId, Palette> = {
 const ThemeCtx = createContext<ThemeColors>(DARK);
 const useTheme = () => useContext(ThemeCtx);
 const BranchColorsCtx = createContext<BranchColors | undefined>(undefined);
+const HistoryRefreshCtx = createContext(false);
 type ThemeMode = "dark" | "light" | "system";
 
 // ─── constants ────────────────────────────────────────────────────────────────
@@ -1813,9 +1814,12 @@ function RefPill({ b, onDblClick }: {
 }) {
   const t = useTheme();
   const colors = useContext(BranchColorsCtx);
+  const historyRefreshing = useContext(HistoryRefreshCtx);
   const ref = useRef<HTMLSpanElement>(null);
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const hoverPos = historyRefreshing ? null : pos;
   useEffect(() => {
+    if (historyRefreshing) { if (pos) setPos(null); return; }
     if (!pos) return;
     const dismiss = () => setPos(null);
     // Close before wheel scrolling starts, and also cover scrollbar, keyboard,
@@ -1827,7 +1831,7 @@ function RefPill({ b, onDblClick }: {
       window.removeEventListener("wheel", dismiss, true);
       document.removeEventListener("scroll", dismiss, true);
     };
-  }, [pos]);
+  }, [pos, historyRefreshing]);
   const c = b.kind === "tag" ? t.amber : branchColor(b.colorName ?? b.name, colors);
   const hasLocal = b.kind === "local" || b.kind === "both";
   const hasRemote = b.kind === "remote" || b.kind === "both";
@@ -1843,7 +1847,7 @@ function RefPill({ b, onDblClick }: {
   return (
     <span ref={ref} className="relative inline-flex min-w-0 cursor-pointer" style={{ maxWidth: 176 }}
       title={tf("{0} - {1}\n双击检出并同步", b.name, tip)}
-      onMouseEnter={() => { const r = ref.current?.getBoundingClientRect(); if (r) setPos({ left: r.left, top: r.top }); }}
+      onMouseEnter={() => { if (historyRefreshing) return; const r = ref.current?.getBoundingClientRect(); if (r) setPos({ left: r.left, top: r.top }); }}
       onMouseLeave={() => setPos(null)}
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => { e.stopPropagation(); onDblClick?.(b.name); }}>
@@ -1851,12 +1855,12 @@ function RefPill({ b, onDblClick }: {
       <span className={`${cls} w-full min-w-0`}
         style={{ background: t.inputBg, color: b.kind === "tag" ? t.amber : t.textSec,
           border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 4,
-          visibility: pos ? "hidden" : "visible" }}>
+          visibility: hoverPos ? "hidden" : undefined }}>
         {icons}<span className="truncate min-w-0">{b.name}</span>
       </span>
-      {pos && createPortal(
+      {hoverPos && createPortal(
         <span className={`${cls} whitespace-nowrap`}
-          style={{ position: "fixed", left: pos.left, top: pos.top, zIndex: 100, pointerEvents: "none",
+          style={{ position: "fixed", left: hoverPos.left, top: hoverPos.top, zIndex: 100, pointerEvents: "none",
             background: t.dialogBg, color: b.kind === "tag" ? t.amber : t.text,
             border: `0.5px solid ${c}66`, borderRadius: R - 4, boxShadow: t.shadowEl }}>
           {icons}<span>{b.name}</span>
@@ -3308,15 +3312,17 @@ function CommitHistorySkeleton() {
 /** Keep the scroll viewport and topology camera mounted while refreshing. */
 function HistoryRefreshBoundary({ refreshing, children }: { refreshing: boolean; children: React.ReactNode }) {
   const t = useTheme();
-  return <div className="relative flex flex-1 min-w-0 min-h-0 overflow-hidden">
-    <div className="flex flex-1 flex-col min-w-0 min-h-0" aria-hidden={refreshing || undefined}
+  return <div className="gk-history-refresh relative flex flex-1 min-w-0 min-h-0 overflow-hidden"
+    data-refreshing={refreshing} style={{ isolation: "isolate" }}>
+    <div className="gk-history-refresh-content flex flex-1 flex-col min-w-0 min-h-0" aria-hidden={refreshing || undefined}
       ref={element => { if (element) element.inert = refreshing; }}
-      style={{ visibility: refreshing ? "hidden" : undefined }}>
-      {children}
+      style={{ visibility: refreshing ? "hidden" : undefined, opacity: refreshing ? 0 : undefined }}>
+      <HistoryRefreshCtx.Provider value={refreshing}>{children}</HistoryRefreshCtx.Provider>
     </div>
-    {refreshing && <div className="absolute inset-0 overflow-hidden" style={{ background: t.bgPanel }}>
+    <div className="gk-history-refresh-overlay absolute inset-0 overflow-hidden" aria-hidden={!refreshing}
+      style={{ background: t.bgPanel, zIndex: 1 }}>
       <CommitHistorySkeleton />
-    </div>}
+    </div>
   </div>;
 }
 
