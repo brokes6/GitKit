@@ -41,6 +41,7 @@ function harness(history = async () => [], info = { initialized: true, has_head:
     pendingViewReset: { current: false }, pendingJumpLatest: { current: false },
     commitDiffRequestRef: { current: 0 }, activePathRef: { current: "/repo" },
     realCache: { current: new Map() }, workingCache: { current: new Map() },
+    historyLimits: { current: new Map() }, HISTORY_PAGE_SIZE: 400,
     cacheRealData: (cache, path, data) => cache.set(path, data),
     openRepo: async () => { state.opens++; return info; },
     loadHistory: history, loadBranches: async () => [], loadRemotes: async () => [], stashList: async () => [],
@@ -170,4 +171,16 @@ test("the refresh skeleton retains the mounted viewport and blocks hidden intera
   const [hiddenAgain, resumedOverlay] = React.Children.toArray(restarted.props.children);
   assert.equal(hiddenAgain.props.style.opacity, 0);
   assert.equal(resumedOverlay.props["aria-hidden"], false);
+});
+
+test("a reload keeps the history depth the user already scrolled to", async () => {
+  const limits = [];
+  const { context, start } = harness(async (path, limit) => { limits.push(limit); return []; });
+  start();
+  await flush();
+  context.historyLimits.current.set("/repo", 1200);
+  context.realCache.current.clear();
+  start();
+  await flush();
+  assert.deepEqual(limits, [400, 1200]);
 });

@@ -98,3 +98,18 @@ test("invoke localizes native rejections without changing responses, arguments o
   window.__TAURI_INTERNALS__.invoke = async () => { throw structuredError; };
   await assert.rejects(invoke("git_test"), (error) => error === structuredError);
 });
+
+test("deleteBranch keeps the worktree path when the refusal is localized", async () => {
+  const { BranchInUseError, deleteBranch } = await import("../src/git.ts");
+  globalThis.window = { __TAURI_INTERNALS__: { invoke: async () => {
+    throw "分支 设置 正被工作树占用：/项目/工作树\n需要先移除该工作树才能删除分支。";
+  } } };
+  await assert.rejects(deleteBranch("/repo", "设置"), (error) => {
+    assert.ok(error instanceof BranchInUseError);
+    assert.equal(error.worktree, "/项目/工作树");
+    assert.match(String(error), /in use by worktree/i);
+    return true;
+  });
+  window.__TAURI_INTERNALS__.invoke = async () => { throw "error: The branch 'x' is not fully merged."; };
+  await assert.rejects(deleteBranch("/repo", "x"), (error) => typeof error === "string" && /not fully merged/.test(error));
+});

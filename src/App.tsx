@@ -1,8 +1,14 @@
 import { tf, tx, translateNativeMessage, getLanguage, getCurrentLanguage, setCurrentLanguage } from "./i18n";
 import type { Language } from "./i18n";
-import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, useDeferredValue, startTransition, useTransition, createContext, useContext, memo, Fragment } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, useDeferredValue, startTransition, useTransition, createContext, useContext, memo, Fragment, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
-import { Toaster, toast } from "sonner";
+import { Toaster } from "sonner";
+import { toast } from "./toast";
+import { copyWithToast } from "./clipboard";
+import { isTopDialog, useDialogFocus } from "./dialogFocus";
+import { setClockActive, subscribeClock, useClockTick } from "./clock";
+import { useExitPresence } from "./menuPresence";
+import { HISTORY_PAGE_SIZE, isHistoryTruncated, nextHistoryLimit } from "./historyPaging";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { isTauri } from "@tauri-apps/api/core";
@@ -27,7 +33,7 @@ import {
   loadStatus, loadWorkingStatus, stageFiles, unstageFiles, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
   attributeBranches, filterHistoryByHiddenBranches, historyBranchContext, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
   createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, undoCommitPreview, undoLastCommit, fetchAll, pull, push, forcePushTarget, forcePushPreview, forcePush, gitlabTest, gitlabTokenInfo, githubTokenInfo,
-  createPullRequest, branchColor, createBranchColors, checkForUpdate, getAppVersion, discardFile, discardAll,
+  createPullRequest, BranchInUseError, branchColor, createBranchColors, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitlabCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
   cancelGitOp, isCancelled, syncLocal, revealInFileManager, openRepositoryRemote, openProviderTokenSettings,
@@ -496,6 +502,13 @@ function formatRelativeTime(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString(getCurrentLanguage(), { month: "short", day: "numeric" });
 }
 
+// Re-renders only when the visible text changes (not on every clock tick), so a
+// long timeline of these costs almost nothing between minute boundaries.
+function RelativeTime({ date }: { date: string }) {
+  const text = useSyncExternalStore(subscribeClock, () => formatRelativeTime(date));
+  return <>{text}</>;
+}
+
 function formatFullDate(dateStr: string, includeSeconds = false): string {
   return new Date(dateStr).toLocaleString(getCurrentLanguage(), {
     year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
@@ -890,6 +903,7 @@ function ProjectSidebar({ projects, activeId, homeActive, attentionCount, open, 
   const addButtonRef = useRef<HTMLButtonElement>(null);
   const addMenuRef = useRef<HTMLDivElement>(null);
   const [addMenuPos, setAddMenuPos] = useState<{ left: number; top: number } | null>(null);
+  const addMenuPresence = useExitPresence(addMenuPos);
   useEffect(() => {
     if (!open) { setAddMenuPos(null); return; }
     scrollRef.current?.querySelector<HTMLElement>("[data-project-active]")
@@ -970,12 +984,13 @@ function ProjectSidebar({ projects, activeId, homeActive, attentionCount, open, 
         </div>
       </aside>
 
-      {addMenuPos && createPortal(
+      {addMenuPresence.shown && createPortal(
         <>
-          <div className="fixed inset-0" style={{ zIndex: 80 }} onMouseDown={() => setAddMenuPos(null)} />
+          {!addMenuPresence.closing && <div className="fixed inset-0" style={{ zIndex: 80 }} onMouseDown={() => setAddMenuPos(null)} />}
           <div ref={addMenuRef} role="menu" aria-label={tx("添加仓库")}
-            className="fixed p-1.5 gk-modal-in"
-            style={{ left: addMenuPos.left, top: addMenuPos.top, zIndex: 81, width: 196,
+            className={`fixed p-1.5 ${addMenuPresence.closing ? "gk-modal-out gk-menu-closing" : "gk-modal-in"}`}
+            aria-hidden={addMenuPresence.closing || undefined}
+            style={{ left: addMenuPresence.shown.left, top: addMenuPresence.shown.top, zIndex: 81, width: 196,
               background: t.dialogBg, border: `0.5px solid ${t.glassBorder}`,
               borderRadius: R, boxShadow: t.shadowWindow }}>
             <button role="menuitem" onClick={() => chooseAddAction(onAdd)}
@@ -1013,6 +1028,7 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
 }) {
   const t = useTheme();
   const [morePos, setMorePos] = useState<{ x: number; y: number } | null>(null);
+  const morePresence = useExitPresence(morePos);
   const moreButton = useRef<HTMLButtonElement>(null);
   const moreMenu = useRef<HTMLDivElement>(null);
   const focusMoreMenuOnOpen = useRef(false);
@@ -1108,10 +1124,11 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
         }} className="gk-shell-button flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer">
         <MoreHorizontal size={18} aria-hidden="true" />
       </button>
-      {morePos && createPortal(<>
-        <div className="fixed inset-0" style={{ zIndex: 80 }} onMouseDown={() => setMorePos(null)} />
+      {morePresence.shown && createPortal(<>
+        {!morePresence.closing && <div className="fixed inset-0" style={{ zIndex: 80 }} onMouseDown={() => setMorePos(null)} />}
         <div ref={moreMenu} role="menu" aria-label={tx("更多仓库操作")} className="gk-action-menu fixed p-1.5"
-          style={{ left: morePos.x, top: morePos.y, width: 196, zIndex: 81, background: t.dialogBg,
+          data-closing={morePresence.closing || undefined} aria-hidden={morePresence.closing || undefined}
+          style={{ left: morePresence.shown.x, top: morePresence.shown.y, width: 196, zIndex: 81, background: t.dialogBg,
             border: `0.5px solid ${t.border}`, borderRadius: R, boxShadow: t.shadowEl }}>
           {moreActions.map(({ label, Icon, action }) => (
             <button key={label} role="menuitem" disabled={!action} onClick={() => { setMorePos(null); action?.(); }}
@@ -1872,6 +1889,33 @@ function RefPill({ b, onDblClick }: {
 }
 
 
+// Handlers the timeline rows call. App rewrites `current` on every render, so a
+// row reads the latest closures without its props changing.
+interface TimelineActions {
+  toggleSmart: (commit: Commit) => void;
+  relatedClick: (commit: Commit) => void;
+  branchDblClick: (name: string) => void;
+  click: (commit: Commit) => void;
+  context: (event: React.MouseEvent, commit: Commit) => void;
+}
+
+// Only data props reach the comparison (shallow), so unrelated App state changes
+// (hover, fetch progress, dialogs) no longer re-render every row of a long history.
+const TimelineCommitRow = memo(function TimelineCommitRow({ actions, commit, language: _language, ...rest }: {
+  // `language` is unused here; it only invalidates the memo so translated text refreshes.
+  language: Language;
+  actions: { readonly current: TimelineActions }; commit: Commit; graphInfo: GraphRowInfo; selected: boolean;
+  highlight: boolean; graphW: number; laneStep: number; remoteNames: string[]; smartExpanded: boolean;
+  branchContext?: string;
+}) {
+  return <CommitRow {...rest} commit={commit}
+    onToggleSmart={() => actions.current.toggleSmart(commit)}
+    onRelatedCommitClick={(related) => actions.current.relatedClick(related)}
+    onBranchDblClick={(name) => actions.current.branchDblClick(name)}
+    onClick={() => actions.current.click(commit)}
+    onContextMenu={(event) => actions.current.context(event, commit)} />;
+});
+
 function CommitRow({ commit, branchContext, graphInfo, selected, highlight = false, graphW = GRAPH_W_MAX, laneStep = LANE_STEP, remoteNames = [], smartExpanded = false, onToggleSmart, onRelatedCommitClick, onBranchDblClick, onClick, onContextMenu }: {
   commit: Commit; graphInfo: GraphRowInfo; selected: boolean; highlight?: boolean; graphW?: number; laneStep?: number;
   branchContext?: string;
@@ -1962,7 +2006,7 @@ function CommitRow({ commit, branchContext, graphInfo, selected, highlight = fal
             <span className="text-[11px] font-mono flex-shrink-0" style={{ color: t.textFaint }}>{commit.hash}</span>
             <span className="text-[11px] ml-auto flex-shrink-0" style={{ color: t.textFaint }}
               title={`${isSmartMerged ? tx("最近一次提交") : tx("提交时间")}：${formatFullDate(commitHistoryDate(commit))}`}>
-              {formatRelativeTime(commitHistoryDate(commit))}
+              <RelativeTime date={commitHistoryDate(commit)} />
             </span>
           </div>
           {isSmartMerged && (
@@ -2006,7 +2050,7 @@ function CommitRow({ commit, branchContext, graphInfo, selected, highlight = fal
                         <span className="text-[11px] truncate" style={{ color: t.textSec }}>{commitBranchName(occurrence)}</span>
                         <span className="text-[10px] font-mono flex-shrink-0" style={{ color: t.textFaint }}>{occurrence.hash}</span>
                         <span className="text-[10px] ml-auto flex-shrink-0" style={{ color: t.textFaint }}>
-                          {formatRelativeTime(occurrence.committerDate ?? occurrence.date)}
+                          <RelativeTime date={occurrence.committerDate ?? occurrence.date} />
                         </span>
                         <ChevronRight size={10} aria-hidden="true" className="flex-shrink-0" style={{ color: t.textFaint }} />
                       </button>
@@ -2182,6 +2226,8 @@ function DiffRows({ lines, filePath, activeHunk, lineComments }: { lines: string
   const [menu, setMenu] = useState<{ x: number; y: number; row: number } | null>(null);
   const rowsRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuPresence = useExitPresence(menu);
+  const shownMenu = menuPresence.shown;
   const discussionsByLine = useMemo(() => lineComments ? mrLineDiscussionIndex(lineComments.discussions, lineComments.refs, lineComments) : new Map(),
     [lineComments?.discussions, lineComments?.refs, lineComments?.oldPath, lineComments?.newPath]);
   useEffect(() => { if (menu) menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus(); }, [menu]);
@@ -2225,11 +2271,11 @@ function DiffRows({ lines, filePath, activeHunk, lineComments }: { lines: string
         onClose={() => { setCommentRow(null); focusRow(i); }} />}
     </>}
   </Fragment>)}
-  {menu && createPortal(<div ref={menuRef}><ContextMenu x={menu.x} y={menu.y} onClose={closeMenu} items={[{ label: tx("评论"), Icon: MessageSquare, onClick: () => {
-    if (commentRow !== null && commentRow !== menu.row) {
+  {shownMenu && createPortal(<div ref={menuRef}><ContextMenu x={shownMenu.x} y={shownMenu.y} closing={menuPresence.closing} onClose={closeMenu} items={[{ label: tx("评论"), Icon: MessageSquare, onClick: () => {
+    if (commentRow !== null && commentRow !== shownMenu.row) {
       toast.message(tx("请先添加或取消当前行评论"));
       rowsRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus();
-    } else { setCommentRow(menu.row); rowsRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus(); }
+    } else { setCommentRow(shownMenu.row); rowsRef.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus(); }
   } }]} /></div>, document.body)}
   </div>;
 }
@@ -2244,6 +2290,7 @@ function DetailMenuButton({ label, items }: { label: string; items: CtxItem[] })
   const ref = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
+  const presence = useExitPresence(position);
   const close = () => { setPosition(null); requestAnimationFrame(() => triggerRef.current?.focus()); };
   useEffect(() => {
     if (position) ref.current?.querySelector<HTMLButtonElement>(".gk-context-menu button")?.focus();
@@ -2264,7 +2311,7 @@ function DetailMenuButton({ label, items }: { label: string; items: CtxItem[] })
       onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setPosition(position ? null : { x: rect.right - 176, y: rect.bottom + 5 }); }}>
       <MoreHorizontal size={15} aria-hidden="true" />
     </button>
-    {position && <ContextMenu {...position} items={items} onClose={close} />}
+    {presence.shown && <ContextMenu {...presence.shown} items={items} closing={presence.closing} onClose={close} />}
   </div>;
 }
 
@@ -2480,7 +2527,7 @@ function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, onExpan
           diffError={selectedFile.diffError} diffNotice={selectedFile.diffNotice} onExpand={onExpand} compact={compact} onTrace={onTrace} lineComments={lineComments}
           fileActions={compact && <DetailMenuButton label={tx("更多文件操作")} items={[
             ...(onRevealFile ? [{ label: fileManagerActionLabel(), Icon: FolderOpen, onClick: () => onRevealFile(selectedFile) } as CtxItem] : []),
-            { label: tx("复制文件路径"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(selectedFile.path).catch(() => toast.error(tx("无法复制到剪贴板"))); } },
+            { label: tx("复制文件路径"), Icon: Copy, onClick: () => { void copyWithToast(selectedFile.path, tx("文件路径")); } },
           ]} />} />
       ) : (
         <div className="flex-1 flex flex-col items-center justify-center gap-2"
@@ -2549,23 +2596,14 @@ function ExpandedDiffDialog({ files, file, onFileSelect, onClose, repoPath }: {
     if (index > 0) scrollToHunk(index);
   }, [file.path, file.diff, file.diffError, hunkCount]);
 
+  useDialogFocus(dialogRef, !closing);
   useEffect(() => {
     if (closing) return;
-    const dialog = dialogRef.current;
-    dialog?.focus();
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
         onCloseRef.current();
-      } else if (event.key === "Tab" && dialog) {
-        const buttons = [...dialog.querySelectorAll<HTMLButtonElement>("button:not(:disabled)")];
-        if (!buttons.length) { event.preventDefault(); return; }
-        if (event.shiftKey && (document.activeElement === buttons[0] || document.activeElement === dialog)) {
-          event.preventDefault(); buttons[buttons.length - 1].focus();
-        } else if (!event.shiftKey && (document.activeElement === buttons[buttons.length - 1] || document.activeElement === dialog)) {
-          event.preventDefault(); buttons[0].focus();
-        }
       }
     };
     window.addEventListener("keydown", onKey, true);
@@ -2674,7 +2712,7 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onExpa
             <div className="text-xs mt-0.5" style={{ color: t.textMuted }}>{commit.author.email}</div>
           </div>
           <div className="text-right flex-shrink-0">
-            <div className="text-xs" style={{ color: t.textMuted }}>{formatRelativeTime(commit.committerDate ?? commit.date)}</div>
+            <div className="text-xs" style={{ color: t.textMuted }}><RelativeTime date={commit.committerDate ?? commit.date} /></div>
             <div className="text-[12px] mt-0.5" style={{ color: t.textFaint }} title={tx("提交时间")}>{formatFullDate(commit.committerDate ?? commit.date)}</div>
           </div>
         </div>
@@ -2696,7 +2734,7 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onExpa
             ...(onCherryPick ? [{ label: tx("Cherry-pick 到当前分支"), Icon: GitCommit, onClick: onCherryPick } as CtxItem] : []),
             ...(onCheckout && checkoutBranch ? [{ label: tf("检出 {0} 并同步到此提交", checkoutBranch), Icon: Download, onClick: onCheckout } as CtxItem] : []),
             ...((onCherryPick || (onCheckout && checkoutBranch)) ? [{ sep: true } as CtxItem] : []),
-            { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(commit.fullHash).catch(() => toast.error(tx("无法复制到剪贴板"))); } },
+            { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { void copyWithToast(commit.fullHash, tx("提交哈希")); } },
           ]} />
         </div>
       </div>
@@ -2828,7 +2866,7 @@ function FileTracePanel({ repoPath, anchor, filePath, branch, expanded, onExpand
           style={{ background: activeSelection?.hash === commit.fullHash ? t.rowSelected : undefined, borderRadius: R - 2 }}>
           <div className="text-xs font-medium mb-2 break-words" style={{ color: activeSelection?.hash === commit.fullHash ? t.accentFg : t.text }}>{commit.message}</div>
           <div className="flex items-center gap-1.5 text-[11px] flex-wrap" style={{ color: t.textSec }} title={`${commit.author.email}\n${formatFullDate(commit.date)}`}>
-            <Avatar author={commit.author} size={18} /><span>{commit.author.name}</span><span>{formatRelativeTime(commit.date)}</span>
+            <Avatar author={commit.author} size={18} /><span>{commit.author.name}</span><span><RelativeTime date={commit.date} /></span>
           </div>
           <div className="flex items-center gap-2 mt-1.5 text-[11px] flex-wrap" style={{ color: t.textSec }}>
             <span className="font-mono">{commit.hash}</span>
@@ -2883,7 +2921,7 @@ function FileTracePanel({ repoPath, anchor, filePath, branch, expanded, onExpand
             loading={!activeDetail} onExpand={traceFile ? onExpand : undefined}
             fileActions={entry && <DetailMenuButton label={tx("更多文件操作")} items={[
               { label: fileManagerActionLabel(), Icon: FolderOpen, onClick: () => onRevealFile(entry.file) },
-              { label: tx("复制文件路径"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(entry.file.path).catch(() => toast.error(tx("无法复制到剪贴板"))); } },
+              { label: tx("复制文件路径"), Icon: Copy, onClick: () => { void copyWithToast(entry.file.path, tx("文件路径")); } },
             ]} />}
             diffNotice={activeDetail?.commit.binary ? tx("二进制文件,无法预览") : activeDetail?.commit.oldPath && !activeDetail.diff.includes("@@") ? tx("文件已重命名，内容没有变化") : null} />
           : <div className="flex-1 min-h-0 overflow-auto py-2" style={{ background: t.diffBg }}>
@@ -3622,9 +3660,11 @@ export function Modal({ title, Icon, onClose, width = 480, children, footer, clo
   const t = theme ?? inheritedTheme;
   const presence = useDialogPresence();
   const closing = ownClosing || presence.closing;
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useDialogFocus(dialogRef, !closing);
   useEffect(() => {
     if (closing) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && isTopDialog(dialogRef.current)) onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, closing]);
@@ -3633,7 +3673,7 @@ export function Modal({ title, Icon, onClose, width = 480, children, footer, clo
       <div className={`absolute inset-0 ${closing ? "gk-overlay-out" : "gk-overlay-in"}`}
         style={{ background: "rgba(0,0,0,0.45)" }} {...press(onClose)} />
       <div role="dialog" aria-modal="true" aria-label={title} aria-hidden={closing || undefined}
-        ref={element => { if (element) element.inert = closing; }}
+        ref={element => { dialogRef.current = element; if (element) element.inert = closing; }}
         className={`relative flex flex-col ${closing ? "gk-modal-out" : "gk-modal-in"}`}
         onAnimationEnd={(event) => {
           if (closing && event.currentTarget === event.target && event.animationName === "gk-modal-out") onExited?.();
@@ -4457,13 +4497,13 @@ function TagDialog({ path, currentBranch, busy, onCancel, onConfirm }: {
   );
 }
 
-function LocalMergeDialog({ path, branch, sources, dirty, onCancel, onConfirm, onChanges, onStash }: {
-  path: string; branch: string; sources: string[]; dirty: boolean;
+function LocalMergeDialog({ path, branch, sources, initialSource, dirty, onCancel, onConfirm, onChanges, onStash }: {
+  path: string; branch: string; sources: string[]; initialSource?: string; dirty: boolean;
   onCancel: () => void; onConfirm: (preview: LocalMergePreview) => Promise<void>;
   onChanges: () => void; onStash: () => void;
 }) {
   const t = useTheme();
-  const [source, setSource] = useState(sources[0] ?? "");
+  const [source, setSource] = useState(initialSource && sources.includes(initialSource) ? initialSource : sources[0] ?? "");
   const [preview, setPreview] = useState<LocalMergePreview | null>(null);
   const [error, setError] = useState("");
   const [checking, setChecking] = useState(false);
@@ -5156,10 +5196,8 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
     });
     return () => { cancelled = true; };
   }, [saved, configured, editing, refresh]);
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
-    return () => { window.clearInterval(timer); testRequest.current++; };
-  }, []);
+  useClockTick(() => setNow(Date.now()));
+  useEffect(() => () => { testRequest.current++; }, []);
 
   const validUrl = (() => {
     try {
@@ -5483,10 +5521,8 @@ function GithubAccountsSettings() {
     void Promise.all(Array.from({ length: Math.min(3, pending.length) }, worker));
     return () => { cancelled = true; };
   }, [accounts, refresh, showForm]);
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
-    return () => { window.clearInterval(timer); requestId.current++; };
-  }, []);
+  useClockTick(() => setNow(Date.now()));
+  useEffect(() => () => { requestId.current++; }, []);
 
   const clearTest = () => { requestId.current++; setTesting(false); setDraftInfo(null); setDraftError(""); };
   const reset = () => { clearTest(); setLabel(""); setUrl(""); setToken(""); setEditingId(null); setAdding(false); setShowToken(false); };
@@ -6243,6 +6279,7 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId,
   useLayoutEffect(() => {
     dialogRef.current?.toggleAttribute("inert", closing);
   }, [closing]);
+  useDialogFocus(dialogRef, !closing);
   const closeCompletedRef = useRef(false);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -6255,7 +6292,7 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId,
   useEffect(() => {
     if (closing) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setClosing(true);
+      if (event.key === "Escape" && isTopDialog(dialogRef.current)) setClosing(true);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -6481,8 +6518,8 @@ type CtxItem =
   | { sep?: false; label: string; Icon?: React.ElementType; danger?: boolean; onClick: () => void };
 interface CtxState { x: number; y: number; items: CtxItem[] }
 
-function ContextMenu({ x, y, items, onClose }: {
-  x: number; y: number; items: CtxItem[]; onClose: () => void;
+function ContextMenu({ x, y, items, onClose, closing = false }: {
+  x: number; y: number; items: CtxItem[]; onClose: () => void; closing?: boolean;
 }) {
   const t = useTheme();
   const ref = useRef<HTMLDivElement>(null);
@@ -6499,15 +6536,16 @@ function ContextMenu({ x, y, items, onClose }: {
       originX: opensLeft ? "right" : "left", originY: opensUp ? "bottom" : "top" });
   }, [x, y]);
   useEffect(() => {
+    if (closing) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, closing]);
   return (
     <>
-      <div className="fixed inset-0" style={{ zIndex: 200 }}
-        onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
-      <div ref={ref} className="gk-context-menu fixed" style={{
+      {!closing && <div className="fixed inset-0" style={{ zIndex: 200 }}
+        onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />}
+      <div ref={ref} className="gk-context-menu fixed" data-closing={closing || undefined} style={{
         top: pos.top, left: pos.left, zIndex: 201, minWidth: 176,
         transformOrigin: `${pos.originX} ${pos.originY}`,
         "--gk-menu-enter-y": pos.originY === "bottom" ? "5px" : "-5px",
@@ -6577,6 +6615,7 @@ export default function App() {
   const [projectSidebarOpen, setProjectSidebarOpen] = useState(true);
   const [appFocusRevision, setAppFocusRevision] = useState(0);
   const appForeground = useAppForeground();
+  useEffect(() => { setClockActive(appForeground); }, [appForeground]);
   const appForegroundRef = useRef(appForeground);
   appForegroundRef.current = appForeground;
   const selectedProject = projects.find((p) => p.id === activeProjectId) ?? projects[0];
@@ -6642,6 +6681,7 @@ export default function App() {
   // Right-click menu. Native (webview) menu is suppressed everywhere except text
   // fields; only elements that call openCtx get an actual menu.
   const [ctxMenu, setCtxMenu] = useState<CtxState | null>(null);
+  const ctxPresence = useExitPresence(ctxMenu);
   const openCtx = (e: React.MouseEvent, items: CtxItem[]) => {
     e.preventDefault();
     setCtxMenu({ x: e.clientX, y: e.clientY, items });
@@ -6668,6 +6708,7 @@ export default function App() {
   const [cherryConflict, setCherryConflict] = useState<{ path: string; commit: Commit; target: string; files: string[] } | null>(null);
   const cherryPreflightRequest = useRef(0);
   const [mergeOpen, setMergeOpen] = useState(false);
+  const [mergeInitialSource, setMergeInitialSource] = useState<string | undefined>();
   const [operationContinueRequest, setOperationContinueRequest] = useState<{ path: string; kind: RecoverableOperationKind } | null>(null);
   const [repoOperation, setRepoOperation] = useState<{ path: string; value: RepositoryOperation | null; error: string } | null>(null);
   const [operationRetry, setOperationRetry] = useState(0);
@@ -6767,6 +6808,12 @@ export default function App() {
   const gitOpId = useRef<string | null>(null);                      // id of the running cancellable op
   const [cancelling, setCancelling] = useState(false);              // cancel requested, awaiting unwind
   const realCache = useRef<Map<string, RealData>>(new Map());
+  // Per-repo `git log --max-count`, grown on demand as the timeline is scrolled.
+  const historyLimits = useRef<Map<string, number>>(new Map());
+  // Commit list a larger read failed to extend (shallow clone, parent outside the
+  // log window): nothing more to fetch until the list is replaced by a reload.
+  const historyExhausted = useRef<Map<string, Commit[]>>(new Map());
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   // Working-tree state is intentionally separate from the heavy history cache:
   // it can paint as soon as `git status` finishes, without waiting for the graph.
   const [workingSnapshot, setWorkingSnapshot] = useState<{ path: string; files: WorkingFile[]; changedPaths?: string[] } | null>(null);
@@ -7104,6 +7151,53 @@ export default function App() {
     });
     return () => cancelAnimationFrame(frame);
   }, [historyMode, smartMergeActive, focusActive, dataReady, branches]);
+
+  // Read further back in time without the full-refresh skeleton: re-run `git log`
+  // with a larger --max-count and swap in the longer commit list + graph. Branch
+  // objects keep their identity so selection and scroll position are untouched.
+  const historyTruncated = useMemo(() => dataReady && isHistoryTruncated(commits), [dataReady, commits]);
+  const loadMoreHistory = async () => {
+    const repoPath = activeProject?.path;
+    const base = repoPath ? realCache.current.get(repoPath) : undefined;
+    if (!repoPath || !base || !base.initialized || historyLoadingMore || !isHistoryTruncated(base.commits)) return;
+    if (historyExhausted.current.get(repoPath) === base.commits) return;
+    const limit = nextHistoryLimit(historyLimits.current.get(repoPath) ?? HISTORY_PAGE_SIZE);
+    if (limit === null) return;
+    setHistoryLoadingMore(true);
+    try {
+      const [allBranches, commitList] = await Promise.all([loadBranches(repoPath, true), loadHistory(repoPath, limit)]);
+      const latest = realCache.current.get(repoPath);
+      // A reload / branch change replaced the data while we were reading: drop this page.
+      if (!latest || latest.commits !== base.commits) return;
+      historyLimits.current.set(repoPath, limit);
+      if (commitList.length <= base.commits.length) { historyExhausted.current.set(repoPath, base.commits); return; }
+      attributeBranches(commitList, allBranches);
+      const next: RealData = { ...latest, commits: commitList, graph: computeGraph(commitList, latest.branchColors) };
+      cacheRealData(realCache.current, repoPath, next, false);
+      setRealData((prev) => prev && prev.path === repoPath && prev.commits === base.commits
+        ? { ...prev, commits: next.commits, graph: next.graph } : prev);
+    } catch (e) {
+      toast.error(tf("无法读取提交历史：{0}", e));
+    } finally {
+      setHistoryLoadingMore(false);
+    }
+  };
+  const loadMoreHistoryRef = useRef(loadMoreHistory);
+  loadMoreHistoryRef.current = loadMoreHistory;
+  // Filtered views show a thin slice of history, so only the unfiltered list
+  // keeps loading by itself; elsewhere the footer button loads on demand.
+  const autoLoadHistory = historyMode === "list" && !focusActive && timelineHiddenBranches.length === 0;
+  const historySentinelRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const node = historySentinelRef.current;
+    const root = timelineScrollRef.current;
+    if (!node || !root || !autoLoadHistory || historyRefreshing || historyLoadingMore) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) void loadMoreHistoryRef.current();
+    }, { root, rootMargin: "0px 0px 600px 0px" });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [autoLoadHistory, historyRefreshing, historyLoadingMore, historyTruncated, commits.length]);
 
   // Busiest lane index across the visible graph — drives a SINGLE global lane step
   // so vertical lane lines stay aligned row-to-row.
@@ -7689,7 +7783,7 @@ export default function App() {
         const [historyBranches, remoteList, commitList, working, stashList_] = await Promise.all([
           loadBranches(path, true),
           loadRemotes(path),
-          loadHistory(path),
+          loadHistory(path, historyLimits.current.get(path) ?? HISTORY_PAGE_SIZE),
           statusPromise,
           stashList(path),
         ]);
@@ -8071,6 +8165,8 @@ export default function App() {
       // A fetch also fast-forwards every local branch that is behind its
       // upstream; report what it did (and what it deliberately left alone).
       let detail: string | undefined;
+      let needsAttention = false;
+      let mergeUpstream: string | undefined;
       if (kind === "fetch") {
         const s = await fetchAll(p, token, opId, updateOperationProgress);
         const parts: string[] = [];
@@ -8078,6 +8174,10 @@ export default function App() {
         if (s.dirtySkipped) parts.push(tx("当前分支有未提交更改,已跳过"));
         if (s.diverged.length) parts.push(tf("{0} 与远程有分叉,需手动合并", s.diverged.join("、")));
         detail = parts.join(" · ") || undefined;
+        needsAttention = s.dirtySkipped || s.diverged.length > 0;
+        // Only the checked-out branch can be merged from here; offer its upstream.
+        const current = branches.find((b) => b.current);
+        if (current && s.diverged.includes(current.name)) mergeUpstream = current.remote;
       } else if (kind === "pull") await pull(p, token, opId, updateOperationProgress);
       else await push(p, token);
       // The user may browse another project while this runs. Refresh/jump only
@@ -8086,7 +8186,15 @@ export default function App() {
       if (activePathRef.current === p) {
         if (kind === "fetch" || kind === "pull") pendingJumpLatest.current = true;
       }
-      toast.success(tf("{0}完成", verbs[kind]), { id: tid, description: detail });
+      if (needsAttention) {
+        // Not a clean success: something was left for the user to resolve.
+        toast.warning(tf("{0}完成", verbs[kind]), {
+          id: tid, description: detail,
+          action: mergeUpstream ? { label: tx("去合并"), onClick: () => {
+            if (activePathRef.current === p) openMergeDialogRef.current(mergeUpstream);
+          } } : undefined,
+        });
+      } else toast.success(tf("{0}完成", verbs[kind]), { id: tid, description: detail });
     } catch (e) {
       // A user cancel isn't a failure — dismiss quietly.
       if (isCancelled(e)) {
@@ -8682,7 +8790,7 @@ export default function App() {
       }
       // Branch listing can be stale (a worktree added since the last refresh) —
       // recover from the live error instead of dead-ending on it.
-      const wt = released ? undefined : msg.match(/正被工作树占用：(.+)/)?.[1]?.trim();
+      const wt = released || !(e instanceof BranchInUseError) ? undefined : e.worktree;
       // `git branch -d` refuses an unmerged branch → escalate to a force confirm
       // rather than dead-ending, so the user can knowingly drop the commits.
       if (wt) {
@@ -8708,6 +8816,16 @@ export default function App() {
     ...branches.filter((branch) => !branch.current).map((branch) => branch.name),
     ...remotes.flatMap((remote) => remote.branches.map((branch) => `${remote.name}/${branch}`)),
   ])];
+  // Open the merge dialog, optionally preselecting a source (e.g. the upstream of
+  // a diverged branch reported by a fetch).
+  const openMergeDialog = (source?: string) => {
+    if (path) realCache.current.delete(path);
+    setReloadTick((n) => n + 1);
+    setMergeInitialSource(source);
+    setMergeOpen(true);
+  };
+  const openMergeDialogRef = useRef(openMergeDialog);
+  openMergeDialogRef.current = openMergeDialog;
   const runRepoMutation = async (repoPath: string, label: string, action: () => Promise<void>) => {
     if (gitBusy || busyLabel || workingOperationRef.current) throw new Error(tx("请等待当前 Git 操作完成"));
     workingOperationRef.current = true;
@@ -9056,6 +9174,38 @@ export default function App() {
     }
   };
 
+  // Latest handlers for the memoized timeline rows (see TimelineCommitRow).
+  const timelineActionsRef = useRef<TimelineActions>(null as unknown as TimelineActions);
+  timelineActionsRef.current = {
+    toggleSmart: (commit) => setExpandedSmartRows((previous) => {
+      const key = commit.patchId ?? commit.fullHash;
+      const next = new Set(previous);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    }),
+    relatedClick: openTimelineCommit,
+    branchDblClick: doSyncBranch,
+    click: (commit) => {
+      // A stash node opens the stash panel (apply/drop), not commit detail.
+      if (commit.isStash) {
+        openStash({ index: commit.stashIndex ?? 0, message: commit.message,
+          branch: commit.stashBranch ?? "", date: commit.date });
+        return;
+      }
+      openTimelineCommit(commit);
+    },
+    context: (event, commit) => openCtx(event, commit.isStash
+      ? [
+          { label: tx("应用到工作区"), Icon: RotateCcw, onClick: () => doStashApply(commit.stashIndex ?? 0) },
+          { label: tx("删除储藏"), Icon: Trash2, danger: true, onClick: () => doStashDrop(commit.stashIndex ?? 0) },
+        ]
+      : [
+          { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { void copyWithToast(commit.fullHash, tx("提交哈希")); } },
+          ...(isReal ? [{ label: tx("Cherry-pick 到当前分支"), Icon: GitCommit, onClick: () => requestCherryPick(commit) } as CtxItem] : []),
+        ]),
+  };
+  const timelineActions = timelineActionsRef;
+
   return (
     <ThemeCtx.Provider value={theme}>
     <BranchColorsCtx.Provider value={branchColors}>
@@ -9064,10 +9214,10 @@ export default function App() {
         style={{ background: theme.bg, isolation: "isolate", colorScheme: effectiveDark ? "dark" : "light",
           "--gk-accent": theme.accent } as React.CSSProperties}>
 
-          <Toaster position="bottom-center" theme={effectiveDark ? "dark" : "light"}
+          <Toaster position="bottom-center" theme={effectiveDark ? "dark" : "light"} closeButton
             toastOptions={{ style: { background: theme.glass, backdropFilter: "blur(20px)",
               border: `0.5px solid ${theme.glassBorder}`, color: theme.text,
-              fontSize: 12, fontFamily: "inherit", borderRadius: R } }} />
+              fontSize: 12, fontFamily: "inherit", borderRadius: R, paddingRight: 36 } }} />
 
           <TitleBar themeMode={themeMode} onThemeCycle={cycleTheme}
             onOpenSettings={() => { setSettingsSection("identity"); setSettingsOpen(true); }} />
@@ -9089,11 +9239,7 @@ export default function App() {
               onRefresh={() => { overview.refresh(); activity.refresh(); }} onCheckRemote={() => { void runUpdateCheck(); }} onAdd={handleOpenNew}
             /> : <ActionBar project={activeProject} branch={dataReady ? currentBranch : activeProject?.branch ?? ""}
             canMerge={dataReady && hasHead && !switching && operationKnown && !activeRepoOperation}
-            onMerge={() => {
-              if (path) realCache.current.delete(path);
-              setReloadTick((n) => n + 1);
-              setMergeOpen(true);
-            }}
+            onMerge={() => openMergeDialog()}
             onCreateBranch={dataReady && hasHead && !switching && operationKnown && !activeRepoOperation ? () => setCreateBranchOpen(true) : undefined}
             onFetch={gitAvailable && dataReady && !switching && remotes.length > 0 ? () => runGitAction("fetch") : undefined}
             onPull={hasHead && dataReady && !switching && operationKnown && !activeRepoOperation && remotes.length > 0 ? () => runGitAction("pull") : undefined}
@@ -9265,7 +9411,7 @@ export default function App() {
                   }
                   items.push({ sep: true });
                 }
-                items.push({ label: tx("复制分支名"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(b.name).catch(() => {}); } });
+                items.push({ label: tx("复制分支名"), Icon: Copy, onClick: () => { void copyWithToast(b.name, tx("分支名")); } });
                 openCtx(e, items);
               }}
               onSyncRemote={requestSyncRemote}
@@ -9277,7 +9423,7 @@ export default function App() {
                     : { label: tx("同步到本地并检出"), Icon: Download, onClick: () => requestSyncRemote(remoteName, leaf) },
                   ...(!hasLocal ? [{ label: tx("仅创建本地分支（不切换）"), Icon: GitBranchPlus, onClick: () => createLocalFromRemote(remoteName, leaf) } as CtxItem] : []),
                   { sep: true },
-                  { label: tx("复制分支名"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(`${remoteName}/${leaf}`).catch(() => {}); } },
+                  { label: tx("复制分支名"), Icon: Copy, onClick: () => { void copyWithToast(`${remoteName}/${leaf}`, tx("分支名")); } },
                 ]);
               }}
               onStashClick={openStash}
@@ -9391,7 +9537,7 @@ export default function App() {
                       { label: tx("应用到工作区"), Icon: RotateCcw, onClick: () => doStashApply(commit.stashIndex ?? 0) },
                       { label: tx("删除储藏"), Icon: Trash2, danger: true, onClick: () => doStashDrop(commit.stashIndex ?? 0) },
                     ] : [
-                      { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(commit.fullHash).catch(() => {}); } },
+                      { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { void copyWithToast(commit.fullHash, tx("提交哈希")); } },
                       ...(isReal ? [{ label: tx("Cherry-pick 到当前分支"), Icon: GitCommit, onClick: () => requestCherryPick(commit) } as CtxItem] : []),
                     ])} />
                 ) : (
@@ -9413,11 +9559,13 @@ export default function App() {
                     <GlideList className="gk-commit-glide" insetY={2}
                       style={{ "--gk-glide-hover": theme.rowHover } as React.CSSProperties}>
                     {displayCommits.map((commit, i) => (
-                      <CommitRow
+                      <TimelineCommitRow
                         // WKWebView can retain a content-visibility paint cache when
                         // the graph gutter changes width. Remount the row on layout
                         // changes so text and graph geometry paint together.
                         key={`${commit.fullHash}:${graphW}:${laneStep}`}
+                        actions={timelineActions}
+                        language={language}
                         commit={commit}
                         branchContext={historyBranchContext(commit, displayCommits[i - 1])}
                         graphInfo={displayGraph[i]}
@@ -9429,35 +9577,19 @@ export default function App() {
                         graphW={graphW}
                         laneStep={laneStep}
                         remoteNames={remoteNames}
-                        smartExpanded={expandedSmartRows.has(commit.patchId ?? commit.fullHash)}
-                        onToggleSmart={() => setExpandedSmartRows((previous) => {
-                          const key = commit.patchId ?? commit.fullHash;
-                          const next = new Set(previous);
-                          if (next.has(key)) next.delete(key); else next.add(key);
-                          return next;
-                        })}
-                        onRelatedCommitClick={openTimelineCommit}
-                        onBranchDblClick={doSyncBranch}
-                        onClick={() => {
-                          // A stash node opens the stash panel (apply/drop), not commit detail.
-                          if (commit.isStash) {
-                            openStash({ index: commit.stashIndex ?? 0, message: commit.message,
-                              branch: commit.stashBranch ?? "", date: commit.date });
-                            return;
-                          }
-                          openTimelineCommit(commit);
-                        }}
-                        onContextMenu={(e) => openCtx(e, commit.isStash
-                          ? [
-                              { label: tx("应用到工作区"), Icon: RotateCcw, onClick: () => doStashApply(commit.stashIndex ?? 0) },
-                              { label: tx("删除储藏"), Icon: Trash2, danger: true, onClick: () => doStashDrop(commit.stashIndex ?? 0) },
-                            ]
-                          : [
-                              { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { navigator.clipboard.writeText(commit.fullHash).catch(() => {}); } },
-                              ...(isReal ? [{ label: tx("Cherry-pick 到当前分支"), Icon: GitCommit, onClick: () => requestCherryPick(commit) } as CtxItem] : []),
-                            ])} />
+                        smartExpanded={expandedSmartRows.has(commit.patchId ?? commit.fullHash)} />
                     ))}
                     </GlideList>
+                    {historyTruncated && !historyRefreshing && activeProject
+                      && historyExhausted.current.get(activeProject.path) !== commits
+                      && nextHistoryLimit(historyLimits.current.get(activeProject.path) ?? HISTORY_PAGE_SIZE) !== null && (
+                      <button ref={historySentinelRef} type="button" disabled={historyLoadingMore}
+                        onClick={() => void loadMoreHistory()}
+                        className="gk-detail-icon w-full px-3 py-3 text-xs cursor-pointer disabled:cursor-default"
+                        style={{ color: theme.textMuted, borderTop: `0.5px solid ${theme.border}` }}>
+                        {historyLoadingMore ? tx("正在加载更早的提交…") : tx("加载更早的提交")}
+                      </button>
+                    )}
                   </div>
                 )}
                 {/* Fork-point footer — where this branch was created from */}
@@ -9761,7 +9893,7 @@ export default function App() {
 
         <DialogPresence>{mergeOpen && activeProject ? (
           <LocalMergeDialog key={activeProject.path} path={activeProject.path} branch={currentBranch}
-            sources={mergeSources} dirty={activeWorking.length > 0}
+            sources={mergeSources} initialSource={mergeInitialSource} dirty={activeWorking.length > 0}
             onCancel={() => setMergeOpen(false)} onConfirm={doLocalMerge}
             onChanges={() => { setMergeOpen(false); openOperationChanges(); }}
             onStash={() => { setMergeOpen(false); requestStash(); }} />
@@ -9835,8 +9967,9 @@ export default function App() {
             onEngagementChange={setOperationEngaged} />
         )}
 
-        {ctxMenu && (
-          <ContextMenu x={ctxMenu.x} y={ctxMenu.y} items={ctxMenu.items} onClose={() => setCtxMenu(null)} />
+        {ctxPresence.shown && (
+          <ContextMenu x={ctxPresence.shown.x} y={ctxPresence.shown.y} items={ctxPresence.shown.items}
+            closing={ctxPresence.closing} onClose={() => setCtxMenu(null)} />
         )}
     </BranchColorsCtx.Provider>
     </ThemeCtx.Provider>

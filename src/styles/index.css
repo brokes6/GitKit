@@ -525,6 +525,20 @@ select:focus-visible,
 .gk-context-menu {
   animation: gk-menu-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
+@keyframes gk-menu-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to {
+    opacity: 0;
+    transform: translateY(var(--gk-menu-enter-y, -5px)) scale(0.97);
+  }
+}
+/* Exit mirrors the entrance; the menu ignores the pointer while it fades. */
+.gk-action-menu[data-closing="true"],
+.gk-context-menu[data-closing="true"] {
+  animation: gk-menu-out 140ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  pointer-events: none;
+}
+.gk-menu-closing { pointer-events: none; }
 .gk-git-action {
   position: relative;
   overflow: hidden;
@@ -694,4 +708,26 @@ select:focus-visible,
     transform: translateX(61%);
     animation: none;
   }
+}
+
+/* Toast close button: sit inside the top-right corner, always visible. */
+[data-sonner-toaster] [data-sonner-toast][data-styled='true'] [data-close-button] {
+  left: auto;
+  right: 8px;
+  top: 8px;
+  width: 18px;
+  height: 18px;
+  transform: none;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: inherit;
+  opacity: 0.55;
+  transition: opacity 120ms, background 120ms;
+}
+
+[data-sonner-toaster] [data-sonner-toast][data-styled='true'] [data-close-button]:hover {
+  background: rgba(128, 128, 128, 0.22);
+  border: none;
+  opacity: 1;
 }

@@ -18,6 +18,7 @@ import type { WorkingFile, StagingStatus, WorkingStatusSnapshot } from "./workin
 import type { ProjectOverviewSummary, ProjectStatusSummary } from "./projectOverview";
 import type { ProjectActivitySummary } from "./projectActivity";
 import { branchColor } from "./branchColors.ts";
+import { HISTORY_PAGE_SIZE } from "./historyPaging.ts";
 import type { BranchColors } from "./branchColors";
 export { branchColor, createBranchColors } from "./branchColors.ts";
 
@@ -456,8 +457,8 @@ export async function loadRemotes(path: string): Promise<Remote[]> {
   return remotes.map((r) => ({ name: r.name, url: r.url, branches: byRemote.get(r.name) ?? [] }));
 }
 
-export async function loadHistory(path: string): Promise<Commit[]> {
-  const raw = await invoke<RCommit[]>("git_log", { path, limit: 400 });
+export async function loadHistory(path: string, limit: number = HISTORY_PAGE_SIZE): Promise<Commit[]> {
+  const raw = await invoke<RCommit[]>("git_log", { path, limit });
   return raw.map((c) => ({
     hash: c.short_hash,
     fullHash: c.hash,
@@ -752,7 +753,28 @@ export async function createBranch(
 /** Delete a local branch. `force` (-D) drops unmerged commits; the default (-d)
  *  refuses when the branch isn't fully merged. Cannot delete the current branch. */
 export async function deleteBranch(path: string, name: string, force = false): Promise<void> {
-  await invoke("git_delete_branch", { path, name, force });
+  try {
+    await tauriInvoke("git_delete_branch", { path, name, force });
+  } catch (error) {
+    // The backend words this refusal in its source language; read the worktree
+    // path out of that raw text before translation turns it into something else.
+    const raw = typeof error === "string" ? error : "";
+    const worktree = /正被工作树占用：(.+)/.exec(raw)?.[1]?.trim();
+    if (worktree) throw new BranchInUseError(translateNativeMessage(raw), worktree);
+    throw typeof error === "string" ? translateNativeMessage(error) : error;
+  }
+}
+
+/** A branch can't be deleted because a linked worktree has it checked out. */
+export class BranchInUseError extends Error {
+  readonly worktree: string;
+  constructor(message: string, worktree: string) {
+    super(message);
+    this.name = "BranchInUseError";
+    this.worktree = worktree;
+  }
+  // Callers format errors with String(e); keep that reading as plain text.
+  override toString() { return this.message; }
 }
 
 /** Remove a linked worktree (git worktree remove --force). Destructive: any
