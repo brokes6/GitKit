@@ -3,5 +3,8 @@ import "@fontsource-variable/manrope/wght.css";
 import "@fontsource-variable/sora/wght.css";
 import App from "./App.tsx";
 import "./styles/index.css";
+import { disableAutoText } from "./disableAutoText.ts";
+
+disableAutoText();
 
 createRoot(document.getElementById("root")!).render(<App />);
