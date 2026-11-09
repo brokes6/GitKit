@@ -130,7 +130,7 @@ fn run_git_auth(repo: &str, args: &[&str], token: Option<&str>) -> Result<String
 /// git processes per commit when a repository is opened. Patch ids deliberately
 /// ignore commit metadata, so cherry-picked commits with the same diff match
 /// even though their hashes and parents differ.
-fn stable_patch_ids(repo: &str, limit: u32) -> Result<HashMap<String, String>, String> {
+fn stable_patch_ids(repo: &str, limit: u32, ref_args: &[&str]) -> Result<HashMap<String, String>, String> {
     let max_count = format!("--max-count={limit}");
     let mut producer = command("git");
     producer
@@ -138,9 +138,9 @@ fn stable_patch_ids(repo: &str, limit: u32) -> Result<HashMap<String, String>, S
         .arg(repo)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("PATH", augmented_path())
+        .arg("log")
+        .args(ref_args)
         .args([
-            "log",
-            "--all",
             "--date-order",
             "--no-merges",
             max_count.as_str(),
@@ -548,6 +548,43 @@ pub struct CommitInfo {
     // not reachable from refs/stash, so the frontend cannot safely infer either.
     pub stash_index: Option<usize>,
     pub stash_branch: Option<String>,
+    // True when the commit is reachable only from refs outside branches,
+    // remotes, tags and HEAD (e.g. an app-internal savepoint ref). Only
+    // populated when the caller asked for those refs to be walked.
+    pub other_refs_only: bool,
+}
+
+fn head_resolves(repo: &str) -> bool {
+    run_git(repo, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok()
+}
+
+/// Refs that make up the ordinary history view: branches, remotes, tags and
+/// HEAD (so a detached checkout stays visible). Other namespaces such as
+/// refs/cindy/savepoints, refs/pull or refs/notes are walked only on request.
+fn history_ref_args(repo: &str, include_other_refs: bool) -> Vec<&'static str> {
+    if include_other_refs {
+        return vec!["--all"];
+    }
+    let mut args = vec!["--branches", "--remotes", "--tags"];
+    if head_resolves(repo) {
+        args.push("HEAD");
+    }
+    args
+}
+
+/// Commits reachable from some ref but from none of branches, remotes, tags or
+/// HEAD. Stashes are excluded: they have their own node and detail view.
+fn other_ref_only_commits(repo: &str) -> HashSet<String> {
+    let mut args = vec![
+        "rev-list", "--exclude=refs/stash", "--all",
+        "--not", "--branches", "--remotes", "--tags",
+    ];
+    if head_resolves(repo) {
+        args.push("HEAD");
+    }
+    run_git(repo, &args)
+        .map(|out| out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default()
 }
 
 #[derive(Clone)]
@@ -611,6 +648,7 @@ fn parse_commit_log(out: &str, patch_ids: &HashMap<String, String>) -> Vec<Commi
             is_stash: false,
             stash_index: None,
             stash_branch: None,
+            other_refs_only: false,
         });
     }
     commits
@@ -666,12 +704,18 @@ fn sort_commits_date_order(commits: &mut Vec<CommitInfo>) {
 }
 
 #[tauri::command]
-pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>, String> {
+pub async fn git_log(
+    path: String,
+    limit: Option<u32>,
+    include_other_refs: Option<bool>,
+) -> Result<Vec<CommitInfo>, String> {
     run_blocking(move || {
     let limit = limit.unwrap_or(400);
+    let include_other_refs = include_other_refs.unwrap_or(false);
+    let ref_args = history_ref_args(&path, include_other_refs);
     // Patch-id is an enhancement: history must remain available even if an old
     // or unusual Git installation cannot produce it.
-    let patch_ids = match stable_patch_ids(&path, limit) {
+    let patch_ids = match stable_patch_ids(&path, limit, &ref_args) {
         Ok(ids) => ids,
         Err(_) => HashMap::new(),
     };
@@ -692,16 +736,12 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
         stash_meta.insert(hash.to_string(), StashMeta { index, branch });
     }
 
-    let out = run_git(
-        &path,
-        &[
-            "log",
-            "--all",
-            "--date-order",
-            &format!("--max-count={limit}"),
-            &format!("--pretty=format:{fmt}"),
-        ],
-    )?;
+    let max_count = format!("--max-count={limit}");
+    let pretty_arg = format!("--pretty=format:{fmt}");
+    let mut log_args: Vec<&str> = vec!["log"];
+    log_args.extend(ref_args.iter().copied());
+    log_args.extend(["--date-order", max_count.as_str(), pretty_arg.as_str()]);
+    let out = run_git(&path, &log_args)?;
     let mut res = parse_commit_log(&out, &patch_ids);
 
     // Older stash tips live only in the reflog. Read exactly those commits with
@@ -715,7 +755,6 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
         .filter(|hash| !existing.contains(hash))
         .collect();
     if !missing_stashes.is_empty() {
-        let pretty_arg = format!("--pretty=format:{fmt}");
         let mut args = vec!["log", "--no-walk=sorted", pretty_arg.as_str()];
         args.extend(missing_stashes);
         let older = run_git(&path, &args)?;
@@ -742,6 +781,15 @@ pub async fn git_log(path: String, limit: Option<u32>) -> Result<Vec<CommitInfo>
             }
         }
         res.retain(|c| !hidden.contains(&c.hash));
+    }
+
+    if include_other_refs {
+        let other_only = other_ref_only_commits(&path);
+        if !other_only.is_empty() {
+            for c in res.iter_mut().filter(|c| !c.is_stash) {
+                c.other_refs_only = other_only.contains(&c.hash);
+            }
+        }
     }
 
     Ok(res)
@@ -4200,6 +4248,7 @@ mod watch_tests {
             is_stash: false,
             stash_index: None,
             stash_branch: None,
+            other_refs_only: false,
         }
     }
 

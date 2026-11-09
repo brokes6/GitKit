@@ -37,7 +37,7 @@ import {
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitlabCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
   cancelGitOp, isCancelled, syncLocal, revealInFileManager, openRepositoryRemote, openProviderTokenSettings,
-  authorColor, authorInitials, loadFileHistory, loadFileTraceDiff, loadFileBlame,
+  otherRefGroup, authorColor, authorInitials, loadFileHistory, loadFileTraceDiff, loadFileBlame,
   localMergePreview, mergeLocal, loadRepoOperation, continueMerge, abortMerge, continueCherryPick, abortCherryPick, mergeTool, loadProjectOverview,
 } from "./git";
 import type { DepInfo, Tag, RepoInfo, CreatedRepo, CloneProgress, GitProgress, BehindBranch, WorkingTreeChanged, ForcePushPreview, FileHistoryPage, FileTraceDiff, FileBlame, LocalMergePreview, RepositoryOperation } from "./git";
@@ -444,6 +444,10 @@ export interface Commit {
   files: CommitFile[];
   branchLabel?: string;       // primary branch (drives lane colour)
   branchLabels?: string[];    // every branch whose first-parent backbone reaches here
+  // Reachable only from refs outside branches/remotes/tags/HEAD (for example an
+  // app-internal savepoint ref). Set only while "其他引用" is switched on.
+  otherRefsOnly?: boolean;
+  otherRefs?: string[];       // full names of such refs pointing directly at this commit
   isStash?: boolean;          // stash tip — rendered as a single collapsed node
   stashIndex?: number;        // reflog position used by apply/drop/detail actions
   stashBranch?: string;       // branch recorded in the stash reflog subject
@@ -1798,6 +1802,28 @@ function refBadges(tags: string[], remoteNames: string[]): { name: string; kind:
 // the message. Their surfaces stay neutral; the small source icons retain the
 // graph colour so refs remain traceable without turning the row into a colour wall.
 // Long names truncate; hovering expands to the full name (see RefPill).
+function otherRefsHint(commit: Commit): string {
+  const refs = commit.otherRefs ?? [];
+  return refs.length
+    ? tf("不属于任何分支，仅被 {0} 引用", refs.join(", "))
+    : tx("不属于任何分支，仅能通过其他引用到达（如工具生成的存档点）");
+}
+
+// Marks a commit that lives outside every branch/tag, so it never reads as an
+// unexplained orphan. Dashed and muted: it is context, not part of a branch.
+function OtherRefsBadge({ commit }: { commit: Commit }) {
+  const t = useTheme();
+  const group = commit.otherRefs?.[0] ? otherRefGroup(commit.otherRefs[0]) : null;
+  return (
+    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono flex-shrink-0 min-w-0"
+      title={otherRefsHint(commit)}
+      style={{ color: t.textMuted, border: `0.5px dashed ${t.textFaint}`, borderRadius: R - 4 }}>
+      <span className="flex-shrink-0">{tx("非分支")}</span>
+      {group && <span className="truncate" style={{ color: t.textFaint }}>· {group}</span>}
+    </span>
+  );
+}
+
 function InlineRefs({ tags, remoteNames, onDblClick }: {
   tags: string[]; remoteNames: string[]; onDblClick?: (name: string) => void;
 }) {
@@ -1930,7 +1956,7 @@ function CommitRow({ commit, branchContext, graphInfo, selected, highlight = fal
   const isMerge = commit.parents.length > 1;
   const equivalents = orderedEquivalentCommits(commit);
   const isSmartMerged = equivalents.length > 1;
-  const hasRefs = refBadges(commit.tags ?? [], remoteNames).length > 0;
+  const hasRefs = refBadges(commit.tags ?? [], remoteNames).length > 0 || !!commit.otherRefsOnly;
   // Deterministic height (all content is single-line) → no per-row measurement,
   // which lets us use content-visibility for smooth scrolling on long histories.
   // Merges no longer take their own row — the glyph sits inline on the message line.
@@ -1961,13 +1987,15 @@ function CommitRow({ commit, branchContext, graphInfo, selected, highlight = fal
           transition: "background 0.1s",
           boxShadow: highlight && !selected ? `inset 0 0 0 0.5px ${laneColor}44` : "none",
         }} />
-      <div className="relative flex items-start min-h-0 overflow-hidden">
+      <div className="relative flex items-start min-h-0 overflow-hidden"
+        style={commit.otherRefsOnly ? { opacity: 0.6 } : undefined}>
         {/* Graph sits flush-left — the topology lanes carry the branch colours. */}
         <div style={{ width: graphW, flexShrink: 0 }}>
           <GraphRowSVG info={graphInfo} height={rowH} width={graphW} step={laneStep} stash={commit.isStash} />
         </div>
         <div className="flex-1 min-w-0 flex flex-col justify-center py-2.5 pr-3 gap-1.5">
           {(hasRefs || branchContext) && <div className="flex items-center gap-2 min-w-0">
+            {commit.otherRefsOnly && <OtherRefsBadge commit={commit} />}
             <InlineRefs tags={commit.tags ?? []} remoteNames={remoteNames} onDblClick={onBranchDblClick} />
             {branchContext && <span className="flex items-center gap-1 min-w-0 text-[11px] font-mono"
               title={tf("{0} · 分支历史（沿第一父提交追溯）", branchContext)}
@@ -2737,6 +2765,16 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onExpa
             { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { void copyWithToast(commit.fullHash, tx("提交哈希")); } },
           ]} />
         </div>
+        {commit.otherRefsOnly && (
+          <div className="flex items-start gap-2 mt-3 text-[11px] leading-relaxed" style={{ color: t.textMuted }}>
+            <Info size={12} className="flex-shrink-0 mt-0.5" aria-hidden="true" />
+            <div className="min-w-0">
+              <div>{tx("这个提交不属于任何分支，只能通过其他引用到达。它通常是工具生成的存档点，不会被推送。")}</div>
+              {commit.otherRefs?.map(ref => <div key={ref} className="font-mono break-all" style={{ color: t.textFaint }}>
+                {tf("引用：{0}", ref)}</div>)}
+            </div>
+          </div>
+        )}
       </div>
 
       <FileDiffView files={commit.files} selectedFile={selectedFile}
@@ -6634,6 +6672,10 @@ export default function App() {
   const [smartMerge, setSmartMerge] = useState(() => localStorage.getItem("gitkit.smartMerge") !== "0");
   const [expandedSmartRows, setExpandedSmartRows] = useState<Set<string>>(() => new Set());
   useEffect(() => { localStorage.setItem("gitkit.smartMerge", smartMerge ? "1" : "0"); }, [smartMerge]);
+  // Commits reachable only from refs outside branches/tags (e.g. app savepoints)
+  // are left out of the history unless the user asks for them.
+  const [showOtherRefs, setShowOtherRefs] = useState(() => localStorage.getItem("gitkit.showOtherRefs") === "1");
+  const showOtherRefsRef = useRef(showOtherRefs);
   const [selectedFile, setSelectedFile]       = useState<CommitFile | null>(null);
   const [fileTrace, setFileTrace] = useState<{ anchor: string; file: string } | null>(null);
   const commitDiffRequestRef = useRef(0);
@@ -6808,6 +6850,19 @@ export default function App() {
   const gitOpId = useRef<string | null>(null);                      // id of the running cancellable op
   const [cancelling, setCancelling] = useState(false);              // cancel requested, awaiting unwind
   const realCache = useRef<Map<string, RealData>>(new Map());
+  const toggleOtherRefs = () => {
+    const next = !showOtherRefs;
+    showOtherRefsRef.current = next;
+    localStorage.setItem("gitkit.showOtherRefs", next ? "1" : "0");
+    setShowOtherRefs(next);
+    // Cached histories were read with the previous ref set, so re-read them.
+    realCache.current.clear();
+    if (!next && selectedCommit?.otherRefsOnly) {
+      setSelectedCommit(null); setSelectedFile(null);
+      setDetailOpen(false); setDetailClosing(false);
+    }
+    setReloadTick((n) => n + 1);
+  };
   // Per-repo `git log --max-count`, grown on demand as the timeline is scrolled.
   const historyLimits = useRef<Map<string, number>>(new Map());
   // Commit list a larger read failed to extend (shallow clone, parent outside the
@@ -7165,7 +7220,7 @@ export default function App() {
     if (limit === null) return;
     setHistoryLoadingMore(true);
     try {
-      const [allBranches, commitList] = await Promise.all([loadBranches(repoPath, true), loadHistory(repoPath, limit)]);
+      const [allBranches, commitList] = await Promise.all([loadBranches(repoPath, true), loadHistory(repoPath, limit, showOtherRefsRef.current)]);
       const latest = realCache.current.get(repoPath);
       // A reload / branch change replaced the data while we were reading: drop this page.
       if (!latest || latest.commits !== base.commits) return;
@@ -7783,7 +7838,7 @@ export default function App() {
         const [historyBranches, remoteList, commitList, working, stashList_] = await Promise.all([
           loadBranches(path, true),
           loadRemotes(path),
-          loadHistory(path, historyLimits.current.get(path) ?? HISTORY_PAGE_SIZE),
+          loadHistory(path, historyLimits.current.get(path) ?? HISTORY_PAGE_SIZE, showOtherRefsRef.current),
           statusPromise,
           stashList(path),
         ]);
@@ -9469,6 +9524,27 @@ export default function App() {
                     </span>
                   </button>
                 )}
+                <button type="button" aria-pressed={showOtherRefs}
+                  title={tx("显示不在任何分支或标签上的提交，例如工具生成的存档点")}
+                  onClick={toggleOtherRefs}
+                  className="flex items-center gap-1.5 px-2 py-1.5 text-[11px] font-semibold cursor-pointer flex-shrink-0"
+                  style={{
+                    color: showOtherRefs ? theme.accent2Fg : theme.textMuted,
+                    background: showOtherRefs ? theme.accent2Bg : theme.inputBg,
+                    border: `0.5px solid ${showOtherRefs ? theme.accent2 + "66" : theme.inputBorder}`,
+                    borderRadius: R - 3,
+                  }}>
+                  {tx("其他引用")}
+                  <span className="relative inline-flex flex-shrink-0"
+                    style={{ width: 25, height: 15, borderRadius: 999,
+                      background: showOtherRefs ? theme.accent2 : theme.textFaint,
+                      transition: "background 0.14s" }}>
+                    <span className="absolute rounded-full"
+                      style={{ width: 11, height: 11, top: 2, left: showOtherRefs ? 12 : 2,
+                        background: "#fff", boxShadow: "0 1px 2px rgba(0,0,0,0.25)",
+                        transition: "left 0.16s cubic-bezier(0.32,0.72,0,1)" }} />
+                  </span>
+                </button>
                 <span className="ml-auto text-[11px] tabular-nums" style={{ color: theme.textFaint }}>
                   {smartMergeActive
                       ? tf("{0} 个变更 · {1} 次提交", displayCommits.length, scopedCommits.length)

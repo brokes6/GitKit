@@ -41,7 +41,7 @@ function harness(history = async () => [], info = { initialized: true, has_head:
     pendingViewReset: { current: false }, pendingJumpLatest: { current: false },
     commitDiffRequestRef: { current: 0 }, activePathRef: { current: "/repo" },
     realCache: { current: new Map() }, workingCache: { current: new Map() },
-    historyLimits: { current: new Map() }, HISTORY_PAGE_SIZE: 400,
+    historyLimits: { current: new Map() }, HISTORY_PAGE_SIZE: 400, showOtherRefsRef: { current: false },
     cacheRealData: (cache, path, data) => cache.set(path, data),
     openRepo: async () => { state.opens++; return info; },
     loadHistory: history, loadBranches: async () => [], loadRemotes: async () => [], stashList: async () => [],
@@ -183,4 +183,14 @@ test("a reload keeps the history depth the user already scrolled to", async () =
   start();
   await flush();
   assert.deepEqual(limits, [400, 1200]);
+});
+
+test("history is read without internal refs unless the user switched them on", async () => {
+  const flags = [];
+  const { context, start } = harness(async (path, limit, includeOtherRefs) => { flags.push(includeOtherRefs); return []; });
+  start(); await flush();
+  context.realCache.current.clear();
+  context.showOtherRefsRef.current = true;
+  start(); await flush();
+  assert.deepEqual(flags, [false, true]);
 });

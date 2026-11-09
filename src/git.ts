@@ -75,6 +75,7 @@ interface RCommit {
   is_stash: boolean;
   stash_index: number | null;
   stash_branch: string | null;
+  other_refs_only: boolean;
 }
 interface RBranch {
   name: string;
@@ -117,6 +118,18 @@ export function authorInitials(name: string): string {
   const s = name.trim();
   return s ? s.charAt(0).toUpperCase() : "?";
 }
+/** A decoration naming a ref outside branches/remotes/tags, e.g. refs/cindy/savepoints/<id>. */
+function isOtherRef(ref: string): boolean {
+  return ref.startsWith("refs/") && ref !== "refs/stash";
+}
+export function otherRefNames(refs: string[]): string[] {
+  return refs.filter(isOtherRef);
+}
+/** Short, human-readable source of an other-ref: refs/cindy/savepoints/<id> → "cindy/savepoints". */
+export function otherRefGroup(ref: string): string {
+  return ref.replace(/^refs\//, "").split("/").slice(0, 2).join("/");
+}
+
 // "HEAD -> main", "tag: v1.0", "origin/main" → ["HEAD","main"] / ["v1.0"] / ["origin/main"]
 function cleanRefs(refs: string[]): string[] {
   const out: string[] = [];
@@ -124,6 +137,9 @@ function cleanRefs(refs: string[]): string[] {
     if (!r) continue;
     // Stash refs are rendered as a dedicated node, not a branch/tag pill.
     if (r === "refs/stash" || r.startsWith("stash@")) continue;
+    // Git prints refs outside heads/remotes/tags by their full name. They are
+    // not branches or tags, so they must not become pills (see otherRefNames).
+    if (isOtherRef(r)) continue;
     if (r.includes("->")) r.split("->").forEach((x) => out.push(x.trim()));
     else if (r.startsWith("tag: ")) out.push(r.slice(5).trim());
     else out.push(r);
@@ -457,8 +473,12 @@ export async function loadRemotes(path: string): Promise<Remote[]> {
   return remotes.map((r) => ({ name: r.name, url: r.url, branches: byRemote.get(r.name) ?? [] }));
 }
 
-export async function loadHistory(path: string, limit: number = HISTORY_PAGE_SIZE): Promise<Commit[]> {
-  const raw = await invoke<RCommit[]>("git_log", { path, limit });
+export async function loadHistory(
+  path: string,
+  limit: number = HISTORY_PAGE_SIZE,
+  includeOtherRefs = false,
+): Promise<Commit[]> {
+  const raw = await invoke<RCommit[]>("git_log", { path, limit, includeOtherRefs });
   return raw.map((c) => ({
     hash: c.short_hash,
     fullHash: c.hash,
@@ -480,6 +500,8 @@ export async function loadHistory(path: string, limit: number = HISTORY_PAGE_SIZ
     patchId: c.patch_id ?? undefined,
     lane: 0,
     tags: cleanRefs(c.refs),
+    otherRefsOnly: c.other_refs_only || undefined,
+    otherRefs: otherRefNames(c.refs),
     parents: c.parents,
     stats: { additions: 0, deletions: 0, files: 0 },
     files: [],

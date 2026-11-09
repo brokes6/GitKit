@@ -34,7 +34,7 @@ fn opening_plain_project_is_read_only_and_initialization_preserves_files() {
     assert_eq!(std::fs::read_to_string(folder.0.join("code.txt")).unwrap(), "existing content\n");
     assert!(run_git(folder.path(), &["diff", "--cached", "--name-only"]).unwrap().is_empty());
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    assert!(runtime.block_on(git_log(info.path.clone(), None)).unwrap().is_empty());
+    assert!(runtime.block_on(git_log(info.path.clone(), None, None)).unwrap().is_empty());
     assert!(runtime.block_on(git_branches(info.path.clone())).unwrap().is_empty());
     assert!(runtime.block_on(git_stash_list(info.path.clone())).unwrap().is_empty());
     let status = runtime.block_on(git_status(info.path)).unwrap();
@@ -139,4 +139,41 @@ fn gitlab_creation_surfaces_authentication_and_missing_response_fields() {
         assert!(error.contains(expected), "{error}");
         worker.join().unwrap();
     }
+}
+
+#[test]
+fn history_hides_internal_refs_by_default_and_flags_them_on_request() {
+    let folder = ProjectFolder::new();
+    let git = |args: &[&str]| {
+        let mut full = vec!["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null"];
+        full.extend_from_slice(args);
+        run_git(folder.path(), &full).unwrap()
+    };
+    git(&["init", "--initial-branch=main"]);
+    git(&["commit", "--allow-empty", "-m", "base"]);
+    // An app-internal ref whose commit belongs to no branch.
+    git(&["checkout", "--detach", "-q"]);
+    git(&["commit", "--allow-empty", "-m", "savepoint"]);
+    let savepoint = git(&["rev-parse", "HEAD"]).trim().to_string();
+    git(&["update-ref", "refs/cindy/savepoints/test", &savepoint]);
+    git(&["checkout", "-q", "main"]);
+    // A real stash must stay visible without refs/stash being walked.
+    std::fs::write(folder.0.join("tracked.txt"), "one\n").unwrap();
+    git(&["add", "tracked.txt"]);
+    git(&["commit", "-m", "tracked"]);
+    std::fs::write(folder.0.join("tracked.txt"), "two\n").unwrap();
+    git(&["stash", "push", "-m", "wip"]);
+
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let path = folder.path().to_string();
+    let default = runtime.block_on(git_log(path.clone(), None, None)).unwrap();
+    assert!(default.iter().all(|c| c.hash != savepoint), "internal refs are hidden by default");
+    assert!(default.iter().any(|c| c.is_stash), "stash tips remain visible");
+    assert!(default.iter().all(|c| !c.other_refs_only));
+
+    let all = runtime.block_on(git_log(path, None, Some(true))).unwrap();
+    let flagged: Vec<_> = all.iter().filter(|c| c.other_refs_only).map(|c| c.hash.clone()).collect();
+    assert_eq!(flagged, vec![savepoint]);
+    assert!(all.iter().filter(|c| c.is_stash).all(|c| !c.other_refs_only));
 }
