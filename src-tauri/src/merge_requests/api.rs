@@ -433,7 +433,7 @@ fn client() -> Result<Client, ApiError> {
 }
 
 fn build_client(ignore_proxy: bool) -> Result<Client, ApiError> {
-    let mut builder = Client::builder()
+    let mut builder = crate::network::client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .connect_timeout(Duration::from_secs(10))

@@ -105,7 +105,7 @@ pub async fn github_token_info(url: String, token: String) -> Result<GithubToken
         return Err("请填写访问令牌".into());
     }
     let api = api_base(&url)?;
-    let client = reqwest::Client::builder()
+    let client = crate::network::client_builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
         .build()

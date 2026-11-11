@@ -2,6 +2,7 @@ mod git;
 mod daily_check;
 mod github_token;
 mod merge_requests;
+mod network;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

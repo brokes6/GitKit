@@ -2870,7 +2870,7 @@ pub async fn github_test(url: String, token: String) -> Result<String, String> {
         format!("{}/api/v3", base)
     };
     let endpoint = format!("{}/user", api);
-    let client = reqwest::Client::builder()
+    let client = crate::network::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
@@ -2909,7 +2909,7 @@ pub async fn gitlab_test(url: String, token: String) -> Result<String, String> {
         return Err("请填写访问令牌".into());
     }
     let api = format!("{}/api/v4/user", base);
-    let client = reqwest::Client::builder()
+    let client = crate::network::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
@@ -2973,7 +2973,7 @@ pub async fn gitlab_token_info(url: String, token: String) -> Result<GitlabToken
         return Err("请填写 http:// 或 https:// 开头的 GitLab 实例根地址".into());
     }
     if token.trim().is_empty() { return Err("请填写访问令牌".into()); }
-    let client = reqwest::Client::builder()
+    let client = crate::network::client_builder()
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
         .build().map_err(|_| "无法创建 GitLab 连接")?;
@@ -3306,7 +3306,7 @@ pub async fn create_pull_request(
     if path.is_empty() {
         return Err("无法从远程地址解析仓库路径".into());
     }
-    let client = reqwest::Client::builder()
+    let client = crate::network::client_builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
@@ -3406,7 +3406,7 @@ pub async fn github_create_repo(
         "description": description.trim(),
         "auto_init": false,
     });
-    let client = reqwest::Client::builder()
+    let client = crate::network::client_builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
@@ -3465,7 +3465,7 @@ pub async fn gitlab_create_repo(
     {
         return Err("请填写有效的 GitLab 实例地址".into());
     }
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(20))
+    let client = crate::network::client_builder().timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::none())
         .build().map_err(|e| e.to_string())?;
     let response = client.post(format!("{base}/api/v4/projects"))

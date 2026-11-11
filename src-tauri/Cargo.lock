@@ -1200,6 +1200,8 @@ version = "0.1.0"
 dependencies = [
  "block2",
  "chrono",
+ "core-foundation 0.10.1",
+ "hyper-util",
  "libc",
  "notify",
  "objc2-app-kit",
