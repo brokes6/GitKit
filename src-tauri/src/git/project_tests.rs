@@ -34,7 +34,7 @@ fn opening_plain_project_is_read_only_and_initialization_preserves_files() {
     assert_eq!(std::fs::read_to_string(folder.0.join("code.txt")).unwrap(), "existing content\n");
     assert!(run_git(folder.path(), &["diff", "--cached", "--name-only"]).unwrap().is_empty());
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    assert!(runtime.block_on(git_log(info.path.clone(), None, None)).unwrap().is_empty());
+    assert!(runtime.block_on(git_log(info.path.clone(), None, None, None)).unwrap().is_empty());
     assert!(runtime.block_on(git_branches(info.path.clone())).unwrap().is_empty());
     assert!(runtime.block_on(git_stash_list(info.path.clone())).unwrap().is_empty());
     let status = runtime.block_on(git_status(info.path)).unwrap();
@@ -167,13 +167,55 @@ fn history_hides_internal_refs_by_default_and_flags_them_on_request() {
 
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let path = folder.path().to_string();
-    let default = runtime.block_on(git_log(path.clone(), None, None)).unwrap();
+    let default = runtime.block_on(git_log(path.clone(), None, None, None)).unwrap();
     assert!(default.iter().all(|c| c.hash != savepoint), "internal refs are hidden by default");
     assert!(default.iter().any(|c| c.is_stash), "stash tips remain visible");
     assert!(default.iter().all(|c| !c.other_refs_only));
 
-    let all = runtime.block_on(git_log(path, None, Some(true))).unwrap();
+    let all = runtime.block_on(git_log(path, None, Some(true), None)).unwrap();
     let flagged: Vec<_> = all.iter().filter(|c| c.other_refs_only).map(|c| c.hash.clone()).collect();
     assert_eq!(flagged, vec![savepoint]);
     assert!(all.iter().filter(|c| c.is_stash).all(|c| !c.other_refs_only));
+}
+
+#[test]
+fn history_reads_patch_ids_only_on_request_and_only_for_merge_candidates() {
+    let folder = ProjectFolder::new();
+    let git = |args: &[&str]| {
+        let mut full = vec!["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null"];
+        full.extend_from_slice(args);
+        run_git(folder.path(), &full).unwrap().trim().to_string()
+    };
+    git(&["init", "--initial-branch=main"]);
+    std::fs::write(folder.0.join("base.txt"), "base\n").unwrap();
+    git(&["add", "base.txt"]);
+    git(&["commit", "-m", "base"]);
+    git(&["checkout", "-q", "-b", "feature"]);
+    std::fs::write(folder.0.join("fix.txt"), "fix\n").unwrap();
+    git(&["add", "fix.txt"]);
+    git(&["commit", "-m", "shared fix"]);
+    let original = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-q", "main"]);
+    std::fs::write(folder.0.join("main.txt"), "main\n").unwrap();
+    git(&["add", "main.txt"]);
+    git(&["commit", "-m", "main only"]);
+    git(&["cherry-pick", &original]);
+    let picked = git(&["rev-parse", "HEAD"]);
+    git(&["merge", "--no-ff", "-q", "-m", "shared fix", "feature"]);
+    let merge = git(&["rev-parse", "HEAD"]);
+
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let path = folder.path().to_string();
+    let plain = runtime.block_on(git_log(path.clone(), None, None, None)).unwrap();
+    assert_eq!(plain.len(), 5);
+    assert!(plain.iter().all(|c| c.patch_id.is_none()), "ordinary history skips patch-ids");
+
+    let smart = runtime.block_on(git_log(path, None, None, Some(true))).unwrap();
+    let id = |hash: &str| smart.iter().find(|c| c.hash == hash).unwrap().patch_id.clone();
+    assert!(id(&original).is_some());
+    assert_eq!(id(&original), id(&picked), "cherry-picks share one patch-id");
+    assert_eq!(id(&merge), None, "merge commits are never folded");
+    let with_ids = smart.iter().filter(|c| c.patch_id.is_some()).count();
+    assert_eq!(with_ids, 2, "commits with a unique subject are not diffed");
 }

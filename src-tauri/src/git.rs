@@ -125,30 +125,31 @@ fn run_git_auth(repo: &str, args: &[&str], token: Option<&str>) -> Result<String
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-/// Compute stable patch ids for the visible history in one pipeline. Feeding a
-/// single `git log -p` stream into `git patch-id --stable` avoids spawning two
-/// git processes per commit when a repository is opened. Patch ids deliberately
-/// ignore commit metadata, so cherry-picked commits with the same diff match
-/// even though their hashes and parents differ.
-fn stable_patch_ids(repo: &str, limit: u32, ref_args: &[&str]) -> Result<HashMap<String, String>, String> {
-    let max_count = format!("--max-count={limit}");
+/// Compute stable patch ids for exactly `hashes` in one pipeline. Feeding a
+/// single `git log --no-walk -p` stream into `git patch-id --stable` avoids
+/// spawning two git processes per commit. Patch ids deliberately ignore commit
+/// metadata, so cherry-picked commits with the same diff match even though
+/// their hashes and parents differ.
+fn stable_patch_ids(repo: &str, hashes: &[&str]) -> Result<HashMap<String, String>, String> {
+    if hashes.is_empty() {
+        return Ok(HashMap::new());
+    }
     let mut producer = command("git");
     producer
         .arg("-C")
         .arg(repo)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("PATH", augmented_path())
-        .arg("log")
-        .args(ref_args)
         .args([
-            "--date-order",
-            "--no-merges",
-            max_count.as_str(),
+            "log",
+            "--no-walk=unsorted",
+            "--stdin",
             "--pretty=format:commit %H",
             "-p",
             "--no-color",
             "--no-ext-diff",
         ])
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut producer = producer
@@ -167,9 +168,23 @@ fn stable_patch_ids(repo: &str, limit: u32, ref_args: &[&str]) -> Result<HashMap
         .stdin(Stdio::from(stdout))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    let consumer = match consumer.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = producer.kill();
+            let _ = producer.wait();
+            return Err(format!("无法计算提交变更标识：{e}"));
+        }
+    };
+    // Git reads every revision from stdin before walking, so writing the whole
+    // list up front cannot deadlock against the downstream pipe. A write error
+    // means Git exited early; its stderr below explains why.
+    if let Some(mut stdin) = producer.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(format!("{}\n", hashes.join("\n")).as_bytes());
+    }
     let consumer_out = consumer
-        .spawn()
-        .and_then(|child| child.wait_with_output())
+        .wait_with_output()
         .map_err(|e| format!("无法计算提交变更标识：{e}"))?;
     let producer_out = producer
         .wait_with_output()
@@ -607,7 +622,28 @@ fn split_stash_subject(raw: &str) -> (String, String) {
     (String::new(), raw.trim().to_string())
 }
 
-fn parse_commit_log(out: &str, patch_ids: &HashMap<String, String>) -> Vec<CommitInfo> {
+/// Commits Smart Merge could fold together: never stashes or merges, and only
+/// when another displayed commit shares the subject. Smart Merge also requires
+/// equal subjects (and authors), so any other commit's patch-id is never read.
+fn patch_id_candidates(commits: &[CommitInfo]) -> Vec<&str> {
+    // Match JavaScript's String.prototype.trim, which also strips U+FEFF.
+    fn subject(c: &CommitInfo) -> &str {
+        c.subject.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{feff}')
+    }
+    let eligible = |c: &&CommitInfo| !c.is_stash && c.parents.len() <= 1;
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for c in commits.iter().filter(eligible) {
+        *counts.entry(subject(c)).or_default() += 1;
+    }
+    commits
+        .iter()
+        .filter(eligible)
+        .filter(|c| counts.get(subject(c)).is_some_and(|&n| n > 1))
+        .map(|c| c.hash.as_str())
+        .collect()
+}
+
+fn parse_commit_log(out: &str) -> Vec<CommitInfo> {
     let mut commits = Vec::new();
     for rec in out.split('\x1e') {
         let rec = rec.trim_start_matches('\n');
@@ -641,7 +677,7 @@ fn parse_commit_log(out: &str, patch_ids: &HashMap<String, String>) -> Vec<Commi
             date: f[5].to_string(),
             committer_date: f[6].to_string(),
             commit_timestamp: f[7].parse().unwrap_or_default(),
-            patch_id: patch_ids.get(f[0]).cloned(),
+            patch_id: None,
             refs,
             subject: f[9].to_string(),
             body: f[10].to_string(),
@@ -708,17 +744,12 @@ pub async fn git_log(
     path: String,
     limit: Option<u32>,
     include_other_refs: Option<bool>,
+    include_patch_ids: Option<bool>,
 ) -> Result<Vec<CommitInfo>, String> {
     run_blocking(move || {
     let limit = limit.unwrap_or(400);
     let include_other_refs = include_other_refs.unwrap_or(false);
     let ref_args = history_ref_args(&path, include_other_refs);
-    // Patch-id is an enhancement: history must remain available even if an old
-    // or unusual Git installation cannot produce it.
-    let patch_ids = match stable_patch_ids(&path, limit, &ref_args) {
-        Ok(ids) => ids,
-        Err(_) => HashMap::new(),
-    };
     // Field sep \x1f, record sep \x1e.
     let fmt = "%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%aI\x1f%cI\x1f%ct\x1f%D\x1f%s\x1f%b\x1e";
     // refs/stash reaches only the newest entry. Capture every reflog tip first,
@@ -742,7 +773,7 @@ pub async fn git_log(
     log_args.extend(ref_args.iter().copied());
     log_args.extend(["--date-order", max_count.as_str(), pretty_arg.as_str()]);
     let out = run_git(&path, &log_args)?;
-    let mut res = parse_commit_log(&out, &patch_ids);
+    let mut res = parse_commit_log(&out);
 
     // Older stash tips live only in the reflog. Read exactly those commits with
     // --no-walk so their base histories are not duplicated, then date-sort the
@@ -758,7 +789,7 @@ pub async fn git_log(
         let mut args = vec!["log", "--no-walk=sorted", pretty_arg.as_str()];
         args.extend(missing_stashes);
         let older = run_git(&path, &args)?;
-        res.extend(parse_commit_log(&older, &patch_ids));
+        res.extend(parse_commit_log(&older));
         sort_commits_date_order(&mut res);
     }
 
@@ -788,6 +819,18 @@ pub async fn git_log(
         if !other_only.is_empty() {
             for c in res.iter_mut().filter(|c| !c.is_stash) {
                 c.other_refs_only = other_only.contains(&c.hash);
+            }
+        }
+    }
+
+    // Patch-ids diff every commit they cover, so only Smart Merge asks for
+    // them. They are an enhancement: history must stay available even if an
+    // old or unusual Git installation cannot produce them.
+    if include_patch_ids.unwrap_or(false) {
+        let candidates = patch_id_candidates(&res);
+        if let Ok(ids) = stable_patch_ids(&path, &candidates) {
+            for c in res.iter_mut() {
+                c.patch_id = ids.get(&c.hash).cloned();
             }
         }
     }
@@ -3895,6 +3938,7 @@ struct WatchBatch {
     paths: HashSet<String>,
     full: bool,
     refresh_roots: bool,
+    history: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -3902,6 +3946,7 @@ struct WorkingTreeChanged {
     path: String,
     paths: Vec<String>,
     full: bool,
+    history: bool,
 }
 
 fn path_in_git(p: &std::path::Path) -> bool {
@@ -3997,12 +4042,25 @@ impl WatchGitRoots {
         let relative = path.strip_prefix(&self.git_dir)
             .or_else(|_| path.strip_prefix(&self.common_dir));
         let Ok(relative) = relative else { return path_triggers_status(path); };
+        // Dropping an older stash rewrites its reflog without moving the tip.
+        if relative == std::path::Path::new("logs/refs/stash") { return true; }
         let mut parts = relative.components();
         let Some(first) = parts.next().map(|part| part.as_os_str()) else { return true; };
         first == "index" || first == "HEAD" || first == "packed-refs" || first == "refs"
-            || first == "config" || first == "config.worktree"
+            || first == "config" || first == "shallow" || first == "config.worktree"
             || local_merge::is_operation_metadata(first)
             || (first == "info" && parts.next().is_some_and(|part| part.as_os_str() == "exclude"))
+    }
+
+    fn changes_history(&self, path: &std::path::Path) -> bool {
+        let Ok(relative) = path.strip_prefix(&self.git_dir).or_else(|_| path.strip_prefix(&self.common_dir)) else {
+            return false;
+        };
+        if relative.starts_with("refs") {
+            return !relative.extension().is_some_and(|ext| ext == "lock");
+        }
+        ["HEAD", "packed-refs", "config", "config.worktree", "shallow", "logs/refs/stash"].iter()
+            .any(|name| relative == std::path::Path::new(name))
     }
 
     fn external_watch_dirs(&self, repo: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -4041,13 +4099,18 @@ fn create_repo_watcher_at(app: tauri::AppHandle, path: &str, watch_roots: RepoWa
             let mut relevant = false;
             if let Ok(mut pending_batch) = batch.lock() {
                 if ev.need_rescan() {
+                    pending_batch.history = true;
                     relevant = true;
                     pending_batch.full = true;
                     pending_batch.paths.clear();
                 }
                 for event_path in ev.paths.iter().filter(|p| roots.as_ref().map_or_else(|| path_triggers_status(p), |roots| roots.triggers_status(p))) {
                     relevant = true;
-                    if pointer_roots.pointer_changed(event_path) { pending_batch.refresh_roots = true; }
+                    if pointer_roots.pointer_changed(event_path) {
+                        pending_batch.refresh_roots = true;
+                        pending_batch.history = true;
+                    }
+                    pending_batch.history |= roots.as_ref().is_some_and(|roots| roots.changes_history(event_path));
                     if roots.as_ref().is_some_and(|roots| roots.is_metadata(event_path)) || path_in_git(event_path) {
                         pending_batch.full = true;
                         pending_batch.paths.clear();
@@ -4086,24 +4149,16 @@ fn create_repo_watcher_at(app: tauri::AppHandle, path: &str, watch_roots: RepoWa
                 let instance = Arc::clone(&callback_instance);
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(120)).await;
-                    let (paths, full, refresh_roots) = batch
-                        .lock()
-                        .map(|mut current| {
-                            let paths = current.paths.drain().collect();
-                            let full = current.full;
-                            let refresh_roots = current.refresh_roots;
-                            current.full = false;
-                            current.refresh_roots = false;
-                            (paths, full, refresh_roots)
-                        })
-                        .unwrap_or_else(|_| (Vec::new(), true, false));
-                    // Clear before emitting: an event arriving during the status
-                    // refresh can schedule exactly one later reconciliation.
-                    pending.store(false, Ordering::Release);
-                    if refresh_roots { refresh_repo_watch(&app, &repo, instance); }
+                    let change = batch.lock().map(|mut current| {
+                        // Release the scheduling slot while still holding the batch lock,
+                        // so an arriving event always schedules another delivery.
+                        pending.store(false, Ordering::Release);
+                        std::mem::take(&mut *current)
+                    }).unwrap_or_else(|_| WatchBatch { full: true, history: true, ..Default::default() });
+                    if change.refresh_roots { refresh_repo_watch(&app, &repo, instance); }
                     let _ = app.emit(
                         "working-tree-changed",
-                        WorkingTreeChanged { path: repo, paths, full },
+                        WorkingTreeChanged { path: repo, paths: change.paths.into_iter().collect(), full: change.full, history: change.history },
                     );
                 });
             }
@@ -4225,10 +4280,9 @@ pub fn suspend_project_watches(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod watch_tests {
     use super::{
-        parse_commit_log, path_triggers_status, remote_web_url, repo_path_from_remote, sort_commits_date_order,
+        parse_commit_log, patch_id_candidates, path_triggers_status, remote_web_url, repo_path_from_remote, sort_commits_date_order,
         split_stash_subject, CommitInfo,
     };
-    use std::collections::HashMap;
     use std::path::Path;
 
     fn commit(hash: &str, parents: &[&str], timestamp: i64) -> CommitInfo {
@@ -4250,6 +4304,22 @@ mod watch_tests {
             stash_branch: None,
             other_refs_only: false,
         }
+    }
+
+    #[test]
+    fn patch_id_candidates_skip_stashes_merges_and_unique_subjects() {
+        let mut same_a = commit("a", &["base"], 3);
+        same_a.subject = " fix \u{feff}".into();
+        let mut same_b = commit("b", &[], 2);
+        same_b.subject = "fix".into();
+        let mut merge = commit("m", &["a", "b"], 4);
+        merge.subject = "fix".into();
+        let mut stash = commit("s", &["a"], 5);
+        stash.subject = "fix".into();
+        stash.is_stash = true;
+        let unique = commit("u", &["a"], 1);
+        let commits = vec![merge, stash, same_a, same_b, unique];
+        assert_eq!(patch_id_candidates(&commits), vec!["a", "b"]);
     }
 
     #[test]
@@ -4319,7 +4389,7 @@ mod watch_tests {
     #[test]
     fn parses_commit_timestamp_without_shifting_refs_or_message() {
         let raw = "full\x1fshort\x1fparent\x1fTest\x1ftest@example.com\x1f2026-09-14T00:00:00Z\x1f2026-09-14T08:00:00+08:00\x1f1789344000\x1fHEAD -> main, tag: v1\x1fsubject\x1fbody\x1e";
-        let commits = parse_commit_log(raw, &HashMap::new());
+        let commits = parse_commit_log(raw);
 
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].commit_timestamp, 1_789_344_000);

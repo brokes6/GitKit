@@ -216,6 +216,15 @@ fn plain_folder_pointer_initialization_discovers_external_worktree_metadata() {
     assert!(!after.pointer_changed(&git.git_dir.join("index")));
     assert!(git.triggers_status(&git.git_dir.join("index")));
     assert!(git.triggers_status(&git.common_dir.join("refs/heads/new-linked")));
+    assert!(git.changes_history(&git.git_dir.join("HEAD")));
+    assert!(git.triggers_status(&git.common_dir.join("logs/refs/stash")));
+    for name in ["refs/heads/new-linked", "refs/remotes/origin/main", "refs/stash", "logs/refs/stash", "packed-refs", "config"] {
+        assert!(git.changes_history(&git.common_dir.join(name)), "{name}");
+    }
+    for name in ["index", "index.lock", "refs/heads/topic.lock", "logs/HEAD", "objects/01/abcd"] {
+        assert!(!git.changes_history(&git.git_dir.join(name)), "{name}");
+    }
+    assert!(!git.changes_history(&after.repo.join("HEAD")));
 }
 
 #[test]

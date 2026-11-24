@@ -56,6 +56,7 @@ import { DialogPresence, useDialogPresence } from "./DialogPresence";
 import { Skeleton, CodeSkeleton } from "./Skeleton";
 import { useProjectOverview } from "./useProjectOverview";
 import { useAppForeground } from "./useAppForeground";
+import { HistoryInsertion } from "./HistoryInsertion";
 import { useHistoryModeTransition } from "./useHistoryModeTransition";
 import { useProjectActivity } from "./useProjectActivity";
 import { applyOverviewToProjects, overviewAttentionCount } from "./projectOverview";
@@ -3385,20 +3386,13 @@ function CommitHistorySkeleton() {
   </div>;
 }
 
-/** Keep the scroll viewport and topology camera mounted while refreshing. */
+/** Keep existing history readable during a background refresh. */
 function HistoryRefreshBoundary({ refreshing, children }: { refreshing: boolean; children: React.ReactNode }) {
   const t = useTheme();
-  return <div className="gk-history-refresh relative flex flex-1 min-w-0 min-h-0 overflow-hidden"
-    data-refreshing={refreshing} style={{ isolation: "isolate" }}>
-    <div className="gk-history-refresh-content flex flex-1 flex-col min-w-0 min-h-0" aria-hidden={refreshing || undefined}
-      ref={element => { if (element) element.inert = refreshing; }}
-      style={{ visibility: refreshing ? "hidden" : undefined, opacity: refreshing ? 0 : undefined }}>
-      <HistoryRefreshCtx.Provider value={refreshing}>{children}</HistoryRefreshCtx.Provider>
-    </div>
-    <div className="gk-history-refresh-overlay absolute inset-0 overflow-hidden" aria-hidden={!refreshing}
-      style={{ background: t.bgPanel, zIndex: 1 }}>
-      <CommitHistorySkeleton />
-    </div>
+  return <div className="relative flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
+    <HistoryRefreshCtx.Provider value={refreshing}>{children}</HistoryRefreshCtx.Provider>
+    {refreshing && <span role="status" className="pointer-events-none absolute right-3 top-2 z-10 rounded px-2 py-1 text-xs"
+      style={{ background: t.bgPanel, color: t.textMuted }}>{tx("正在刷新")}</span>}
   </div>;
 }
 
@@ -6670,6 +6664,8 @@ export default function App() {
   const [commitFilesReading, setCommitFilesReading] = useState<{ path: string; hash: string; requestId: number } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [smartMerge, setSmartMerge] = useState(() => localStorage.getItem("gitkit.smartMerge") !== "0");
+  // Read by history loads, which only request patch-ids while Smart Merge is on.
+  const smartMergeRef = useRef(smartMerge);
   const [expandedSmartRows, setExpandedSmartRows] = useState<Set<string>>(() => new Set());
   useEffect(() => { localStorage.setItem("gitkit.smartMerge", smartMerge ? "1" : "0"); }, [smartMerge]);
   // Commits reachable only from refs outside branches/tags (e.g. app savepoints)
@@ -6863,6 +6859,17 @@ export default function App() {
     }
     setReloadTick((n) => n + 1);
   };
+  const changeSmartMerge = (next: boolean) => {
+    if (next === smartMergeRef.current) return;
+    smartMergeRef.current = next;
+    startTransition(() => setSmartMerge(next));
+    // Histories read while Smart Merge was off carry no patch-ids, so re-read
+    // them. Switching it off keeps the cache: the extra ids are harmless.
+    if (next) {
+      realCache.current.clear();
+      setReloadTick((n) => n + 1);
+    }
+  };
   // Per-repo `git log --max-count`, grown on demand as the timeline is scrolled.
   const historyLimits = useRef<Map<string, number>>(new Map());
   // Commit list a larger read failed to extend (shallow clone, parent outside the
@@ -6890,7 +6897,6 @@ export default function App() {
   activePathRef.current = activeProject?.path;
   const lastLoadedPath = useRef<string | null>(null);   // to tell a switch from a refresh
   const pendingViewReset = useRef(false);                // branch-changing reloads force a view reset
-  const pendingJumpLatest = useRef(false);               // fetch/pull → jump to the newest commit
   const hiddenBranchesRef = useRef(hiddenBranches);
   hiddenBranchesRef.current = hiddenBranches;
   const focusBranchRef = useRef(focusBranch);
@@ -7196,16 +7202,18 @@ export default function App() {
   // Raw topology can place another branch's whole lane above the current HEAD.
   // When Smart Merge is switched off, anchor the viewport to the checked-out
   // branch so users can inspect the truth without having to hunt for it.
+  const currentHeadRef = useRef<string>();
+  currentHeadRef.current = branches.find((branch) => branch.current)?.head;
   useEffect(() => {
-    if (historyMode === "topology" || smartMergeActive || focusActive || !dataReady) return;
-    const head = branches.find((branch) => branch.current)?.head;
+    if (historyMode === "topology" || smartMerge || focusActive || !dataReady) return;
+    const head = currentHeadRef.current;
     if (!head) return;
     const frame = requestAnimationFrame(() => {
       const row = timelineScrollRef.current?.querySelector<HTMLElement>(`[data-commit-hash="${head}"]`);
       row?.scrollIntoView({ block: "center" });
     });
     return () => cancelAnimationFrame(frame);
-  }, [historyMode, smartMergeActive, focusActive, dataReady, branches]);
+  }, [historyMode, smartMerge, focusActive, dataReady, activeProject?.path]);
 
   // Read further back in time without the full-refresh skeleton: re-run `git log`
   // with a larger --max-count and swap in the longer commit list + graph. Branch
@@ -7220,7 +7228,7 @@ export default function App() {
     if (limit === null) return;
     setHistoryLoadingMore(true);
     try {
-      const [allBranches, commitList] = await Promise.all([loadBranches(repoPath, true), loadHistory(repoPath, limit, showOtherRefsRef.current)]);
+      const [allBranches, commitList] = await Promise.all([loadBranches(repoPath, true), loadHistory(repoPath, limit, showOtherRefsRef.current, smartMergeRef.current)]);
       const latest = realCache.current.get(repoPath);
       // A reload / branch change replaced the data while we were reading: drop this page.
       if (!latest || latest.commits !== base.commits) return;
@@ -7608,6 +7616,11 @@ export default function App() {
     }
   };
 
+  // Watch events still invalidate cached history while the WebView is in the
+  // background. Defer the read until this repository is visible again.
+  const pendingHistoryRefresh = useRef<string | null>(null);
+  const failedHistoryWatches = useRef(new Set<string>());
+  const historyListenerFailed = useRef(false);
   const dropWatcherRef = useRef<(repoPath: string) => void>(() => {});
   dropWatcherRef.current = (repoPath) => {
     watchedPaths.current = watchedPaths.current.filter((candidate) => candidate !== repoPath);
@@ -7616,6 +7629,9 @@ export default function App() {
     if (job) job.rerun = false;
     if (!job?.inFlight) statusJobs.current.delete(repoPath);
     workingCache.current.delete(repoPath);
+    // There will be no notifications while this repository is unwatched.
+    realCache.current.delete(repoPath);
+    failedHistoryWatches.current.delete(repoPath);
     void stopWatch(repoPath).catch(() => {});
   };
 
@@ -7626,30 +7642,25 @@ export default function App() {
     let unlisten: (() => void) | null = null;
     listen<WorkingTreeChanged>("working-tree-changed", (event) => {
       const change = event.payload;
-      if (!stopped && appForegroundRef.current && watchedPaths.current.includes(change.path)) {
+      if (stopped) return;
+      if (change.history) {
+        realCache.current.delete(change.path);
+        if (change.path === activePathRef.current) {
+          if (appForegroundRef.current) setReloadTick((n) => n + 1);
+          else pendingHistoryRefresh.current = change.path;
+        }
+      }
+      if (appForegroundRef.current && watchedPaths.current.includes(change.path)) {
         scheduleWorkingStatusRef.current(change.path, false, change.paths, change.full);
       }
-    }).then((fn) => { if (stopped) fn(); else unlisten = fn; }).catch(() => {});
-
-    const refreshActive = () => {
-      if (!appForegroundRef.current) return;
-      const active = activePathRef.current;
-      if (!active) return;
-      if (uninitializedRef.current) {
-        // A project may have been initialized outside GitKit while unfocused.
-        realCache.current.delete(active);
-        setReloadTick((n) => n + 1);
-      } else if (watchedPaths.current.includes(active)) scheduleWorkingStatusRef.current(active, true);
-    };
-    const onVisibility = () => { if (document.visibilityState === "visible") refreshActive(); };
-    window.addEventListener("focus", refreshActive);
-    document.addEventListener("visibilitychange", onVisibility);
+    }).then((fn) => {
+      if (stopped) fn();
+      else { unlisten = fn; historyListenerFailed.current = false; }
+    }).catch(() => { if (!stopped) historyListenerFailed.current = true; });
 
     return () => {
       stopped = true;
       if (unlisten) unlisten();
-      window.removeEventListener("focus", refreshActive);
-      document.removeEventListener("visibilitychange", onVisibility);
       if (warmWatchTimer.current !== null) window.clearTimeout(warmWatchTimer.current);
       for (const job of statusJobs.current.values()) {
         if (job.timer !== null) window.clearTimeout(job.timer);
@@ -7669,6 +7680,12 @@ export default function App() {
       }
       return;
     }
+    const active = activePathRef.current;
+    if (active && (pendingHistoryRefresh.current === active || uninitializedRef.current || historyListenerFailed.current || failedHistoryWatches.current.has(active))) {
+      realCache.current.delete(active);
+      setReloadTick((n) => n + 1);
+    }
+    pendingHistoryRefresh.current = null;
     for (const watched of watchedPaths.current) scheduleWorkingStatusRef.current(watched, true);
   }, [appForeground, appFocusRevision]);
 
@@ -7678,7 +7695,7 @@ export default function App() {
   useEffect(() => {
     if (!path || !gitAvailable) {
       if (!path) for (const watched of [...watchedPaths.current]) dropWatcherRef.current(watched);
-      if (path && watchedPaths.current.includes(path)) dropWatcherRef.current(path);
+      if (path && dataReady && watchedPaths.current.includes(path)) dropWatcherRef.current(path);
       return;
     }
 
@@ -7693,7 +7710,8 @@ export default function App() {
     }
     watchedPaths.current = next;
     void startWatch(path)
-      .catch(() => {})
+      .then(() => { failedHistoryWatches.current.delete(path); })
+      .catch(() => { if (watchedPaths.current.includes(path)) failedHistoryWatches.current.add(path); })
       .finally(() => {
         if (appForegroundRef.current && watchedPaths.current.includes(path)) scheduleWorkingStatusRef.current(path, true);
       });
@@ -7706,7 +7724,7 @@ export default function App() {
           if (activePathRef.current !== warm) dropWatcherRef.current(warm);
         }, WARM_WATCH_TTL_MS)
       : null;
-  }, [path, gitAvailable]);
+  }, [path, gitAvailable, dataReady]);
 
   // Closing a project releases its watcher immediately instead of waiting for
   // LRU replacement or the warm-slot timeout.
@@ -7727,21 +7745,17 @@ export default function App() {
     }
     let cancelled = false;
 
-    // Select the newest commit (and load its first readable file). With `open`,
-    // also surface it in the detail pane and scroll the timeline to the top —
-    // used after a fetch/pull to jump to the latest commit.
-    const preselect = async (data: RealData, open = false) => {
+    // Select an initial commit when entering a repository or explicitly switching branches.
+    const preselect = async (data: RealData) => {
       const requestId = ++commitDiffRequestRef.current;
       // A same-repository refresh can replace this effect while the selected
       // commit is still loading. Its detail read belongs to the selection.
       const currentSelection = () => activePathRef.current === path && requestId === commitDiffRequestRef.current;
-      if (open) { setViewChanges(false); setDetailClosing(false); setDetailOpen(true); }
       setSelectedFile(null); setSelectedWorkingFile(null);
       const first = data.commits[0] ?? null;
       if (!first) { setSelectedCommit(null); return; }
       setSelectedCommit(first);
       setCommitFilesReading({ path, hash: first.fullHash, requestId });
-      if (open) requestAnimationFrame(() => timelineScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
       try {
         const files = await loadCommitFiles(path, first.fullHash);
         const additions = files.reduce((s, f) => s + f.additions, 0);
@@ -7773,6 +7787,8 @@ export default function App() {
     // Default the view to 全部视图 (all branches), detail closed (only on switch /
     // branch change — a plain fetch/pull refresh keeps the user where they are).
     const applyView = (_data: RealData) => {
+      lastLoadedPath.current = path;
+      pendingViewReset.current = false;
       setFocusBranch(null);
       setViewChanges(false);
       setSelectedStash(null); setSelectedStashFile(null);
@@ -7788,11 +7804,8 @@ export default function App() {
     // Switching projects (or a branch-changing reload) resets the view;
     // a same-repo refresh (fetch/pull/push) preserves selection + detail.
     const isSwitch = lastLoadedPath.current !== path;
-    lastLoadedPath.current = path;
+    // A watcher may supersede this read. Consume the reset only when applied.
     const resetView = isSwitch || pendingViewReset.current;
-    pendingViewReset.current = false;
-    const jumpLatest = pendingJumpLatest.current;   // after fetch/pull → go to newest commit
-    pendingJumpLatest.current = false;
 
     const cached = realCache.current.get(path);
     if (cached) {
@@ -7806,7 +7819,6 @@ export default function App() {
         setWorkingSnapshot({ path, files: workingCache.current.get(path) ?? latest.working });
         syncBranch(latest);
         if (resetView) { applyView(latest); preselect(latest); }
-        else if (jumpLatest) preselect(latest, true);
       };
       // Switch → defer the big timeline render (no freeze); refresh → urgent.
       if (isSwitch) startSwitch(apply); else apply();
@@ -7838,7 +7850,7 @@ export default function App() {
         const [historyBranches, remoteList, commitList, working, stashList_] = await Promise.all([
           loadBranches(path, true),
           loadRemotes(path),
-          loadHistory(path, historyLimits.current.get(path) ?? HISTORY_PAGE_SIZE, showOtherRefsRef.current),
+          loadHistory(path, historyLimits.current.get(path) ?? HISTORY_PAGE_SIZE, showOtherRefsRef.current, smartMergeRef.current),
           statusPromise,
           stashList(path),
         ]);
@@ -7859,7 +7871,6 @@ export default function App() {
           setRealData(data);
           syncBranch(data);
           if (resetView) { applyView(data); preselect(data); }
-          else if (jumpLatest) preselect(data, true);
         };
         if (isSwitch) startSwitch(apply); else apply();
       } catch (e) {
@@ -8235,12 +8246,6 @@ export default function App() {
         if (current && s.diverged.includes(current.name)) mergeUpstream = current.remote;
       } else if (kind === "pull") await pull(p, token, opId, updateOperationProgress);
       else await push(p, token);
-      // The user may browse another project while this runs. Refresh/jump only
-      // when the originating repo is still active; its invalidated cache will
-      // reload naturally the next time it is selected otherwise.
-      if (activePathRef.current === p) {
-        if (kind === "fetch" || kind === "pull") pendingJumpLatest.current = true;
-      }
       if (needsAttention) {
         // Not a clean success: something was left for the user to resolve.
         toast.warning(tf("{0}完成", verbs[kind]), {
@@ -8455,7 +8460,6 @@ export default function App() {
   const doPullUpdates = async (ids: string[]) => {
     if (!updateRows || pullBusy) return;
     setPullBusy(true);
-    let touchedActive = false;
     const resultId = checkSnapshot?.result?.id;
     const synced = new Map<string, string[]>();
     for (const id of ids) {
@@ -8473,7 +8477,6 @@ export default function App() {
           ? { ...r, state: s.synced.length ? "done" : "failed", detail: parts.join(" · ") || tx("没有可快进的分支") }
           : r) ?? null);
         realCache.current.delete(row.path);
-        if (row.path === activeProject?.path) touchedActive = true;
       } catch (e) {
         setUpdateRows((prev) => prev?.map((r) => r.id === id ? { ...r, state: "failed", detail: String(e) } : r) ?? null);
       }
@@ -8516,7 +8519,6 @@ export default function App() {
       }
     }));
     setPullBusy(false);
-    if (touchedActive) pendingJumpLatest.current = true;
     setReloadTick((n) => n + 1);
   };
 
@@ -9500,10 +9502,12 @@ export default function App() {
                 style={{ borderBottom: `0.5px solid ${theme.border}`, background: "transparent" }}>
                 <span className="text-xs font-medium" style={{ color: theme.textSec }}>{tx("提交历史")}</span>
                 <HistoryModeSwitch mode={historyLayoutMode} onChange={changeHistoryMode} />
-                {historyMode === "list" && !focusActive && smartMergeResult.mergedGroups > 0 && (
+                {/* Patch-ids load only while Smart Merge is on, so mergeable groups are
+                    unknown when it is off: keep the switch reachable in list mode. */}
+                {gitAvailable && commits.length > 0 && historyMode === "list" && !focusActive && (
                   <button type="button" aria-pressed={smartMerge}
                     title={tx("仅合并相同变更的展示，不会修改 Git 历史")}
-                    onClick={() => startTransition(() => setSmartMerge((on) => !on))}
+                    onClick={() => changeSmartMerge(!smartMerge)}
                     className="flex items-center gap-1.5 px-2 py-1.5 text-[11px] font-semibold cursor-pointer flex-shrink-0"
                     style={{
                       color: smartMerge ? theme.accent2Fg : theme.textMuted,
@@ -9558,7 +9562,7 @@ export default function App() {
                   <span className="text-[11px] truncate" style={{ color: theme.accent2Fg }}>
                     {tf("已将 {0} 组相同变更合并展示，不会修改 Git 历史", smartMergeResult.mergedGroups)}
                   </span>
-                  <button type="button" onClick={() => startTransition(() => setSmartMerge(false))}
+                  <button type="button" onClick={() => changeSmartMerge(false)}
                     className="ml-auto text-[11px] cursor-pointer flex-shrink-0"
                     style={{ color: theme.accent2Fg }}>
                     {tx("查看原始提交")}
@@ -9617,7 +9621,9 @@ export default function App() {
                       ...(isReal ? [{ label: tx("Cherry-pick 到当前分支"), Icon: GitCommit, onClick: () => requestCherryPick(commit) } as CtxItem] : []),
                     ])} />
                 ) : (
-                  <div key={`${activeProject?.path}:${timelineHiddenBranches.join("\u0000")}`}
+                  <HistoryInsertion commits={displayCommits} viewport={timelineScrollRef}
+                    scope={JSON.stringify([historyContextKey, currentBranch, smartMerge, showOtherRefs])}
+                    key={`${activeProject?.path}:${timelineHiddenBranches.join("\u0000")}`}
                     className={historyRevealContext === historyContextKey ? "gk-history-mode-reveal" : "gk-reveal"}>
                     {/* A branch sitting exactly on its base has no commits of its
                         own — say so instead of rendering an empty timeline. */}
@@ -9666,7 +9672,7 @@ export default function App() {
                         {historyLoadingMore ? tx("正在加载更早的提交…") : tx("加载更早的提交")}
                       </button>
                     )}
-                  </div>
+                  </HistoryInsertion>
                 )}
                 {/* Fork-point footer — where this branch was created from */}
                 {dataReady && focusActive && focusInfo?.base && (

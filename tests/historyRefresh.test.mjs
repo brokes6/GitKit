@@ -38,7 +38,7 @@ function harness(history = async () => [], info = { initialized: true, has_head:
     React, HistoryRefreshCtx: React.createContext(false), useTheme: () => ({}), tx: value => value, Skeleton: () => null,
     branchColor, createBranchColors, realData: state.data, hiddenBranchesRef: { current: [] },
     path: "/repo", lastLoadedPath: { current: "/repo" },
-    pendingViewReset: { current: false }, pendingJumpLatest: { current: false },
+    pendingViewReset: { current: false }, smartMergeRef: { current: false },
     commitDiffRequestRef: { current: 0 }, activePathRef: { current: "/repo" },
     realCache: { current: new Map() }, workingCache: { current: new Map() },
     historyLimits: { current: new Map() }, HISTORY_PAGE_SIZE: 400, showOtherRefsRef: { current: false },
@@ -136,41 +136,20 @@ test("a cache hit and a project without a Git repository never leave loading act
   assert.equal(plain.state.data.initialized, false);
 });
 
-test("the refresh skeleton retains the mounted viewport and blocks hidden interactions", () => {
+test("refresh keeps the same interactive viewport alongside a nonblocking status", () => {
   const { context } = harness();
   const viewport = React.createElement("div", { key: "viewport" });
-  const loading = context.HistoryRefreshBoundary({ refreshing: true, children: viewport });
-  const [content, overlay] = React.Children.toArray(loading.props.children);
-  assert.equal(content.props.children.type, context.HistoryRefreshCtx.Provider);
-  assert.equal(content.props.children.props.value, true);
-  assert.equal(content.props.children.props.children, viewport);
-  assert.equal(content.props.style.visibility, "hidden");
-  assert.equal(content.props.style.opacity, 0);
-  assert.equal(loading.props.style.isolation, "isolate");
-  assert.equal(loading.props["data-refreshing"], true);
-  assert.equal(content.props["aria-hidden"], true);
-  const element = {};
-  content.ref(element);
-  assert.equal(element.inert, true);
-  assert.equal(overlay.props.children.type, context.CommitHistorySkeleton);
-  assert.equal(overlay.props.style.zIndex, 1);
-  assert.equal(overlay.props["aria-hidden"], false);
-  const ready = context.HistoryRefreshBoundary({ refreshing: false, children: viewport });
-  const [visible, fadingOverlay] = React.Children.toArray(ready.props.children);
-  assert.equal(visible.props.children.props.value, false);
-  assert.equal(visible.props.children.props.children, viewport);
-  visible.ref(element);
-  assert.equal(element.inert, false);
-  assert.equal(visible.props.style.visibility, undefined);
-  assert.equal(visible.props.style.opacity, undefined);
-  assert.equal(ready.props["data-refreshing"], false);
-  assert.equal(fadingOverlay.props["aria-hidden"], true);
-  assert.equal(fadingOverlay.props.children.type, context.CommitHistorySkeleton);
-  assert.equal(fadingOverlay.type, overlay.type);
-  const restarted = context.HistoryRefreshBoundary({ refreshing: true, children: viewport });
-  const [hiddenAgain, resumedOverlay] = React.Children.toArray(restarted.props.children);
-  assert.equal(hiddenAgain.props.style.opacity, 0);
-  assert.equal(resumedOverlay.props["aria-hidden"], false);
+  for (const refreshing of [true, false]) {
+    const boundary = context.HistoryRefreshBoundary({ refreshing, children: viewport });
+    const [content, status] = boundary.props.children;
+    assert.equal(content.props.children, viewport);
+    assert.equal(boundary.props.inert, undefined);
+    assert.equal(boundary.props["aria-hidden"], undefined);
+    if (refreshing) {
+      assert.equal(status.props.role, "status");
+      assert.match(status.props.className, /pointer-events-none/);
+    } else assert.equal(status, false);
+  }
 });
 
 test("a reload keeps the history depth the user already scrolled to", async () => {
@@ -193,4 +172,51 @@ test("history is read without internal refs unless the user switched them on", a
   context.showOtherRefsRef.current = true;
   start(); await flush();
   assert.deepEqual(flags, [false, true]);
+});
+
+test("ref notifications invalidate the right history while file-only events keep it cached", () => {
+  let listenerEffect, foregroundEffect;
+  const findListener = node => {
+    if (ts.isCallExpression(node) && node.expression.getText(app) === "useEffect"
+      && node.arguments[0].getText(app).includes('"working-tree-changed"')) listenerEffect = node.arguments[0];
+    if (ts.isCallExpression(node) && node.expression.getText(app) === "useEffect"
+      && node.arguments[1]?.getText(app) === "[appForeground, appFocusRevision]") foregroundEffect = node.arguments[0];
+    ts.forEachChild(node, findListener);
+  };
+  findListener(app);
+  let receive;
+  let reloads = 0;
+  const statuses = [];
+  const cache = new Map([["/repo", {}], ["/warm", {}]]);
+  const foreground = { current: true }, pending = { current: null };
+  const js = ts.transpileModule(`globalThis.attach = ${listenerEffect.getText(app)}; globalThis.resume = ${foregroundEffect.getText(app)};`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText;
+  const context = { listen: (_, fn) => { receive = fn; return Promise.resolve(() => {}); },
+    realCache: { current: cache }, activePathRef: { current: "/repo" }, appForegroundRef: foreground,
+    watchedPaths: { current: ["/repo", "/warm"] }, pendingHistoryRefresh: pending, historyListenerFailed: { current: false },
+    scheduleWorkingStatusRef: { current: path => statuses.push(path) }, setReloadTick: () => reloads++ };
+  runInNewContext(js, context);
+  context.attach();
+  const emit = (path, history) => receive({ payload: { path, paths: [], full: true, history } });
+  emit("/repo", false);
+  emit("/warm", true);
+  assert.equal(cache.has("/repo"), true);
+  assert.equal(cache.has("/warm"), false);
+  assert.equal(reloads, 0);
+  emit("/repo", true);
+  assert.equal(cache.has("/repo"), false);
+  assert.equal(reloads, 1);
+  foreground.current = false;
+  emit("/repo", true);
+  assert.equal(reloads, 1);
+  assert.equal(pending.current, "/repo");
+  assert.deepEqual(statuses, ["/repo", "/warm", "/repo"]);
+  Object.assign(context, { appForeground: true, uninitializedRef: { current: false },
+    failedHistoryWatches: { current: new Set() } });
+  context.resume();
+  assert.equal(reloads, 2);
+  assert.equal(pending.current, null);
+  context.resume();
+  assert.equal(reloads, 2);
 });

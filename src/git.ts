@@ -56,6 +56,7 @@ export interface RepoInfo {
   has_head: boolean;
 }
 export interface WorkingTreeChanged {
+  history: boolean;
   path: string;
   paths: string[];
   full: boolean;
@@ -477,8 +478,11 @@ export async function loadHistory(
   path: string,
   limit: number = HISTORY_PAGE_SIZE,
   includeOtherRefs = false,
+  // Patch-ids diff each candidate commit, so only Smart Merge requests them.
+  // Without this flag every commit's `patchId` is undefined.
+  includePatchIds = false,
 ): Promise<Commit[]> {
-  const raw = await invoke<RCommit[]>("git_log", { path, limit, includeOtherRefs });
+  const raw = await invoke<RCommit[]>("git_log", { path, limit, includeOtherRefs, includePatchIds });
   return raw.map((c) => ({
     hash: c.short_hash,
     fullHash: c.hash,
