@@ -80,6 +80,7 @@ pub fn run() {
             git::git_status,
             git::git_status_paths,
             git::git_staging_status,
+            git::git_ignore_untracked,
             git::git_stage_files,
             git::git_unstage_files,
             git::commit_files,

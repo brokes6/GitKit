@@ -4,6 +4,11 @@ import nativeTranslations from "./i18n-native.json" with { type: "json" };
 export type Language = "zh-CN" | "en";
 
 const EN: Record<string, string> = {
+  "在此仓库忽略": "Ignore in this repository",
+  "在此仓库忽略此文件": "Ignore this file locally",
+  "忽略目录 {0}/": "Ignore directory {0}/ locally",
+  "正在添加忽略规则…": "Adding local ignore rule…",
+  "忽略失败：{0}": "Could not ignore: {0}",
   "GitLab 未保留全部成员选择，请检查成员权限、实例版本与人数限制，已同步实际成员": "GitLab did not retain every selected member. Check member permissions, instance version, and selection limits. The actual members have been synced.",
   "编辑审核者": "Edit reviewers",
   "编辑指派人": "Edit assignees",

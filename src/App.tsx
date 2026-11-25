@@ -30,7 +30,7 @@ import {
 } from "lucide-react";
 import {
   invoke, pickRepoFolder, openRepo, initRepo, loadBranches, loadRemotes, loadHistory,
-  loadStatus, loadWorkingStatus, stageFiles, unstageFiles, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
+  loadStatus, loadWorkingStatus, ignoreUntracked, stageFiles, unstageFiles, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
   attributeBranches, filterHistoryByHiddenBranches, historyBranchContext, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
   createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, undoCommitPreview, undoLastCommit, fetchAll, pull, push, forcePushTarget, forcePushPreview, forcePush, gitlabTest, gitlabTokenInfo, githubTokenInfo,
   createPullRequest, BranchInUseError, branchColor, createBranchColors, checkForUpdate, getAppVersion, discardFile, discardAll,
@@ -3057,9 +3057,10 @@ function StashDetail({ stash, files, selectedFile, onFileSelect, onExpand, onApp
 
 // ─── WorkingFileRow ───────────────────────────────────────────────────────────
 
-function WorkingFileRow({ file, selected, disabled, onSelect, onStage, onUnstage, onDiscard }: {
+function WorkingFileRow({ file, selected, disabled, onSelect, onStage, onUnstage, onDiscard, onIgnore }: {
   file: WorkingFile; selected: boolean; onSelect: () => void;
   disabled?: boolean;
+  onIgnore?: (event: React.MouseEvent) => void;
   onStage?: () => void; onUnstage?: () => void; onDiscard?: () => void;
 }) {
   const t = useTheme();
@@ -3074,6 +3075,7 @@ function WorkingFileRow({ file, selected, disabled, onSelect, onStage, onUnstage
         borderRadius: R - 2 }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onContextMenu={disabled ? undefined : onIgnore}
       onClick={onSelect}>
       <span className="text-[12px] font-mono font-bold w-3 text-center flex-shrink-0" style={{ color: statusColor }}>
         {statusLabel}
@@ -3087,6 +3089,10 @@ function WorkingFileRow({ file, selected, disabled, onSelect, onStage, onUnstage
       </div>
       {(
         <div className="flex items-center gap-1 flex-shrink-0 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
+          {onIgnore && <button type="button" disabled={disabled} title={tx("在此仓库忽略")} aria-label={tx("在此仓库忽略")}
+            className="flex items-center justify-center w-5 h-5 cursor-pointer"
+            style={{ background: t.inputBg, color: t.textMuted, borderRadius: 6 }}
+            onClick={(e) => { e.stopPropagation(); onIgnore(e); }}><EyeOff size={11} /></button>}
           {onDiscard && (
             <button disabled={disabled} onClick={(e) => { e.stopPropagation(); onDiscard(); }}
               className="flex items-center justify-center w-5 h-5 transition-colors"
@@ -3159,7 +3165,7 @@ function ChangesSectionHeader({ label, count, action, onAction, onReset, disable
 }
 
 function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStage, onUnstage, busy, operationActive,
-  identities, defaultIdentityId, projectKey, onCommit, onConfigureIdentity, onDiscard, onDiscardAll }: {
+  identities, defaultIdentityId, projectKey, onCommit, onConfigureIdentity, onIgnore, onDiscard, onDiscardAll }: {
   files: WorkingFile[]; selectedFile: WorkingFile | null;
   onFileSelect: (f: WorkingFile | null) => void;
   currentBranch: string; busy: boolean;
@@ -3168,6 +3174,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
   identities: Identity[]; defaultIdentityId: string; projectKey: string;
   onCommit: (message: string, files: WorkingFile[], identity: Identity | null) => Promise<void>;
   onConfigureIdentity: () => void;
+  onIgnore: (event: React.MouseEvent, file: string) => void;
   onDiscard: (file: string) => void; onDiscardAll: () => void;
 }) {
   const t = useTheme();
@@ -3249,6 +3256,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
               <WorkingFileRow key={workingFileKey(f)} file={f} disabled={locked}
                 selected={isSelected(f)}
                 onSelect={() => onFileSelect(isSelected(f) ? null : f)}
+                onIgnore={f.status === "untracked" ? (event) => onIgnore(event, f.path) : undefined}
                 onStage={() => { void onStage([f.path]); }}
                 onDiscard={operationActive || (f.hasStaged && staged.some((row) => row.path === f.path && (row.status === "added" || row.status === "renamed"))) ? undefined : () => onDiscard(f.path)} />
             ))}
@@ -8522,24 +8530,40 @@ export default function App() {
     setReloadTick((n) => n + 1);
   };
 
-  // Index mutations share the UI operation guard and reconcile native status.
-  const doStage = async (files: string[], staged: boolean) => {
+  const updateWorkingFiles = async (label: string, errorMessage: (error: unknown) => string, mutate: (path: string) => Promise<WorkingFile[]>) => {
     if (!activeProject || gitBusy || busyLabel || workingOperationRef.current) return;
     const repoPath = activeProject.path;
     workingOperationRef.current = true;
     workingMutationEpoch.current.set(repoPath, (workingMutationEpoch.current.get(repoPath) ?? 0) + 1);
-    setBusyLabel(staged ? tx("正在暂存…") : tx("正在取消暂存…"));
+    setBusyLabel(label);
     try {
-      const fresh = await (staged ? stageFiles(repoPath, files) : unstageFiles(repoPath, files));
+      const fresh = await mutate(repoPath);
       applyWorkingStatusRef.current(repoPath, fresh);
     } catch (error) {
-      toast.error(staged ? tf("暂存失败：{0}", error) : tf("取消暂存失败：{0}", error));
+      toast.error(errorMessage(error));
     } finally {
       workingMutationEpoch.current.set(repoPath, (workingMutationEpoch.current.get(repoPath) ?? 0) + 1);
       scheduleWorkingStatusRef.current(repoPath, true);
       workingOperationRef.current = false;
       setBusyLabel(null);
     }
+  };
+
+  const doStage = (files: string[], staged: boolean) => updateWorkingFiles(
+    staged ? tx("正在暂存…") : tx("正在取消暂存…"),
+    error => staged ? tf("暂存失败：{0}", error) : tf("取消暂存失败：{0}", error),
+    repo => staged ? stageFiles(repo, files) : unstageFiles(repo, files));
+
+  const openIgnoreMenu = (event: React.MouseEvent, file: string) => {
+    const ignore = (directory: boolean) => {
+      if (activePathRef.current !== path) return;
+      void updateWorkingFiles(tx("正在添加忽略规则…"), error => tf("忽略失败：{0}", error),
+        repo => ignoreUntracked(repo, file, directory));
+    };
+    const items: CtxItem[] = [{ label: tx("在此仓库忽略此文件"), Icon: EyeOff, onClick: () => ignore(false) }];
+    const slash = file.lastIndexOf("/");
+    if (slash > 0) items.push({ label: tf("忽略目录 {0}/", file.slice(0, slash)), Icon: Folder, onClick: () => ignore(true) });
+    openCtx(event, items);
   };
 
   // Commit the reviewed index with the chosen identity (or repository config).
@@ -9766,6 +9790,7 @@ export default function App() {
                         busy={!!gitBusy || !!busyLabel || confirmBusy}
                         onStage={(files) => doStage(files, true)}
                         onUnstage={(files) => doStage(files, false)}
+                        onIgnore={openIgnoreMenu}
                         onDiscard={doDiscardFile}
                         onDiscardAll={doDiscardAll}
                         />

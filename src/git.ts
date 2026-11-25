@@ -526,6 +526,10 @@ export async function loadStatusPaths(path: string, paths: string[]): Promise<Wo
   return (await loadWorkingStatus(path, paths)).files;
 }
 
+export async function ignoreUntracked(path: string, file: string, directory: boolean): Promise<WorkingFile[]> {
+  return mapWorkingStatus(await invoke<StagingStatus>("git_ignore_untracked", { path, file, directory }));
+}
+
 export async function stageFiles(path: string, files: string[]): Promise<WorkingFile[]> {
   return mapWorkingStatus(await invoke<StagingStatus>("git_stage_files", { path, files }));
 }

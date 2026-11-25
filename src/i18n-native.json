@@ -1,4 +1,10 @@
 {
+  "无法为包含换行符的路径创建忽略规则": "Cannot create an ignore rule for a path containing a newline",
+  "只能忽略当前未跟踪的文件，请刷新后重试": "Only untracked files can be ignored. Refresh and try again.",
+  "文件没有可忽略的上级目录": "This file has no parent directory to ignore",
+  "此路径被 .gitignore 显式包含，请选择忽略所在目录或调整该规则": "A .gitignore rule explicitly includes this path. Ignore its parent directory or edit that rule.",
+  "无法写入非常规的本地忽略文件": "Cannot write to a non-regular local exclude file",
+  "已添加本地规则，但文件仍有可见改动，请检查 Git 忽略规则": "Local rule added, but the file still has visible changes. Check the Git ignore rules.",
   "评论是否已添加尚未确认，请到 GitLab 核实，勿重复提交": "The comment result is unconfirmed. Check GitLab before sending again.",
   "评论位置不在当前差异中，请刷新后重新选择代码行": "The comment position is outside the current diff. Refresh and select the code line again.",
   "评论位置无效，请刷新差异后重新选择代码行": "The comment position is invalid. Refresh the diff and select the code line again.",

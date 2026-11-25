@@ -1194,6 +1194,57 @@ fn stage_files_inner(path: &str, files: &[String], unstage: bool) -> Result<Stag
     read_staging_status(path, &[])
 }
 
+fn ignore_untracked_inner(path: &str, file: &str, directory: bool) -> Result<StagingStatus, String> {
+    use std::io::Write;
+    validate_working_paths(&[file.to_owned()])?;
+    if file.contains(['\r', '\n']) {
+        return Err("无法为包含换行符的路径创建忽略规则".into());
+    }
+    let entries = read_git_status(path, &[file.to_owned()])?;
+    if !entries.iter().any(|e| e.path == file && e.index_status == "?" && e.work_status == "?") {
+        return Err("只能忽略当前未跟踪的文件，请刷新后重试".into());
+    }
+    let target = if directory {
+        file.rsplit_once('/').ok_or("文件没有可忽略的上级目录")?.0
+    } else { file };
+    // A per-directory .gitignore takes precedence over info/exclude.
+    if let Ok(details) = run_git(path, &["check-ignore", "-v", "-z", "--", &format!("./{target}")]) {
+        let mut fields = details.split('\0');
+        let source = fields.next().unwrap_or("");
+        if std::path::Path::new(source).file_name().is_some_and(|name| name == ".gitignore")
+            && fields.nth(1).is_some_and(|pattern| pattern.starts_with('!')) {
+            return Err("此路径被 .gitignore 显式包含，请选择忽略所在目录或调整该规则".into());
+        }
+    }
+    let roots = WatchGitRoots::resolve(path)?;
+    let info = roots.common_dir.join("info");
+    let exclude = info.join("exclude");
+    std::fs::create_dir_all(&info).map_err(|e| e.to_string())?;
+    if std::fs::symlink_metadata(&info).map_err(|e| e.to_string())?.file_type().is_symlink()
+        || std::fs::symlink_metadata(&exclude).is_ok_and(|m| !m.is_file()) {
+        return Err("无法写入非常规的本地忽略文件".into());
+    }
+    let mut rule = String::from("\n/");
+    for ch in target.chars() {
+        if matches!(ch, '\\' | '*' | '?' | '[' | ']' | ' ') { rule.push('\\'); }
+        rule.push(ch);
+    }
+    if directory { rule.push('/'); }
+    rule.push('\n');
+    std::fs::OpenOptions::new().create(true).append(true).open(exclude)
+        .and_then(|mut out| out.write_all(rule.as_bytes())).map_err(|e| e.to_string())?;
+    let status = read_staging_status(path, &[])?;
+    if status.entries.iter().any(|e| e.path == file) {
+        return Err("已添加本地规则，但文件仍有可见改动，请检查 Git 忽略规则".into());
+    }
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn git_ignore_untracked(path: String, file: String, directory: bool) -> Result<StagingStatus, String> {
+    run_blocking(move || with_staging_lock(&path, || ignore_untracked_inner(&path, &file, directory))).await
+}
+
 #[tauri::command]
 pub async fn git_stage_files(path: String, files: Vec<String>) -> Result<StagingStatus, String> {
     run_blocking(move || with_staging_lock(&path, || stage_files_inner(&path, &files, false))).await

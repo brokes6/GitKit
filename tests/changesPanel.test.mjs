@@ -94,3 +94,12 @@ test('busy and in-flight commit states disable both bulk actions and reset witho
   finish(); await pending;
   assert.equal(actionButton(header(panel.render(), '全部暂存')).props.disabled, false);
 });
+
+test('only untracked rows offer the repository ignore menu for their exact path', () => {
+  let opened;
+  const panel = harness({ onIgnore: (_, path) => { opened = path; } });
+  const rows = descendants(panel.render()).filter(node => node.props.file);
+  assert.deepEqual(rows.filter(row => row.props.onIgnore).map(row => row.props.file.path), ['new.ts']);
+  rows.find(row => row.props.onIgnore).props.onIgnore({});
+  assert.equal(opened, 'new.ts');
+});

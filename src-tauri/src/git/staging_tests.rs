@@ -702,3 +702,26 @@ fn staging_benchmark_incremental_status_on_many_untracked_files() {
     }
     eprintln!("20000 untracked files: full {:?}; incremental average {:?}", full_elapsed, started.elapsed() / 5);
 }
+
+#[test]
+fn local_ignore_honors_literal_paths_and_codegraph_negation() {
+    let repo = StagingRepo::new(true);
+    let file = "notes[1]* ?.txt";
+    repo.write(file, "keep contents");
+    repo.write("notes1-old.txt", "keep visible");
+    let status = ignore_untracked_inner(repo.path(), file, false).unwrap();
+    assert_eq!(status.entries.len(), 1);
+    assert_eq!(status.entries[0].path, "notes1-old.txt");
+    assert!(repo.0.join(file).is_file());
+    repo.git(&["add", "notes1-old.txt"]);
+    assert!(ignore_untracked_inner(repo.path(), "notes1-old.txt", false).is_err());
+    repo.git(&["commit", "-m", "tracked"]);
+    std::fs::create_dir(repo.0.join(".codegraph")).unwrap();
+    repo.write(".codegraph/.gitignore", "*\n!.gitignore\n");
+    repo.write(".codegraph/index.db", "private");
+    assert!(ignore_untracked_inner(repo.path(), ".codegraph/.gitignore", false).is_err());
+    let clean = ignore_untracked_inner(repo.path(), ".codegraph/.gitignore", true).unwrap();
+    assert!(clean.entries.is_empty());
+    assert!(repo.git(&["status", "--porcelain", "-uall"]).is_empty());
+    assert!(repo.0.join(".codegraph/.gitignore").is_file());
+}
