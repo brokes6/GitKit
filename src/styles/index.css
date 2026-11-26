@@ -35,6 +35,8 @@ h1, h2, h3, h4, .gk-heading {
   letter-spacing: -0.015em;
 }
 
+.gk-small-caps:lang(en) { letter-spacing: .12em; }
+
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
@@ -81,9 +83,20 @@ select:focus-visible,
 }
 .gk-detail-in { animation: gk-detail-in 0.2s cubic-bezier(0.32, 0.72, 0, 1); }
 
+/* Only a detail that covers the history gets a full page transition. */
+.gk-history-stack[data-compact] {
+  --gk-panel-offset: 100%;
+  --gk-panel-start-opacity: 1;
+}
+.gk-history-stack[data-compact] > .gk-history-base {
+  transition: transform 220ms cubic-bezier(.32,.72,0,1);
+}
+.gk-history-stack[data-compact] > .gk-history-base[aria-hidden="true"] {
+  transform: translateX(-3%);
+}
 /* Detail panel slide-in from the right when it opens */
 @keyframes gk-panel-in {
-  from { opacity: 0; transform: translateX(88px); }
+  from { opacity: var(--gk-panel-start-opacity, 0); transform: translateX(var(--gk-panel-offset, 88px)); }
   to   { opacity: 1; transform: translateX(0); }
 }
 .gk-panel-in { animation: gk-panel-in 0.28s cubic-bezier(0.32, 0.72, 0, 1); }
@@ -91,7 +104,7 @@ select:focus-visible,
 /* Detail panel slide-out to the right when it closes */
 @keyframes gk-panel-out {
   from { opacity: 1; transform: translateX(0); }
-  to   { opacity: 0; transform: translateX(88px); }
+  to   { opacity: var(--gk-panel-start-opacity, 0); transform: translateX(var(--gk-panel-offset, 88px)); }
 }
 .gk-panel-out { animation: gk-panel-out 0.22s cubic-bezier(0.4, 0, 1, 1) forwards; }
 
@@ -279,7 +292,7 @@ select:focus-visible,
 .gk-history-workspace[data-history-moving="false"],
 .gk-history-workspace[data-history-moving="false"] .gk-branch-disclosure,
 .gk-history-workspace[data-history-moving="false"] .gk-branch-sidebar { transition: none; }
-.gk-workspace-card { margin: 12px 12px 12px 0; border-radius: 14px; }
+.gk-workspace-card { margin: 12px 12px 12px 0; border-radius: 12px; }
 
 /* Paused Git operations float below the workspace toolbar without changing
    the sidebar/history geometry or intercepting clicks outside the panel. */
@@ -634,6 +647,15 @@ select:focus-visible,
   will-change: transform;
   animation: gk-update-progress-loop 1.2s linear infinite;
 }
+.gk-request-split { display: inline-flex; flex: 0 0 auto; align-items: stretch; height: 32px; border-radius: 8px; }
+.gk-request-split button { position: relative; color: inherit; cursor: pointer; }
+.gk-request-split button:first-child { border-radius: 8px 0 0 8px; }
+.gk-request-split .gk-request-options { border-radius: 0 8px 8px 0; }
+.gk-request-options::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 1px; background: currentColor; opacity: .35; }
+.gk-request-split button:is(:hover, [aria-expanded="true"]):not(:disabled) { background: rgb(0 0 0 / .10); }
+.gk-request-split button:disabled { cursor: not-allowed; }
+.gk-field-retry { display: inline-flex; align-items: center; gap: 4px; margin: 2px 0 0 19px; min-height: 24px; font-size: 11px; cursor: pointer; }
+.gk-field-retry:hover { text-decoration: underline; }
 .gk-shell-button:not(:disabled):hover { background: var(--gk-shell-hover, var(--gk-project-hover)); }
 .gk-shell-button:disabled { opacity: 0.4; cursor: default; }
 .gk-glide-highlight {

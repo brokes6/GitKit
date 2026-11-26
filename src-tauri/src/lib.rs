@@ -1,4 +1,5 @@
 mod git;
+mod glab;
 mod daily_check;
 mod github_token;
 mod merge_requests;
@@ -61,6 +62,8 @@ pub fn run() {
             merge_requests::mr_participant_candidates,
             merge_requests::mr_update_participants,
             merge_requests::mr_open,
+            glab::glab_account,
+            git::push_request_branch,
             daily_check::daily_check_snapshot,
             daily_check::daily_check_configure,
             daily_check::daily_check_set_busy,
@@ -139,6 +142,8 @@ pub fn run() {
             git::github_test,
             github_token::github_token_info,
             git::create_pull_request,
+            git::lookup_branch_request,
+            git::open_platform_request,
             git::github_create_repo,
             git::gitlab_create_repo,
             git::git_remote_add,

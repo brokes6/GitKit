@@ -4,6 +4,8 @@ import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, use
 import { createPortal } from "react-dom";
 import { Toaster } from "sonner";
 import { toast } from "./toast";
+import { requestRepository, readGlabInstance } from "./branchRequest";
+import { useBranchRequest, type RequestConnection } from "./useBranchRequest";
 import { copyWithToast } from "./clipboard";
 import { isTopDialog, useDialogFocus } from "./dialogFocus";
 import { setClockActive, subscribeClock, useClockTick } from "./clock";
@@ -23,7 +25,7 @@ import {
   GitBranch, GitMerge, GitPullRequest, Upload, Download, RefreshCw,
   Layers, ChevronRight, ChevronDown, Copy, Check, GitCommit, FileText, Info,
   Moon, Sun, Monitor, Plus, Minus, X, FolderOpen, ArrowRight,
-  Pin, EyeOff, Eye, Folder, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
+  Pin, EyeOff, Eye, Folder, AlertCircle, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
   Settings, UserPlus, Trash2, Star, Users, Github, Laptop, Sparkles, Languages, RotateCcw, TerminalSquare,
   Tag as TagIcon, Square, DownloadCloud, Pencil, FolderGit2, Search, PanelLeft, MoreHorizontal,
   CircleDot, ArrowDown, ArrowUp, ExternalLink, Maximize2, History, ChevronsUpDown, List, Network, MessageSquare,
@@ -33,7 +35,7 @@ import {
   loadStatus, loadWorkingStatus, ignoreUntracked, stageFiles, unstageFiles, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
   attributeBranches, filterHistoryByHiddenBranches, historyBranchContext, computeGraph, hasChanges, checkoutBranch, stashPush, stashList, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
   createBranch, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, undoCommitPreview, undoLastCommit, fetchAll, pull, push, forcePushTarget, forcePushPreview, forcePush, gitlabTest, gitlabTokenInfo, githubTokenInfo,
-  createPullRequest, BranchInUseError, branchColor, createBranchColors, checkForUpdate, getAppVersion, discardFile, discardAll,
+  createPullRequest, lookupBranchRequest, openPlatformRequest, type PlatformRequest, BranchInUseError, branchColor, createBranchColors, checkForUpdate, getAppVersion, discardFile, discardAll,
   checkDeps, mergePreview, loadTags, createTag, pushTag, githubCreateRepo, gitlabCreateRepo, gitRemoteAdd,
   cloneRepo, pickCloneParent, repoNameFromUrl, startWatch, stopWatch,
   cancelGitOp, isCancelled, syncLocal, revealInFileManager, openRepositoryRemote, openProviderTokenSettings,
@@ -107,6 +109,7 @@ export interface ThemeColors {
   rowCurrent: string;      // current-branch row highlight (neutral, not accent)
   rowCurrentHover: string;
   scrim: string;           // veil behind the sliding detail panel
+  disabledBg: string;
   inputBg: string;
   inputBorder: string;
   isDark: boolean;
@@ -150,6 +153,7 @@ const DARK: ThemeColors = {
   rowCurrent: "rgba(255,255,255,0.08)",
   rowCurrentHover: "rgba(255,255,255,0.11)",
   scrim: "rgba(0,0,0,0.4)",
+  disabledBg: "#303134",
   inputBg: "rgba(255,255,255,0.06)",
   inputBorder: "rgba(255,255,255,0.12)",
   isDark: true,
@@ -193,6 +197,7 @@ const LIGHT: ThemeColors = {
   rowCurrent: "rgba(40,35,30,0.07)",
   rowCurrentHover: "rgba(40,35,30,0.10)",
   scrim: "rgba(240,238,231,0.5)",
+  disabledBg: "#f2f2f2",
   inputBg: "rgba(40,35,30,0.045)",
   inputBorder: "rgba(40,35,30,0.13)",
   isDark: false,
@@ -241,6 +246,7 @@ const BLUE_DARK: ThemeColors = {
   rowCurrent: "rgba(255,255,255,0.08)",
   rowCurrentHover: "rgba(255,255,255,0.11)",
   scrim: "rgba(0,0,0,0.4)",
+  disabledBg: "#303134",
   inputBg: "rgba(255,255,255,0.06)",
   inputBorder: "rgba(255,255,255,0.12)",
   isDark: true,
@@ -284,6 +290,7 @@ const BLUE_LIGHT: ThemeColors = {
   rowCurrent: "rgba(30,40,60,0.07)",
   rowCurrentHover: "rgba(30,40,60,0.10)",
   scrim: "rgba(236,239,244,0.5)",
+  disabledBg: "#f2f2f2",
   inputBg: "rgba(30,35,50,0.045)",
   inputBorder: "rgba(30,35,50,0.13)",
   isDark: false,
@@ -339,6 +346,7 @@ function buildHalf(h: Half, dark: boolean): ThemeColors {
     rowSelected: rgba(h.accent, bgA), rowSelectedAccent: h.accent,
     rowCurrent: line(dark ? 0.08 : 0.07), rowCurrentHover: line(dark ? 0.11 : 0.10),
     scrim: dark ? "rgba(0,0,0,0.4)" : rgba(h.bg, 0.6),
+    disabledBg: dark ? "#303134" : "#f2f2f2",
     inputBg: line(dark ? 0.06 : 0.045), inputBorder: line(dark ? 0.12 : 0.13),
     isDark: dark,
   };
@@ -1024,32 +1032,29 @@ function ProjectSidebar({ projects, activeId, homeActive, attentionCount, open, 
 // ─── ActionBar ────────────────────────────────────────────────────────────────
 
 function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch, onPull, onPush, onUndoCommit, onForcePush,
-  onCreateTag, onCherryPick, onStash, onCreatePR, pushCount = 0, busy }: {
+  onCreateTag, onCherryPick, onStash, onCreatePR, onOtherRequest, onRequestSettings, requestSettingsLabel, requestLabel, pushCount = 0, busy }: {
   project?: Project; branch: string; canMerge: boolean;
   onMerge?: () => void;
   onCreateBranch?: () => void; onFetch?: () => void; onPull?: () => void; onPush?: () => void; onUndoCommit?: () => void; onForcePush?: () => void;
   onCreateTag?: () => void; onCherryPick?: () => void; onStash?: () => void; onCreatePR?: () => void;
-  pushCount?: number; busy?: null | GitOperationKind | "other";
+  onOtherRequest?: () => void; onRequestSettings?: () => void; requestSettingsLabel: string; requestLabel: string; pushCount?: number; busy?: null | GitOperationKind | "other";
 }) {
   const t = useTheme();
-  const [morePos, setMorePos] = useState<{ x: number; y: number } | null>(null);
+  const [morePos, setMorePos] = useState<{ kind: "repository" | "request"; x: number; y: number } | null>(null);
   const morePresence = useExitPresence(morePos);
-  const moreButton = useRef<HTMLButtonElement>(null);
+  const menuTrigger = useRef<HTMLButtonElement | null>(null);
   const moreMenu = useRef<HTMLDivElement>(null);
-  const focusMoreMenuOnOpen = useRef(false);
   const toolbarLayoutKey = JSON.stringify([
     project?.id, project?.name, project?.initialized, branch, pushCount, getCurrentLanguage(),
   ]);
   const toolbarRef = useToolbarLayoutMotion(toolbarLayoutKey);
-  useEffect(() => { setMorePos(null); }, [toolbarLayoutKey]);
+  useEffect(() => { setMorePos(null); }, [toolbarLayoutKey, busy]);
   useEffect(() => {
     if (!morePos) return;
-    if (focusMoreMenuOnOpen.current) {
-      moreMenu.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    }
+    moreMenu.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
     const close = () => setMorePos(null);
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { close(); moreButton.current?.focus(); }
+      if (event.key === "Escape") { close(); menuTrigger.current?.focus(); }
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("resize", close);
@@ -1067,6 +1072,19 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
     { label: tx("合并"), Icon: GitMerge, action: canMerge ? onMerge : undefined },
     { label: tx("强制推送…"), Icon: AlertTriangle, action: onForcePush },
   ];
+  const requestActions = [
+    { label: tx("选择来源分支"), Icon: GitBranch, action: onOtherRequest },
+    { label: requestSettingsLabel, Icon: Settings, action: onRequestSettings },
+  ];
+  const requestMenuLabel = tf("{0} 的更多操作", requestLabel);
+  const openActions = (button: HTMLButtonElement, kind: "repository" | "request") => {
+    if (morePos?.kind === kind) { setMorePos(null); return; }
+    menuTrigger.current = button;
+    const rect = button.getBoundingClientRect();
+    const left = kind === "request" ? rect.right - 196 : rect.left;
+    setMorePos({ kind, x: Math.max(8, Math.min(left, window.innerWidth - 204)), y: rect.bottom + 6 });
+  };
+  const requestDisabled = !onCreatePR || !!busy;
   return (
     <div ref={toolbarRef} className="flex items-center gap-1.5 h-full flex-1 min-w-0"
       role="group" aria-label={tx("仓库操作")}
@@ -1106,37 +1124,53 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
         <RotateCcw size={15} aria-hidden="true" className="gk-git-action-icon" />
         <ToolbarText order={5}>{tx("撤回")}</ToolbarText>
       </button>
+      <button type="button" data-gk-toolbar-move disabled={!moreActions.some(({ action }) => !!action) || !!busy}
+        aria-label={tx("更多仓库操作")} title={tx("更多仓库操作")} aria-haspopup="menu" aria-expanded={morePos?.kind === "repository"}
+        onClick={event => openActions(event.currentTarget, "repository")}
+        onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); openActions(event.currentTarget, "repository"); } }}
+        className="gk-shell-button flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer">
+        <MoreHorizontal size={18} aria-hidden="true" />
+      </button>
       <div className="flex-1" />
       <button data-gk-toolbar-move onClick={onCreateBranch} disabled={!onCreateBranch || !!busy}
         className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
         style={{ borderRadius: R - 3 }}>
         <GitBranchPlus size={15} aria-hidden="true" /><ToolbarText order={6}>{tx("新建分支")}</ToolbarText>
       </button>
-      <button data-gk-toolbar-move disabled={!onCreatePR || !!busy} onClick={onCreatePR}
-        className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
-        style={{ borderRadius: R - 3, background: onCreatePR ? t.accent : t.inputBg, color: onCreatePR ? "#fff" : t.textMuted }}>
-        <GitPullRequest size={15} aria-hidden="true" /><ToolbarText order={7}>{tx("创建合并请求")}</ToolbarText>
-      </button>
-      <button data-gk-toolbar-move ref={moreButton} disabled={!moreActions.some(({ action }) => !!action) || !!busy} aria-label={tx("更多仓库操作")} title={tx("更多仓库操作")}
-        aria-haspopup="menu" aria-expanded={!!morePos}
-        onClick={(event) => {
-          if (morePos) { setMorePos(null); return; }
-          // Keyboard-triggered clicks have detail=0. Preserve first-item focus
-          // for keyboard navigation without showing a focus ring on mouse open.
-          focusMoreMenuOnOpen.current = event.detail === 0;
-          const rect = moreButton.current?.getBoundingClientRect();
-          if (rect) setMorePos({ x: Math.max(8, rect.right - 196), y: rect.bottom + 6 });
-        }} className="gk-shell-button flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer">
-        <MoreHorizontal size={18} aria-hidden="true" />
-      </button>
+      <div data-gk-toolbar-move className="gk-request-split" style={{
+        background: requestDisabled ? t.disabledBg : t.accent, color: requestDisabled ? t.textMuted : "#fff",
+      }}>
+        <button type="button" aria-label={requestLabel} title={requestLabel} disabled={requestDisabled} onClick={onCreatePR}
+          className="flex items-center gap-2 px-3 text-xs font-medium">
+          <GitPullRequest size={15} aria-hidden="true" /><ToolbarText order={7}>{requestLabel}</ToolbarText>
+        </button>
+        <button type="button" disabled={requestDisabled} aria-label={requestMenuLabel} title={requestMenuLabel}
+          aria-haspopup="menu" aria-expanded={morePos?.kind === "request"}
+          onClick={event => openActions(event.currentTarget, "request")}
+          onKeyDown={event => { if (event.key === "ArrowDown") { event.preventDefault(); openActions(event.currentTarget, "request"); } }}
+          className="gk-request-options flex items-center justify-center w-8">
+          <ChevronDown size={13} aria-hidden="true" />
+        </button>
+      </div>
       {morePresence.shown && createPortal(<>
         {!morePresence.closing && <div className="fixed inset-0" style={{ zIndex: 80 }} onMouseDown={() => setMorePos(null)} />}
-        <div ref={moreMenu} role="menu" aria-label={tx("更多仓库操作")} className="gk-action-menu fixed p-1.5"
+        <div ref={moreMenu} role="menu" aria-label={morePresence.shown.kind === "request" ? requestMenuLabel : tx("更多仓库操作")} className="gk-action-menu fixed p-1.5"
+          onKeyDown={event => {
+            if (event.key === "Tab") { setMorePos(null); menuTrigger.current?.focus(); return; }
+            const keys = ["ArrowDown", "ArrowUp", "Home", "End"];
+            if (!keys.includes(event.key)) return;
+            event.preventDefault();
+            const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+            const index = items.indexOf(document.activeElement as HTMLButtonElement);
+            const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1
+              : (index + (event.key === "ArrowUp" ? -1 : 1) + items.length) % items.length;
+            items[next]?.focus();
+          }}
           data-closing={morePresence.closing || undefined} aria-hidden={morePresence.closing || undefined}
           style={{ left: morePresence.shown.x, top: morePresence.shown.y, width: 196, zIndex: 81, background: t.dialogBg,
             border: `0.5px solid ${t.border}`, borderRadius: R, boxShadow: t.shadowEl }}>
-          {moreActions.map(({ label, Icon, action }) => (
-            <button key={label} role="menuitem" disabled={!action} onClick={() => { setMorePos(null); action?.(); }}
+          {(morePresence.shown.kind === "request" ? requestActions : moreActions).map(({ label, Icon, action }) => (
+            <button key={label} role="menuitem" disabled={!action || !!busy || morePresence.closing} onClick={() => { setMorePos(null); menuTrigger.current?.focus(); action?.(); }}
               className="gk-shell-button flex items-center gap-2.5 w-full px-2.5 py-2 text-left text-xs cursor-pointer"
               style={{ color: t.text, borderRadius: R - 3, "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
               <Icon size={14} aria-hidden="true" style={{ color: t.textMuted }} />{label}
@@ -1340,7 +1374,7 @@ function StatusBar({ project, branch, changes, ready, errored, home, checkProgre
         "--gk-status-border": statusBorder,
       } as React.CSSProperties}>
       <div className="gk-status-context flex items-center gap-1.5 min-w-0" role={checkProgress ? "status" : undefined}>
-        {mrEntry || (checkProgress ? (
+        {checkProgress ? (
           <>
             <span className="truncate tabular-nums" title={checkProgress.project}>{checkProgress.paused ? tx("等待休眠恢复后补查") : tf("已检查 {0} / {1} · 正在检查 {2}", checkProgress.current, checkProgress.total, checkProgress.project)}</span>
             <RefreshCw size={12} className="animate-spin flex-shrink-0" aria-hidden="true" />
@@ -1364,7 +1398,7 @@ function StatusBar({ project, branch, changes, ready, errored, home, checkProgre
               <span className="gk-status-sync-copy ml-1.5 whitespace-nowrap">{syncLabel}</span>
             </span>}
           </>
-        ))}
+        )}
       </div>
       <div className="flex items-center justify-center min-w-0" role="status">
         {home ? <span className="gk-status-pill px-3">{home.refreshing ? tx("正在刷新状态…") : tf("{0} 个项目需关注", home.attention)}</span>
@@ -1389,12 +1423,15 @@ function StatusBar({ project, branch, changes, ready, errored, home, checkProgre
           </button>
         : <span className="gk-status-pill px-3 truncate">{tx("打开仓库以开始")}</span>}
       </div>
+      <div className="gk-status-actions">
+      {mrEntry}
       <button onClick={onSearch} disabled={!home && (!ready || project?.initialized === false)}
         className="gk-status-pill gk-shell-button justify-self-end flex items-center gap-2 pl-2.5 pr-1 flex-shrink-0 cursor-pointer">
         <Search size={12} aria-hidden="true" />
         <span className="whitespace-nowrap">{home ? tx("搜索项目") : tx("搜索提交")}</span>
         <kbd className="gk-status-key flex items-center px-1.5 font-[inherit]">{IS_WINDOWS ? "Ctrl F" : "⌘ F"}</kbd>
       </button>
+      </div>
     </footer>
   );
 }
@@ -1576,7 +1613,7 @@ function Sidebar({ branches, remotes, stashes, currentBranch, focusBranch, hidde
         <SidebarDisclosure open={branchesOpen} className="pb-2">
             {pinnedBranches.length > 0 && (
               <>
-                <div className="flex items-center gap-1 px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                <div className="flex items-center gap-1 px-3 pt-1 pb-0.5 text-[10px] font-semibold uppercase gk-small-caps"
                   style={{ color: t.textFaint }}>
                   <Pin size={9} /> {tx("置顶")}
                 </div>
@@ -2518,8 +2555,8 @@ function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, onExpan
                   className="w-full flex items-center gap-2 px-3 py-2 text-left cursor-pointer">
                   <span className="text-[12px] font-mono font-bold w-3 text-center flex-shrink-0" style={{ color: st.color }}>{st.label}</span>
                   <div className="flex flex-col min-w-0 flex-1">
-                    <span className="text-xs truncate" style={{ color: isSel ? t.accentFg : t.textSec }}>{name}</span>
-                    {parts.length > 0 && <span className="text-[12px] truncate" style={{ color: t.textFaint }}>{parts.join("/")}</span>}
+                    <span className="text-[13px] font-semibold truncate" style={{ color: isSel ? t.accentFg : t.text }}>{name}</span>
+                    {parts.length > 0 && <span className="text-[11px] truncate" style={{ color: t.textMuted }}>{parts.join("/")}</span>}
                   </div>
                   {!compact && <div className={`flex gap-1 flex-shrink-0 font-mono text-[11px] transition-opacity ${onRevealFile
                     ? isSel ? "opacity-0" : "group-hover:opacity-0 group-focus-within:opacity-0"
@@ -3081,8 +3118,8 @@ function WorkingFileRow({ file, selected, disabled, onSelect, onStage, onUnstage
         {statusLabel}
       </span>
       <div className="flex flex-col min-w-0 flex-1">
-        <span className="text-xs truncate" style={{ color: selected ? t.accentFg : t.textSec }}>{name}</span>
-        {parts.length > 0 && <span className="text-[12px] truncate" style={{ color: t.textFaint }}>{parts.join("/")}</span>}
+        <span className="text-[13px] font-semibold truncate" style={{ color: selected ? t.accentFg : t.text }}>{name}</span>
+        {parts.length > 0 && <span className="text-[11px] truncate" style={{ color: t.textMuted }}>{parts.join("/")}</span>}
         {file.hasStaged && file.hasUnstaged && <span className="text-[11px] truncate" style={{ color: t.amber }}>
           {file.staged ? tx("还有未暂存改动") : tx("部分改动已暂存")}
         </span>}
@@ -3141,22 +3178,18 @@ function ChangesSectionHeader({ label, count, action, onAction, onReset, disable
       </span>
       {onReset && (
         <button disabled={disabled} onClick={onReset}
-          className="text-[12px] px-2 py-0.5 transition-colors cursor-pointer flex-shrink-0"
+          className="text-[12px] px-2 py-0.5 transition-colors cursor-pointer disabled:cursor-not-allowed flex-shrink-0"
           title={tx("丢弃工作区的所有更改（reset --hard + clean）")}
-          style={{ color: t.red, background: t.redBg, borderRadius: R - 4,
-            border: `0.5px solid ${t.red}33` }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = t.red + "22")}
-          onMouseLeave={(e) => (e.currentTarget.style.background = t.redBg)}>
+          style={{ color: disabled ? t.textMuted : t.red, background: disabled ? t.disabledBg : t.redBg, borderRadius: R - 2,
+            border: `0.5px solid ${disabled ? t.inputBorder : t.red + "33"}` }}>
           {tx("全部重置")}
         </button>
       )}
       {count > 0 && (
         <button disabled={disabled} onClick={onAction}
-          className="text-[12px] px-2 py-0.5 transition-colors cursor-pointer flex-shrink-0"
-          style={{ color: t.textMuted, background: t.inputBg, borderRadius: R - 4,
-            border: `0.5px solid ${t.inputBorder}` }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = t.text)}
-          onMouseLeave={(e) => (e.currentTarget.style.color = t.textMuted)}>
+          className="text-[12px] px-2 py-0.5 transition-colors cursor-pointer disabled:cursor-not-allowed flex-shrink-0"
+          style={{ color: disabled ? t.textMuted : t.textSec, background: disabled ? t.disabledBg : t.inputBg,
+            borderRadius: R - 2, border: `0.5px solid ${t.inputBorder}` }}>
           {action}
         </button>
       )}
@@ -3274,14 +3307,9 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
         </div>
         <textarea value={commitMsg} onChange={(e) => updateCommitMsg(e.target.value)}
           placeholder={tx("提交信息（必填）")} rows={3}
-          className="w-full resize-none text-xs p-2.5 outline-none transition-all"
+          className="w-full resize-none text-xs p-2.5 transition-colors"
           style={{ background: t.inputBg, color: t.text, fontFamily: "inherit",
-            borderRadius: R,
-            border: `1px solid ${commitMsg.trim() ? t.accent + "66" : t.inputBorder}`,
-            boxShadow: commitMsg.trim() ? `0 0 0 3px ${t.accent}18` : "none",
-            transition: "border-color 0.15s, box-shadow 0.15s" }}
-          onFocus={(e) => { e.currentTarget.style.borderColor = t.accent + "88"; e.currentTarget.style.boxShadow = `0 0 0 3px ${t.accent}20`; }}
-          onBlur={(e)  => { e.currentTarget.style.borderColor = commitMsg.trim() ? t.accent + "66" : t.inputBorder; e.currentTarget.style.boxShadow = "none"; }} />
+            borderRadius: R - 2, border: `0.5px solid ${t.inputBorder}` }} />
 
         {/* Committer — defaults to the default identity */}
         <div className="flex items-center gap-2 mt-2">
@@ -3305,10 +3333,9 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
           title={needsIdentity ? tx("请先在设置中配置提交者身份") : undefined}
           className="gk-primary-sweep w-full mt-2 py-2 text-xs font-semibold transition-all duration-150 cursor-pointer"
           style={{
-            background: commitDisabled ? t.inputBg : t.accent,
-            color:      commitDisabled ? t.textFaint : "#fff",
-            borderRadius: R, border: `0.5px solid ${t.inputBorder}`,
-            boxShadow: !commitDisabled ? `0 4px 16px ${t.accent}44` : "none",
+            background: commitDisabled ? t.disabledBg : t.accent,
+            color: commitDisabled ? t.textMuted : "#fff",
+            borderRadius: R - 2, border: `0.5px solid ${t.inputBorder}`,
             cursor: commitDisabled ? "not-allowed" : "pointer",
           }}
           onMouseEnter={(e) => { if (!commitDisabled) e.currentTarget.style.opacity = "0.88"; }}
@@ -3317,7 +3344,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
             {needsIdentity ? <Users size={11} aria-hidden="true" /> : <GitCommit size={11} className={committing ? "animate-spin" : undefined} />}
             {committing ? tx("提交中…") : needsIdentity ? tx("先配置提交者身份") : tf("提交到 {0}", currentBranch)}
             {staged.length > 0 && !committing && !needsIdentity && (
-              <span className="ml-1 px-1.5 py-px rounded-full text-[11px]"
+              <span className="ml-1 px-1.5 py-px rounded text-[11px]"
                 style={{ background: "rgba(255,255,255,0.2)" }}>
                 {staged.length}
               </span>
@@ -3664,6 +3691,13 @@ function githubCandidates(remoteUrl: string): GithubAccount[] {
   return accts.filter((a) => (a.url ? host === hostOf(a.url) : isPublic));
 }
 
+function matchingPRAccounts(remoteUrl: string): GithubAccount[] {
+  return loadGithubAccounts().filter(account => {
+    const base = (account.url || "https://github.com").replace(/\/api\/v3\/?$/, "").replace(/\/$/, "");
+    return requestRepository(remoteUrl, base === "https://api.github.com" ? "https://github.com" : base);
+  });
+}
+
 // Pick the token whose configured host matches the remote (GitHub public is
 // special-cased); falls back to whichever single token is configured. This is
 // the non-interactive fallback; `resolveRemoteToken` handles the multi-account
@@ -3913,8 +3947,8 @@ function ConfirmDialog({ title, message, confirmLabel, busy, danger = true, onCa
             style={{ color: t.textMuted, borderRadius: R - 2, border: `0.5px solid ${t.inputBorder}` }}>{tx("取消")}</button>
           <button {...(busy ? {} : press(onConfirm))} disabled={busy}
             className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold"
-            style={{ background: danger ? t.red : t.accent, color: "#fff", borderRadius: R - 2,
-              cursor: busy ? "not-allowed" : "pointer", opacity: busy ? 0.7 : 1 }}>
+            style={{ background: busy ? t.disabledBg : danger ? t.red : t.accent, color: busy ? t.textMuted : "#fff",
+              borderRadius: R - 2, cursor: busy ? "not-allowed" : "pointer" }}>
             {busy && <RefreshCw size={12} className="animate-spin" />}
             {confirmLabel}
           </button>
@@ -3937,7 +3971,7 @@ function ModalFooter({ onCancel, onConfirm, confirmLabel, disabled, busy, danger
         style={{ color: t.textMuted, borderRadius: R - 2, border: `0.5px solid ${t.inputBorder}` }}>{tx("取消")}</button>
       <button {...(dis ? {} : press(onConfirm))} disabled={dis}
         className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold"
-        style={{ background: dis ? t.inputBg : danger ? t.red : t.accent, color: dis ? t.textFaint : "#fff",
+        style={{ background: dis ? t.disabledBg : danger ? t.red : t.accent, color: dis ? t.textMuted : "#fff",
           borderRadius: R - 2, cursor: dis ? "not-allowed" : "pointer" }}>
         {busy && <RefreshCw size={12} className="animate-spin" />}
         {confirmLabel}
@@ -4824,16 +4858,31 @@ function CherryPickConflictDialog({ commit, target, files, onCancel, onContinue 
 
 // ─── CreatePRDialog (merge / pull request) ───────────────────────────────────
 
-function CreatePRDialog({ path, branches, currentBranch, defaultTarget, term, onCancel, onConfirm }: {
-  path?: string;
-  branches: Branch[]; currentBranch: string; defaultTarget: string;
-  term: string; // "合并请求" (GitLab) | "拉取请求" (GitHub)
-  onCancel: () => void; onConfirm: (source: string, target: string, title: string, description: string) => Promise<boolean>;
+function CreatePRDialog({ path, branches, currentBranch, chooseSource, remote, connection, commits, initialLookup, term, onCancel, onConfirm, onOpenRequest }: {
+  path: string; branches: Branch[]; currentBranch: string; remote: Remote; connection: RequestConnection;
+  chooseSource?: boolean;
+  commits: Commit[]; initialLookup: ReturnType<typeof useBranchRequest>; term: string;
+  onCancel: () => void; onOpenRequest: (item: PlatformRequest) => Promise<void>;
+  onConfirm: (source: string, target: string, title: string, description: string, publish: boolean) => Promise<boolean>;
 }) {
   const t = useTheme();
-  const [source, setSource] = useState(currentBranch || branches[0]?.name || "");
-  const [target, setTarget] = useState(defaultTarget);
-  const [title, setTitle] = useState("");
+  const [source, setSource] = useState(currentBranch);
+  const otherLookup = useBranchRequest(source === currentBranch ? null : connection, source);
+  const lookup = source === currentBranch ? initialLookup : otherLookup;
+  const [chosenTarget, setChosenTarget] = useState("");
+  const target = chosenTarget || lookup.data?.requests[0]?.target || lookup.data?.defaultBranch || "";
+  const targets = [...new Set([lookup.data?.defaultBranch, ...(lookup.data?.requests ?? []).map(item => item.target), ...remote.branches].filter((v): v is string => !!v))];
+  const existing = lookup.data?.requests.find(item => item.target === target);
+  const branch = branches.find(b => b.name === source);
+  const tracking = branch?.remote === `${remote.name}/${source}`;
+  const missingTrackingRef = !remote.branches.includes(source);
+  const ahead = tracking && !!branch?.ahead;
+  const [includeLocal, setIncludeLocal] = useState(false);
+  const publish = missingTrackingRef || includeLocal;
+  const suggestedTitle = commits.find(commit => commit.fullHash === branch?.head)?.message.split("\n")[0] || source;
+  const [editedTitle, setEditedTitle] = useState<string | null>(null);
+  const title = editedTitle ?? suggestedTitle;
+  const [submitError, setSubmitError] = useState("");
   const [desc, setDesc] = useState("");
   const [busy, setBusy] = useState(false);
   const [closing, setClosing] = useState(false);
@@ -4861,121 +4910,127 @@ function CreatePRDialog({ path, branches, currentBranch, defaultTarget, term, on
     return () => window.clearTimeout(timer);
   }, [closing, finishClose]);
   const same = source === target;
-  const valid = title.trim().length > 0 && !same && !busy && !closing;
+  const valid = !!lookup.data && !!target && (existing || title.trim().length > 0) && !same && !busy && !closing;
+  const confirmLabel = existing ? tf("打开{0}", term) : publish ? tf("推送并创建{0}", term) : tf("创建{0}", term);
 
   // Live merge-conflict preview between source and target (no working-tree changes).
   const [preview, setPreview] = useState<{ state: "idle" | "checking" | "clean" | "conflict" | "error"; files: string[] }>({ state: "idle", files: [] });
   useEffect(() => {
-    if (!path || same || !source || !target) { setPreview({ state: "idle", files: [] }); return; }
+    if (!lookup.data || existing || !path || same || !source || !target) { setPreview({ state: "idle", files: [] }); return; }
     let cancelled = false;
     setPreview((p) => ({ state: "checking", files: p.files }));
     const id = setTimeout(async () => {
       try {
-        const r = await mergePreview(path, source, target);
+        const r = await mergePreview(path, `refs/heads/${source}`, `refs/remotes/${remote.name}/${target}`);
         if (!cancelled) setPreview({ state: r.conflict ? "conflict" : "clean", files: r.files });
       } catch {
         if (!cancelled) setPreview({ state: "error", files: [] }); // degrade silently
       }
     }, 300);
     return () => { cancelled = true; clearTimeout(id); };
-  }, [path, source, target, same]);
+  }, [path, source, target, same, existing, remote.name, lookup.data]);
   const submit = async () => {
     if (!valid || busyRef.current || closePhase.current !== "open") return;
     busyRef.current = true;
     setBusy(true);
     try {
-      if (await onConfirm(source, target, title.trim(), desc)) beginClose();
-    } finally { busyRef.current = false; setBusy(false); }
+      setSubmitError("");
+      if (existing) { await onOpenRequest(existing); beginClose(); }
+      else if (await onConfirm(source, target, title.trim(), desc, publish)) beginClose();
+    } catch (error) { setSubmitError(String(error)); lookup.refresh(); }
+    finally { busyRef.current = false; setBusy(false); }
   };
+  const targetError = lookup.error || (same ? tx("来源与目标分支不能相同") : "");
+  const retryTarget = useRef<HTMLSelectElement>(null);
+  const restoreRetryFocus = useRef(false);
+  useEffect(() => {
+    if (!restoreRetryFocus.current || (!lookup.data && !lookup.error)) return;
+    restoreRetryFocus.current = false;
+    if (document.activeElement === document.body) {
+      if (lookup.error) document.getElementById("pr-retry-lookup")?.focus();
+      else retryTarget.current?.focus();
+    }
+  }, [lookup.data, lookup.error]);
   const selectCls = "text-xs px-2.5 py-2 cursor-pointer outline-none w-full";
   return (
-    <Modal title={tf("创建{0}", term)} Icon={GitPullRequest} onClose={requestClose} width={560}
+    <Modal title={term} Icon={GitPullRequest} onClose={requestClose} width={560}
       closing={closing} onExited={finishClose}
-      footer={<ModalFooter onCancel={requestClose} onConfirm={submit} confirmLabel={tf("创建{0}", term)} disabled={!valid} busy={busy} />}>
-      {/* merge route */}
-      <div className="flex flex-col gap-2.5 p-3.5"
-        style={{ background: t.inputBg, border: `0.5px solid ${t.inputBorder}`, borderRadius: R - 1 }}>
-        <div className="flex flex-col gap-1.5">
-          {/* labels — a 24px spacer holds the arrow column so labels stay aligned */}
-          <div className="flex items-center gap-2.5">
-            <span className="flex-1 min-w-0 text-[11px] font-medium" style={{ color: t.textMuted }}>{tx("来源分支")}</span>
-            <span className="flex-shrink-0" style={{ width: 24 }} />
-            <span className="flex-1 min-w-0 text-[11px] font-medium" style={{ color: t.textMuted }}>{tx("目标分支")}</span>
-          </div>
-          {/* controls — items-center keeps the arrow centred on the selects at any height */}
-          <div className="flex items-center gap-2.5">
-            <select value={source} onChange={(e) => setSource(e.target.value)}
-              className={`flex-1 min-w-0 ${selectCls}`} style={dlgCtl(t)}>
-              {branches.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
+      footer={<ModalFooter onCancel={requestClose} onConfirm={submit} confirmLabel={confirmLabel} disabled={!valid} busy={busy} />}>
+      <div className="flex flex-col gap-2" style={lookup.data ? { paddingBottom: 12, borderBottom: `0.5px solid ${t.border}` } : undefined}>
+        <div className="grid grid-cols-1 gap-x-2.5 gap-y-2 min-[460px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] min-[460px]:items-end">
+          <label className="flex min-w-0 flex-col gap-1.5">
+            <span id="pr-source-label" className="text-[11px] font-medium" style={{ color: t.textSec }}>{tx("来源分支")}</span>
+            <select value={source} aria-labelledby="pr-source-label" title={source} autoFocus={chooseSource} disabled={busy} className={selectCls} style={dlgCtl(t)} onChange={e => {
+              setSource(e.target.value); setChosenTarget(""); setEditedTitle(null); setIncludeLocal(false); setSubmitError("");
+            }}>
+              {branches.map(b => <option key={b.name} value={b.name}>{b.name}</option>)}
             </select>
-            <div className="flex-shrink-0 flex items-center justify-center"
-              style={{ width: 24, height: 24, borderRadius: 999, background: t.accentBg, color: t.accent }}>
-              <ArrowRight size={13} />
-            </div>
-            <select value={target} onChange={(e) => setTarget(e.target.value)}
-              className={`flex-1 min-w-0 ${selectCls}`} style={dlgCtl(t, same)}>
-              {branches.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
+          </label>
+          <ArrowRight size={14} aria-hidden="true" className="mb-2.5 hidden min-[460px]:block" style={{ color: t.textMuted }} />
+          <label className="flex min-w-0 flex-col gap-1.5">
+            <span id="pr-target-label" className="text-[11px] font-medium" style={{ color: t.textSec }}>{tx("目标分支")}</span>
+            <select ref={retryTarget} value={target} aria-labelledby="pr-target-label" title={target} disabled={busy || !lookup.data} aria-invalid={same || undefined}
+              aria-describedby={targetError || !lookup.data ? "pr-target-hint" : undefined}
+              className={selectCls} style={dlgCtl(t, !!targetError)}
+              onChange={e => { setChosenTarget(e.target.value); setSubmitError(""); }}>
+              {!target && <option value="">—</option>}{targets.map(name => <option key={name}>{name}</option>)}
             </select>
-          </div>
+          </label>
+          {(targetError || !lookup.data) && <div className="min-w-0 text-[11px] leading-relaxed min-[460px]:col-start-3">
+            {targetError ? <>
+              <p id="pr-target-hint" role="alert" className="flex items-start gap-1.5" style={{ color: t.red }}>
+                <AlertCircle size={13} aria-hidden="true" className="mt-0.5 shrink-0" />
+                <span className="[overflow-wrap:anywhere]">{targetError}</span>
+              </p>
+              {lookup.error && <button id="pr-retry-lookup" type="button" className="gk-field-retry" style={{ color: t.textSec }}
+                onClick={() => { restoreRetryFocus.current = true; lookup.refresh(); }}>
+                <RefreshCw size={12} aria-hidden="true" />{tx("重试")}
+              </button>}
+            </> : <p id="pr-target-hint" role="status" style={{ color: t.textMuted }}>{tx("正在查询分支请求…")}</p>}
+          </div>}
         </div>
-        {same && (
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium"
-            style={{ background: t.redBg, color: t.red, borderRadius: R - 3 }}>
-            <AlertTriangle size={12} className="flex-shrink-0" /> {tx("来源与目标分支不能相同")}
-          </div>
-        )}
         {!same && preview.state === "checking" && (
-          <div role="status" aria-label={tx("正在检测合并冲突…")} aria-busy="true" className="flex items-center gap-1.5 px-2.5 py-1.5 min-h-7"
-            style={{ background: t.inputBg, color: t.textMuted, borderRadius: R - 3 }}>
-            <Skeleton width={12} height={12} color={t.rowHover} />
-            <Skeleton width="48%" height={11} color={t.rowHover} />
+          <div role="status" aria-busy="true" className="flex items-center gap-1.5 text-[11px]" style={{ color: t.textSec }}>
+            <RefreshCw size={12} aria-hidden="true" className="shrink-0 motion-safe:animate-spin" />{tx("正在检测合并冲突…")}
           </div>
         )}
         {!same && preview.state === "clean" && (
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium"
-            style={{ background: t.greenBg, color: t.green, borderRadius: R - 3 }}>
-            <Check size={12} className="flex-shrink-0" /> {tx("无冲突，可干净合并")}
-          </div>
+          <p role="status" className="flex items-center gap-1.5 text-[11px]" style={{ color: t.textSec }}>
+            <Check size={13} aria-hidden="true" className="shrink-0" style={{ color: t.green }} />
+            {tx("本地预检通过 · 基于远程跟踪分支")}
+          </p>
         )}
         {!same && preview.state === "conflict" && (
-          <div className="flex flex-col gap-1.5 px-2.5 py-2"
-            style={{ background: t.redBg, borderRadius: R - 3 }}>
-            <div className="flex items-center gap-1.5 text-[11px] font-semibold" style={{ color: t.red }}>
-              <AlertTriangle size={12} className="flex-shrink-0" />
+          <div className="flex min-w-0 flex-col gap-1.5 text-[11px]">
+            <p role="status" className="flex items-center gap-1.5 font-medium" style={{ color: t.red }}>
+              <AlertTriangle size={13} aria-hidden="true" className="shrink-0" />
               {tx("检测到合并冲突 ·")} {preview.files.length} {tx("个文件")}
-            </div>
-            <div className="flex flex-col gap-0.5" style={{ maxHeight: 128, overflowY: "auto" }}>
-              {preview.files.map((f) => (
-                <div key={f} className="flex items-center gap-1.5 text-[11px] font-mono" style={{ color: t.red }}>
-                  <FileText size={11} className="flex-shrink-0" style={{ opacity: 0.7 }} />
-                  <span className="truncate" title={f}>{f}</span>
-                </div>
-              ))}
-            </div>
-            <span className="text-[10.5px] leading-relaxed" style={{ color: t.red, opacity: 0.85 }}>
-              {tf("仍可创建{0}，冲突需在合并时解决。", term)}
-            </span>
+            </p>
+            <ul className="grid max-h-32 gap-1 overflow-y-auto pl-5 font-mono leading-relaxed [overflow-wrap:anywhere]" style={{ color: t.textSec }}>
+              {preview.files.map(file => <li key={file}>
+                {file.split("/").map((part, index) => <Fragment key={index}>{index > 0 && <>/<wbr /></>}{part}</Fragment>)}
+              </li>)}
+            </ul>
+            <p className="pl-5" style={{ color: t.textSec }}>{tf("仍可创建{0}，冲突需在合并时解决。", term)}</p>
           </div>
         )}
       </div>
 
-      <Field label={tx("标题")}>
-        <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)}
-          placeholder={tf("{0}标题", term)} className="text-xs px-2.5 py-2 outline-none w-full" style={dlgCtl(t)} />
-      </Field>
-      <Field label={tx("描述（可选）")}>
-        <textarea value={desc} onChange={(e) => setDesc(e.target.value)} rows={5}
-          placeholder={tx("补充说明…")} className="text-xs px-2.5 py-2 outline-none w-full resize-none"
-          style={{ ...dlgCtl(t), fontFamily: "inherit" }} />
-      </Field>
-
-      <div className="flex items-start gap-2 px-3 py-2.5"
-        style={{ background: t.accentBg, borderRadius: R - 2 }}>
-        <GitPullRequest size={13} className="flex-shrink-0 mt-0.5" style={{ color: t.accent }} />
-        <span className="text-[11px] leading-relaxed" style={{ color: t.accentFg }}>
-          {tx("来源分支需已推送到远程。创建成功后会自动在浏览器打开。")}
-        </span>
-      </div>
+      {lookup.data && (existing ? <div className="flex flex-col gap-1 px-1">
+        <span className="text-[11px]" style={{ color: t.textSec }}>{tx("已有开放请求")}</span>
+        <strong className="text-sm break-words" style={{ color: t.text }}>{connection.provider === "gitlab" ? "!" : "#"}{existing.number} · {existing.title}</strong>
+      </div> : <>
+        <Field label={tx("标题")}><input value={title} disabled={busy} onChange={e => setEditedTitle(e.target.value)}
+          placeholder={tf("{0}标题", term)} className="text-xs px-2.5 py-2 outline-none w-full" style={dlgCtl(t)} /></Field>
+        <Field label={tx("描述（可选）")}><textarea value={desc} disabled={busy} onChange={e => setDesc(e.target.value)} rows={4}
+          placeholder={tx("补充说明…")} className="text-xs px-2.5 py-2 outline-none w-full resize-none max-[459px]:h-14" style={{ ...dlgCtl(t), fontFamily: "inherit" }} /></Field>
+        {missingTrackingRef ? <p className="text-[11px] [overflow-wrap:anywhere]" style={{ color: t.textSec }}>{tf("本地尚未记录远程分支 {0}/{1}。创建时将先推送此分支。", remote.name, source)}</p>
+        : (ahead || !tracking) && <label className="flex items-center gap-2 text-[11px]" style={{ color: t.textSec }}>
+          <input type="checkbox" disabled={busy} checked={includeLocal} onChange={e => setIncludeLocal(e.target.checked)} />
+          {ahead ? tf("同时推送 {0} 个本地提交", branch!.ahead) : tf("创建前推送到 {0}/{1}", remote.name, source)}
+        </label>}
+      </>)}
+      {submitError && <p role="alert" className="text-xs break-words" style={{ color: t.red }}>{submitError}</p>}
     </Modal>
   );
 }
@@ -4988,7 +5043,7 @@ function settingsPageStyle(t: ThemeColors): React.CSSProperties {
     "--gks-text": t.text, "--gks-secondary": t.textSec, "--gks-muted": t.textMuted,
     "--gks-faint": t.textFaint, "--gks-accent": t.accent, "--gks-accent-fg": t.accentFg,
     "--gks-accent-bg": t.accentBg, "--gks-border": t.border, "--gks-input-bg": t.inputBg,
-    "--gks-input-border": t.inputBorder, "--gks-dialog": t.dialogBg, "--gks-row-hover": t.rowHover,
+    "--gks-disabled-bg": t.disabledBg, "--gks-input-border": t.inputBorder, "--gks-dialog": t.dialogBg, "--gks-row-hover": t.rowHover,
     "--gks-green": t.green, "--gks-green-bg": t.greenBg, "--gks-red": t.red, "--gks-red-bg": t.redBg,
   } as React.CSSProperties;
 }
@@ -5197,6 +5252,44 @@ function TokenSettingsLink({ provider, url, tokenKind }: {
 }
 
 // GitLab integration settings and personal access token metadata.
+function GlabSettings() {
+  const t = useTheme();
+  const [instance, setInstance] = useState(readGlabInstance);
+  const [draft, setDraft] = useState(() => instance || loadGitlab().url || "https://gitlab.com");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const save = (value: string) => {
+    localStorage.setItem("gitkit.glab.instance", value);
+    setInstance(value);
+    window.dispatchEvent(new Event("gitkit-credentials-changed"));
+  };
+  const connect = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true); setError("");
+    try {
+      const url = new URL(draft.trim());
+      const user = await invoke<string>("glab_account", { instanceUrl: url.href });
+      if (alive.current) { save(url.origin); toast.success(tf("已通过 glab 连接 @{0}", user)); }
+    } catch (cause) { if (alive.current) setError(String(cause)); }
+    finally { if (alive.current) setBusy(false); }
+  };
+  return <section className="mt-6 pt-4 flex flex-col gap-2" style={{ borderTop: `1px solid ${t.border}` }}>
+    <h3 className="flex items-center gap-2 text-xs font-semibold" style={{ color: t.text }}><TerminalSquare size={15} />GitLab CLI</h3>
+    <p className="text-[11px]" style={{ color: t.textSec }}>{tx("使用 glab 的登录账号查看和创建当前分支的合并请求。")}</p>
+    {instance ? <div className="flex items-center justify-between gap-3 text-xs"><code>{new URL(instance).host}</code>
+      <button className="gk-conn-button px-2 py-1" onClick={() => { try { save(""); setError(""); } catch (e) { setError(String(e)); } }}>{tx("断开 CLI 连接")}</button></div>
+    : <form onSubmit={connect} className="flex flex-col gap-2"><div className="flex items-center gap-2">
+      <input aria-label={tx("GitLab 实例地址")} type="url" required disabled={busy} value={draft} onChange={e => { setDraft(e.target.value); setError(""); }}
+        placeholder="https://gitlab.com" className="min-w-0 flex-1 px-2.5 py-2 text-xs" style={dlgCtl(t)} />
+      <button type="submit" disabled={busy} className="gk-conn-button px-3 py-2 text-xs" style={dlgCtl(t)}>{busy ? tx("正在连接…") : tx("连接 glab")}</button>
+    </div><p className="text-[10px]" style={{ color: t.textMuted }}>{tx("首次使用请在终端运行 glab auth login。")}</p></form>}
+    {error && <p role="alert" className="text-xs" style={{ color: t.red }}>{error}</p>}
+  </section>;
+}
+
 function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlaceholder, hint, test }: {
   storageKey: string; title: string; desc: string;
   urlPlaceholder: string; tokenPlaceholder: string; hint: string;
@@ -5327,8 +5420,7 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
             const granted = permission === "granted";
             const color = granted ? t.green : permission === "inactive" ? t.red : t.textSec;
             const Icon = granted ? Check : permission === "unknown" ? Minus : X;
-            return <div key={capability.title} className="min-w-0 p-3 flex flex-col gap-2"
-              style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 3, background: t.bgPanel }}>
+            return <div key={capability.title} className="min-w-0 py-1 flex flex-col gap-1.5">
               <span className="text-[11px] font-medium" style={{ color: t.text }}>{tx(capability.title)}</span>
               <span className="flex items-center gap-1 text-[10px] font-medium min-h-3" style={{ color }}>
                 {initialLoading ? <Skeleton width={54} height={10} color={t.rowHover} /> : <><Icon size={12} />{granted ? tx("已拥有") : permission === "denied" ? tx("未授权") : permission === "inactive" ? tx("令牌不可用") : tx("无法确认")}</>}
@@ -5360,12 +5452,12 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
       </div>
       {configured && !editing ? (
         <>
-          <div className="flex flex-wrap items-center gap-3 p-4" style={{ borderRadius: R - 2, border: `0.5px solid ${t.border}`, background: t.bgPanel }}>
+          <div className="flex flex-wrap items-center gap-3 pb-4" style={{ borderBottom: `0.5px solid ${t.border}` }}>
             <Cloud size={22} className="shrink-0" style={{ color: t.accent }} />
             <div className="flex flex-col gap-1 min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs font-semibold break-all" style={{ color: t.text }}>{hostOf(saved.url) || saved.url}</span>
-                {initialLoading ? <Skeleton width={36} height={14} color={t.rowHover} /> : <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ color: stateColor, background: inactive ? t.redBg : info?.active ? t.greenBg : t.inputBg }}>{stateLabel}</span>}
+                {initialLoading ? <Skeleton width={36} height={14} color={t.rowHover} /> : <span className="text-[10px] px-1.5 py-0.5 rounded" style={{ color: stateColor, background: inactive ? t.redBg : info?.active ? t.greenBg : t.inputBg }}>{stateLabel}</span>}
               </div>
               <span className="text-[11px] font-mono" style={{ color: t.textSec }}>••••••••{saved.token.length > 4 ? saved.token.slice(-4) : ""}</span>
             </div>
@@ -5387,8 +5479,8 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
           <p className="text-[10px]" style={{ color: t.textSec }}>{tx("暂不支持多个集成，如需切换请修改或删除后重新填写。")}</p>
         </>
       ) : editing ? (
-        <form onSubmit={event => { event.preventDefault(); saveNow(); }} className="flex flex-col gap-5 p-5"
-          style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 2, background: t.bgPanel }}>
+        <form onSubmit={event => { event.preventDefault(); saveNow(); }} className="flex flex-col gap-5 pt-4"
+          style={{ borderTop: `0.5px solid ${t.border}` }}>
           <div className="flex items-center gap-2" style={{ color: t.text }}><Pencil size={14} style={{ color: t.accent }} />
             <h3 className="text-xs font-semibold">{configured ? tx("修改集成") : tx("新增集成")}</h3>
           </div>
@@ -5428,8 +5520,8 @@ function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlac
               <RefreshCw size={12} className={status.kind === "testing" ? "animate-spin" : undefined} />{tx("检测连接")}</button>
             <div className="flex-1" />
             <button type="button" {...press(cancelEdit)} className="gk-conn-button px-3 py-2 text-[11px] cursor-pointer" style={{ color: t.textSec, borderRadius: R - 3 }}>{tx("取消")}</button>
-            <button type="submit" {...press(saveNow)} disabled={!canSave} className="gk-conn-button px-4 py-2 text-[11px] font-medium cursor-pointer disabled:opacity-40"
-              style={{ background: t.accent, color: "#fff", borderRadius: R - 3 }}>{tx("保存集成")}</button>
+            <button type="submit" {...press(saveNow)} disabled={!canSave} className="gk-conn-button px-4 py-2 text-[11px] font-medium cursor-pointer"
+              style={{ background: canSave ? t.accent : t.disabledBg, color: canSave ? "#fff" : t.textMuted, borderRadius: R - 2 }}>{tx("保存集成")}</button>
           </div>
           {(info || infoError) && metadata}
         </form>
@@ -5480,8 +5572,7 @@ function GithubTokenDetails({ info, loading, error, now }: {
         const permission = githubCapability(info, capability.id, now);
         const color = permission === "granted" ? t.green : permission === "public" ? t.amber : permission === "inactive" ? t.red : t.textSec;
         const Icon = permission === "granted" || permission === "public" ? Check : permission === "unknown" ? Minus : X;
-        return <div key={capability.id} title={tx(capability.detail)} className="min-w-0 px-3 py-2.5 flex flex-col gap-1.5"
-          style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 3, background: t.bgPanel }}>
+        return <div key={capability.id} title={tx(capability.detail)} className="min-w-0 py-1 flex flex-col gap-1.5">
           <span className="text-[11px] font-medium" style={{ color: t.text }}>{tx(capability.title)}</span>
           <span className="flex items-center gap-1 text-[10px] font-medium min-h-3" style={{ color }}>
             {initialLoading ? <Skeleton width={54} height={10} color={t.rowHover} /> : <><Icon size={12} />{permission === "granted" ? tx("已拥有") : permission === "public" ? tx("仅公开仓库") : permission === "denied" ? tx("未授权") : permission === "inactive" ? tx("令牌已过期") : tx("无法确认")}</>}
@@ -5652,8 +5743,8 @@ function GithubAccountsSettings() {
           })}
         </div>}
     </div>
-    {showForm ? <form onSubmit={event => { event.preventDefault(); submit(); }} className="flex flex-col gap-4 p-4"
-      style={{ border: `0.5px solid ${t.border}`, borderRadius: R - 2, background: t.bgPanel }}>
+    {showForm ? <form onSubmit={event => { event.preventDefault(); submit(); }} className="flex flex-col gap-4 pt-4"
+      style={{ borderTop: `0.5px solid ${t.border}` }}>
       <h3 className="flex items-center gap-2 text-xs font-semibold" style={{ color: t.text }}><Pencil size={14} style={{ color: t.accent }} />{editingId ? tx("修改账号") : tx("新增账号")}</h3>
       <div className="flex flex-col gap-2">
         <label htmlFor="github-label" className="text-[11px] font-medium" style={{ color: t.text }}>{tx("账号备注")} <span style={{ color: t.textSec }}>{tx("（选填）")}</span></label>
@@ -5690,8 +5781,8 @@ function GithubAccountsSettings() {
           <RefreshCw size={12} className={testing ? "animate-spin" : undefined} />{tx("检测连接")}</button>
         <div className="flex-1" />
         <button type="button" {...press(reset)} className="gk-conn-button px-3 py-2 text-[11px] cursor-pointer" style={{ color: t.textSec, borderRadius: R - 3 }}>{tx("取消")}</button>
-        <button type="submit" {...press(submit)} disabled={!valid} className="gk-conn-button px-4 py-2 text-[11px] font-medium cursor-pointer disabled:opacity-40"
-          style={{ background: t.accent, color: "#fff", borderRadius: R - 3 }}>{editingId ? tx("保存账号") : tx("添加账号")}</button>
+        <button type="submit" {...press(submit)} disabled={!valid} className="gk-conn-button px-4 py-2 text-[11px] font-medium cursor-pointer"
+          style={{ background: valid ? t.accent : t.disabledBg, color: valid ? "#fff" : t.textMuted, borderRadius: R - 2 }}>{editingId ? tx("保存账号") : tx("添加账号")}</button>
       </div>
       {draftInfo && <GithubTokenDetails info={draftInfo} loading={false} error="" now={now} />}
     </form> : selected ? <section id="github-account-detail" aria-labelledby="github-detail-title" className="flex flex-col gap-1 pt-3" style={{ borderTop: `0.5px solid ${t.border}` }}>
@@ -5737,11 +5828,10 @@ function AppearanceSettings({ paletteId, setPaletteId, themeMode, setThemeMode }
           const active = themeMode === m;
           const { Icon, label } = THEME_META[m];
           return (
-            <button key={m} {...press(() => setThemeMode(m))}
+            <button key={m} aria-pressed={active} {...press(() => setThemeMode(m))}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors"
-              style={{ borderRadius: R - 4,
-                background: active ? t.accent : "transparent",
-                color: active ? "#fff" : t.textSec }}
+              style={{ borderRadius: 6, border: `0.5px solid ${active ? t.accent + "44" : "transparent"}`,
+                background: active ? t.accentBg : "transparent", color: active ? t.accentFg : t.textSec }}
               onMouseEnter={(e) => { if (!active) e.currentTarget.style.background = t.rowHover; }}
               onMouseLeave={(e) => { if (!active) e.currentTarget.style.background = "transparent"; }}>
               <Icon size={13} /> {tx(label)}
@@ -5757,19 +5847,17 @@ function AppearanceSettings({ paletteId, setPaletteId, themeMode, setThemeMode }
           const preview = previewDark ? pal.dark : pal.light;
           const active = paletteId === id;
           return (
-            <button key={id} {...press(() => setPaletteId(id))}
-              className="flex flex-col gap-2.5 p-3 text-left cursor-pointer transition-all"
-              style={{ borderRadius: R - 1,
-                background: preview.bg,
-                border: `1.5px solid ${active ? t.accent : t.border}`,
-                boxShadow: active ? `0 0 0 3px ${t.accentBg}` : "none" }}>
+            <button key={id} aria-pressed={active} {...press(() => setPaletteId(id))}
+              className="flex flex-col gap-2.5 p-2 text-left cursor-pointer transition-colors"
+              style={{ borderRadius: 12, background: preview.bg,
+                border: `0.5px solid ${active ? t.accent : t.border}` }}>
               <div className="flex items-center justify-between">
                 <span className="text-xs font-semibold" style={{ color: preview.text }}>{tx(pal.label)}</span>
                 {active && <Check size={13} style={{ color: preview.accent }} />}
               </div>
               <div className="flex gap-1.5">
                 {[preview.accent, preview.accent2, preview.accent3].map((c, i) => (
-                  <span key={i} className="flex-1" style={{ height: 20, borderRadius: 5, background: c }} />
+                  <span key={i} className="flex-1" style={{ height: 20, borderRadius: 4, background: c }} />
                 ))}
               </div>
               <span className="text-[10px]" style={{ color: preview.textMuted }}>
@@ -6402,11 +6490,11 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId,
                 defaultId={defaultId} setDefaultId={setDefaultId} onOpenProjects={() => setSection("projects")} />
             )}
             {section === "gitlab" && (
-              <RemoteConnSettings storageKey="gitkit.gitlab" title={tx("GitLab 集成")}
+              <><RemoteConnSettings storageKey="gitkit.gitlab" title={tx("GitLab 集成")}
                 desc={tx("填入 GitLab 实例地址与个人访问令牌 (Personal Access Token)，用于查看、创建及合并请求和推送认证。")}
                 urlPlaceholder="https://gitlab.example.com" tokenPlaceholder="glpat-…"
                 hint={tx("查看合并请求可用 read_api；创建与合并请求需要 api。仅拉取可用 read_repository，仅推送可用 write_repository。令牌保存在本机。")}
-                test={gitlabTest} />
+                test={gitlabTest} /><GlabSettings /></>
             )}
             {section === "github" && <GithubAccountsSettings />}
             {section === "projects" && <ProjectPrefsSettings identities={identities} />}
@@ -6594,7 +6682,7 @@ function ContextMenu({ x, y, items, onClose, closing = false }: {
         border: `0.5px solid ${t.glassBorder}`, borderRadius: R, boxShadow: t.shadowWindow, padding: 5,
       } as React.CSSProperties}>
         {items.map((it, i) => it.sep ? (
-          <div key={i} style={{ height: "0.5px", background: t.border, margin: "4px 6px" }} />
+          <div key={i} role="separator" style={{ height: "0.5px", background: t.border, margin: "5px 6px" }} />
         ) : (
           <button key={i} onClick={() => { onClose(); it.onClick(); }}
             className="w-full flex items-center gap-2.5 px-2 py-1.5 text-left cursor-pointer"
@@ -6780,6 +6868,8 @@ export default function App() {
   const detailPanelRef = useRef<HTMLDivElement>(null);
   const [traceMotion, setTraceMotion] = useState(false);
   const [topologyDetailSplit, setTopologyDetailSplit] = useState(false);
+  const [compactHistory, setCompactHistory] = useState(false);
+  const detailTriggerRef = useRef<HTMLElement | null>(null);
   const historySizeObserverRef = useRef<ResizeObserver | null>(null);
   const observeHistoryContent = useCallback((element: HTMLDivElement | null) => {
     historySizeObserverRef.current?.disconnect();
@@ -6787,6 +6877,7 @@ export default function App() {
     if (!element) return;
     const measure = () => {
       setTraceMotion(false);
+      setCompactHistory(element.clientWidth <= TOPOLOGY_DETAIL_MIN_WIDTH);
       const split = element.clientWidth >= TOPOLOGY_DETAIL_CONTEXT_WIDTH + TOPOLOGY_DETAIL_MIN_WIDTH;
       setTopologyDetailSplit(current => current === split ? current : split);
     };
@@ -6797,16 +6888,23 @@ export default function App() {
   }, []);
   const topologyDetailFullWidth = historyMode === "topology" && !topologyDetailSplit;
   const topologyCovered = historyMode === "topology" && detailOpen && (topologyDetailFullWidth || !!fileTrace);
+  const historyCovered = topologyCovered || (compactHistory && detailOpen);
   useLayoutEffect(() => {
     const panel = detailPanelRef.current;
-    if (topologyCovered && !fileTrace && panel && !panel.contains(document.activeElement)) {
-      panel.querySelector<HTMLButtonElement>("[data-gk-back-topology]")?.focus({ preventScroll: true });
+    if (historyCovered && !fileTrace && panel && !panel.contains(document.activeElement)) {
+      panel.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
     }
-  }, [topologyCovered, fileTrace]);
-  const openDetail = () => { setTraceMotion(false); setFileTrace(null); setDetailClosing(false); setDetailOpen(true); };
+  }, [historyCovered, fileTrace]);
+  const openDetail = () => {
+    if (!detailOpen) detailTriggerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setTraceMotion(false); setFileTrace(null); setDetailClosing(false); setDetailOpen(true);
+  };
   const closeDetail = () => {
     setTraceMotion(false);
     setDiffExpanded(false); setDetailOpen(false); setDetailClosing(true);
+    if (compactHistory && (historyMode !== "topology" || viewChanges)) {
+      requestAnimationFrame(() => detailTriggerRef.current?.focus({ preventScroll: true }));
+    }
     if (historyMode === "topology" && !viewChanges) requestAnimationFrame(() => {
       const hash = inspectedTopologyCommit?.fullHash;
       if (hash) timelineScrollRef.current?.querySelector<HTMLElement>(`[data-commit-hash="${hash}"]`)?.focus({ preventScroll: true });
@@ -8340,7 +8438,6 @@ export default function App() {
   const [credentialRevision, setCredentialRevision] = useState(0);
   const mrConnection = loadGitlab();
   const mr = useMergeRequests({url: mrConnection.url, token: mrConnection.token, credentialRevision});
-  const hasMergeRequests = mr.enabled && (mr.snapshot?.total ?? 0) > 0;
   const mrFiles = useMemo(() => mr.diffVersion ? mrCommitFiles(mr.diffVersion) : [], [mr.diffVersion, language]);
   const checkRevisionRef = useRef(-1);
   const completedCheckRef = useRef(0);
@@ -9037,45 +9134,96 @@ export default function App() {
   };
 
   // Create merge/pull request.
-  const [prOpen, setPrOpen] = useState(false);
-  const prInfo = (() => {
-    const originUrl = remotes.find((r) => r.name === "origin")?.url ?? remotes[0]?.url ?? "";
-    const host = hostOf(originUrl);
-    // GitHub token/instance is resolved at submit time (may prompt among accounts).
-    if (githubCandidates(originUrl).length) return { provider: "github" as const, instanceUrl: "", token: "", remoteUrl: originUrl, term: tx("拉取请求") };
-    const gl = loadGitlab();
-    if (gl.token && (!gl.url || host === hostOf(gl.url))) return { provider: "gitlab" as const, instanceUrl: gl.url, token: gl.token, remoteUrl: originUrl, term: tx("合并请求") };
-    return null;
-  })();
-  const requestCreatePR = () => {
-    if (!activeProject) return;
-    if (!prInfo) { toast(tx("请先在设置中配置 GitLab 或 GitHub 令牌")); return; }
-    setPrOpen(true);
-  };
-  const doCreatePR = async (source: string, target: string, title: string, description: string): Promise<boolean> => {
-    if (!prInfo) return false;
-    let instanceUrl = prInfo.instanceUrl;
-    let token = prInfo.token;
-    // GitHub: pick the account matching origin (prompts when several match).
-    if (prInfo.provider === "github") {
-      const resolved = await resolveRemoteToken(prInfo.remoteUrl, tx("创建拉取请求"));
-      if (!resolved || !resolved.token) return false; // cancelled, or no token configured
-      token = resolved.token;
-      instanceUrl = resolved.account?.url ?? "";
+  const prRemote = remotes.find(remote => remote.name === "origin") ?? remotes[0];
+  const prUrl = prRemote?.url ?? "";
+  const prContext = JSON.stringify([workspaceView, path, prUrl, currentBranch]);
+  const [prSession, setPrSession] = useState<{ context: string; accountId?: string; chooseSource?: boolean } | null>(null);
+  useEffect(() => { setPrSession(null); }, [prContext]);
+  const currentPRContext = useRef(prContext);
+  currentPRContext.current = prContext;
+  const accountChoice = prSession?.context === prContext ? prSession.accountId : undefined;
+  const prConnection = useMemo<RequestConnection | null>(() => {
+    if (!prUrl || !path || workspaceView !== "repository") return null;
+    const cli = readGlabInstance();
+    if (cli && requestRepository(prUrl, cli)) return { provider: "gitlab", instanceUrl: cli, remoteUrl: prUrl, token: "", useGlab: true };
+    const instanceUrl = mrConnection.url || "https://gitlab.com";
+    if (mrConnection.token && requestRepository(prUrl, instanceUrl)) return { provider: "gitlab", instanceUrl, remoteUrl: prUrl, token: mrConnection.token };
+    const accounts = matchingPRAccounts(prUrl);
+    const account = accounts.find(a => a.id === accountChoice) ?? accounts.find(a => a.id === loadProjectAccountId(path)) ?? (accounts.length === 1 ? accounts[0] : null);
+    return account ? { provider: "github", instanceUrl: account.url, token: account.token, remoteUrl: prUrl } : null;
+  }, [prUrl, path, workspaceView, accountChoice, credentialRevision, mrConnection.url, mrConnection.token]);
+  const latestConnection = useRef(prConnection);
+  latestConnection.current = prConnection;
+  const stillHere = () => currentPRContext.current === prContext && latestConnection.current === prConnection;
+  const currentRequest = useBranchRequest(prConnection, hasHead ? currentBranch : "");
+  const requestSettingsSection = useMemo(() => prConnection?.provider
+    ?? (requestRepository(prUrl, "https://github.com") || (prUrl && matchingPRAccounts(prUrl).length) ? "github" : "gitlab"),
+    [prConnection, prUrl, credentialRevision]);
+  const term = requestSettingsSection === "github" ? tx("拉取请求") : tx("合并请求");
+  const openRequest = async (item: PlatformRequest) => {
+    if (!prConnection || !stillHere()) return;
+    const inboxInstance = (mrConnection.url || "https://gitlab.com").replace(/\/+$/, "");
+    if (prConnection.provider === "gitlab" && mr.enabled && prConnection.instanceUrl.replace(/\/+$/, "") === inboxInstance) {
+      const snapshot = mr.snapshot?.items.some(row => row.id === item.id) ? mr.snapshot : await mr.refresh().catch(() => null);
+      if (!stillHere()) return;
+      if (snapshot?.items.some(row => row.id === item.id)) {
+        setDiffExpanded(false); await mr.select(item.id); return;
+      }
     }
-    const tid = toast.loading(tx("正在创建…"));
-    try {
-      const url = await createPullRequest({
-        provider: prInfo.provider, instanceUrl, remoteUrl: prInfo.remoteUrl,
-        token, source, target, title, description,
-      });
-      toast.success(tf("已创建{0},正在浏览器打开", prInfo.term), { id: tid, description: url });
-      return true;
-    } catch (e) {
-      toast.error(tf("创建失败：{0}", e), { id: tid });
-      throw e; // keep the dialog open so the user can retry
-    }
+    await openPlatformRequest(item.url, prConnection.instanceUrl, prConnection.provider);
   };
+  const openRequestSettings = () => { setSettingsSection(requestSettingsSection); setSettingsOpen(true); };
+  const requestCreatePR = async (chooseSource = false) => {
+    if (!path || !prRemote) return;
+    if (!prConnection) {
+      const accounts = matchingPRAccounts(prUrl);
+      if (accounts.length > 1) {
+        const choice = await chooseAccount(accounts, term, true);
+        if (!choice || !stillHere()) return;
+        if (choice.remember) saveProjectAccountId(path, choice.account.id);
+        setPrSession({ context: prContext, accountId: choice.account.id, chooseSource });
+      } else {
+        openRequestSettings();
+      }
+      return;
+    }
+    if (!chooseSource && currentRequest.data?.requests.length === 1) {
+      try { await openRequest(currentRequest.data.requests[0]); }
+      catch (error) { toast.error(tf("打开请求失败：{0}", error)); }
+      return;
+    }
+    currentRequest.refresh();
+    setPrSession({ context: prContext, accountId: accountChoice, chooseSource });
+  };
+  const doCreatePR = async (source: string, target: string, title: string, description: string, publish: boolean) => {
+    if (!prConnection || !prRemote || !path || !stillHere()) return false;
+    const head = branches.find(b => b.name === source)?.head;
+    const live = await lookupBranchRequest({ ...prConnection, source });
+    if (!stillHere()) return false;
+    const existing = live.requests.find(item => item.target === target);
+    if (existing) { await openRequest(existing); currentRequest.refresh(); return true; }
+    if (publish) {
+      await runRepoMutation(path, tf("正在推送 {0}…", source), () => invoke("push_request_branch", {
+        path, remote: prRemote.name, remoteUrl: prUrl, source, expectedHead: head, token: prConnection.token || null,
+      }));
+      if (!stillHere()) return false;
+    }
+    let item: PlatformRequest;
+    try { item = await createPullRequest({ ...prConnection, source, target, title, description }); }
+    catch (error) {
+      if (publish) throw new Error(tf("分支已推送，请核对请求的创建结果：{0}", error));
+      throw error;
+    }
+    if (stillHere()) {
+      currentRequest.refresh();
+      toast.success(tf("已创建{0}", term), { description: item.title });
+      try { await openRequest(item); }
+      catch (error) { toast.error(tf("打开请求失败：{0}", error)); }
+    }
+    return true;
+  };
+
+
 
   const handleSelectProject = (id: string) => {
     mr.backWorkspace();
@@ -9278,6 +9426,7 @@ export default function App() {
     context: (event, commit) => openCtx(event, commit.isStash
       ? [
           { label: tx("应用到工作区"), Icon: RotateCcw, onClick: () => doStashApply(commit.stashIndex ?? 0) },
+          { sep: true },
           { label: tx("删除储藏"), Icon: Trash2, danger: true, onClick: () => doStashDrop(commit.stashIndex ?? 0) },
         ]
       : [
@@ -9331,7 +9480,12 @@ export default function App() {
             onCreateTag={hasHead && dataReady && !switching ? () => setTagDialogOpen(true) : undefined}
             onCherryPick={hasHead && dataReady && !switching && operationKnown && !activeRepoOperation ? requestCherryPickActive : undefined}
             onStash={hasHead && dataReady && !switching && operationKnown && !activeRepoOperation ? requestStash : undefined}
-            onCreatePR={hasHead && dataReady && !switching && remotes.length > 0 ? requestCreatePR : undefined}
+            onOtherRequest={() => { void requestCreatePR(true); }} onRequestSettings={openRequestSettings}
+            requestSettingsLabel={requestSettingsSection === "github" ? tx("GitHub 集成") : tx("GitLab 集成")}
+            requestLabel={currentRequest.data?.requests.length === 1
+              ? `${prConnection?.provider === "gitlab" ? "MR !" : "PR #"}${currentRequest.data.requests[0].number}`
+              : currentRequest.data?.requests.length === 0 ? tf("创建{0}", term) : term}
+            onCreatePR={hasHead && dataReady && !switching && remotes.length > 0 ? () => { void requestCreatePR(); } : undefined}
             pushCount={branches.find((b) => b.current)?.ahead ?? 0}
             busy={gitBusy ?? (busyLabel || forcePushRequest || undoChecking || createRepoBusy ? "other" : null)} />}
             </div>
@@ -9455,7 +9609,7 @@ export default function App() {
               loading={mr.loading} error={mr.error} files={mrFiles} diffVersion={mr.diffVersion}
               diffLoading={mr.diffLoading} diffError={mr.diffError} discussions={mr.discussions}
               discussionsLoading={mr.discussionsLoading} discussionsError={mr.discussionsError}
-              onRefresh={mr.refresh} onReviewLatest={mr.reviewLatest} onDownloadDiff={mr.downloadDiff} onMerge={mr.merge} onCommitMessages={mr.commitMessages} onCancel={mr.close} onApprove={mr.approve} onOpenExternal={mr.openExternal}
+              onRefresh={async () => { await mr.refresh(); }} onReviewLatest={mr.reviewLatest} onDownloadDiff={mr.downloadDiff} onMerge={async options => { try { return await mr.merge(options); } finally { currentRequest.refresh(); } }} onCommitMessages={mr.commitMessages} onCancel={async () => { try { return await mr.close(); } finally { currentRequest.refresh(); } }} onApprove={mr.approve} onOpenExternal={mr.openExternal}
               onBackList={mr.backList} onBackWorkspace={mr.backWorkspace} onTabChange={mr.onTabChange}
               onCreateDiffComment={mr.createDiffComment} onParticipantCandidates={mr.participantCandidates} onUpdateParticipants={mr.updateParticipants}
               renderDiff={(files, selected, onSelect, sourceKey, lineComments) => <FileDiffView files={files} selectedFile={selected}
@@ -9482,17 +9636,14 @@ export default function App() {
                 const items: CtxItem[] = [];
                 if (localOnly) {
                   items.push({ label: tx("重命名分支"), Icon: Pencil, onClick: () => setRenameTarget(b) });
-                  if (!b.current) {
-                    // A worktree-held branch is still deletable — the dialog
-                    // just adds the worktree removal as an explicit extra step.
-                    items.push({
-                      label: b.worktree ? tx("移除工作树并删除分支") : tx("删除分支"),
-                      Icon: Trash2, danger: true, onClick: () => requestDeleteBranch(b),
-                    });
-                  }
-                  items.push({ sep: true });
                 }
                 items.push({ label: tx("复制分支名"), Icon: Copy, onClick: () => { void copyWithToast(b.name, tx("分支名")); } });
+                if (localOnly && !b.current) {
+                  items.push({ sep: true }, {
+                    label: b.worktree ? tx("移除工作树并删除分支") : tx("删除分支"),
+                    Icon: Trash2, danger: true, onClick: () => requestDeleteBranch(b),
+                  });
+                }
                 openCtx(e, items);
               }}
               onSyncRemote={requestSyncRemote}
@@ -9511,6 +9662,7 @@ export default function App() {
               onStashApply={doStashApply} onStashDrop={doStashDrop}
               onStashContext={(e, s) => openCtx(e, [
                 { label: tx("应用到工作区"), Icon: RotateCcw, onClick: () => doStashApply(s.index) },
+                { sep: true },
                 { label: tx("删除储藏"), Icon: Trash2, danger: true, onClick: () => doStashDrop(s.index) },
               ])}
               selectedStashIndex={detailOpen && selectedStash ? selectedStash.index : null} />
@@ -9518,10 +9670,10 @@ export default function App() {
 
             {/* Keep the history mounted underneath the detail so its scroll
                 position and topology camera survive full-width inspection. */}
-            <div ref={observeHistoryContent} className="relative flex-1 min-w-0 overflow-hidden">
-            <div className="absolute inset-0 flex flex-col overflow-hidden" aria-hidden={topologyCovered}
-              ref={element => { if (element) element.inert = topologyCovered; }}
-              style={{ visibility: topologyCovered && !traceMotion ? "hidden" : undefined }}>
+            <div ref={observeHistoryContent} className="gk-history-stack relative flex-1 min-w-0 overflow-hidden" data-compact={compactHistory || undefined}>
+            <div className="gk-history-base absolute inset-0 flex flex-col overflow-hidden" aria-hidden={historyCovered}
+              ref={element => { if (element) element.inert = historyCovered; }}
+              style={{ visibility: topologyCovered && !compactHistory && !traceMotion ? "hidden" : undefined }}>
               <div className="flex-shrink-0 flex items-center gap-2 px-4 py-2.5"
                 style={{ borderBottom: `0.5px solid ${theme.border}`, background: "transparent" }}>
                 <span className="text-xs font-medium" style={{ color: theme.textSec }}>{tx("提交历史")}</span>
@@ -9639,6 +9791,7 @@ export default function App() {
                     }}
                     onContextMenu={(event, commit) => openCtx(event, commit.isStash ? [
                       { label: tx("应用到工作区"), Icon: RotateCcw, onClick: () => doStashApply(commit.stashIndex ?? 0) },
+                      { sep: true },
                       { label: tx("删除储藏"), Icon: Trash2, danger: true, onClick: () => doStashDrop(commit.stashIndex ?? 0) },
                     ] : [
                       { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { void copyWithToast(commit.fullHash, tx("提交哈希")); } },
@@ -9733,15 +9886,15 @@ export default function App() {
                 }}
                 style={{ width: fileTrace || topologyDetailFullWidth ? "100%" : historyMode === "topology"
                     ? `calc(100% - ${TOPOLOGY_DETAIL_CONTEXT_WIDTH}px)`
-                    : "min(100%, max(760px, calc(100% - clamp(240px, 18vw, 300px))))", background: theme.bgPanel,
+                    : `min(100%, max(${TOPOLOGY_DETAIL_MIN_WIDTH}px, calc(100% - clamp(240px, 18vw, 300px))))`, background: theme.bgPanel,
                   "--gk-detail-hover": theme.rowHover,
                   // Above the timeline's hover popovers (ref chips use z-index 50),
                   // so an expanded branch-ref overlay never bleeds over the panel.
                   zIndex: 60,
-                  borderTopLeftRadius: topologyDetailFullWidth ? 0 : 14,
-                  borderBottomLeftRadius: topologyDetailFullWidth ? 0 : 14,
-                  borderLeft: topologyDetailFullWidth ? "none" : `0.5px solid ${theme.border}`,
-                  boxShadow: topologyDetailFullWidth ? "none" : theme.isDark ? "-12px 0 34px rgba(0,0,0,0.32)" : "-12px 0 34px rgba(0,0,0,0.10)" } as React.CSSProperties}>
+                  borderTopLeftRadius: topologyDetailFullWidth || compactHistory ? 0 : 12,
+                  borderBottomLeftRadius: topologyDetailFullWidth || compactHistory ? 0 : 12,
+                  borderLeft: topologyDetailFullWidth || compactHistory ? "none" : `0.5px solid ${theme.border}`,
+                  boxShadow: topologyDetailFullWidth || compactHistory ? "none" : theme.isDark ? "-12px 0 34px rgba(0,0,0,0.32)" : "-12px 0 34px rgba(0,0,0,0.10)" } as React.CSSProperties}>
                 <div className="flex-shrink-0 flex items-center gap-1 px-2.5 py-2"
                   style={{ borderBottom: `0.5px solid ${theme.border}`, ...glassStyle(theme) }}>
                   {fileTrace ? <>
@@ -9851,16 +10004,16 @@ export default function App() {
           )}
           </div>
           <StatusBar project={activeProject} branch={branches.find((b) => b.current)} changes={changesCount}
-            mrEntry={hasMergeRequests ? <MergeRequestEntry theme={theme} snapshot={mr.snapshot} open={mr.listOpen}
-              anchorRef={mr.anchorRef} onToggle={mr.toggleList} /> : undefined}
+            mrEntry={<MergeRequestEntry theme={theme} snapshot={mr.snapshot} open={mr.listOpen}
+              anchorRef={mr.anchorRef} onToggle={mr.toggleList} />}
             home={workspaceView === "home" ? { projects: projects.length, attention: attentionCount, refreshing: overview.refreshing } : undefined}
             ready={dataReady} errored={errored}
             checkProgress={checkProgress} checkResult={checkSnapshot?.result ?? null}
             onShowCheckResult={() => { if (!pullBusy && checkSnapshot?.result) void openCheckResult(checkSnapshot.result); }}
             onShowChanges={() => { mr.backWorkspace(); setViewChanges(true); setSelectedWorkingFile(null); setSelectedStash(null); setSelectedStashFile(null); openDetail(); }}
             onSearch={() => { if (workspaceView === "home") document.getElementById("overview-search")?.focus(); else setSearchOpen(true); }} />
-          <MergeRequestPopover theme={theme} snapshot={mr.snapshot} open={hasMergeRequests && mr.listOpen}
-            configured={mr.enabled} error={mr.error} anchorRef={mr.anchorRef} onClose={mr.closeList}
+          <MergeRequestPopover theme={theme} snapshot={mr.snapshot} open={mr.listOpen} repository={workspaceView === "repository" ? requestRepository(prRemote?.url ?? "", mrConnection.url || "https://gitlab.com") : null}
+            configured={mr.enabled} cliConnected={!!readGlabInstance()} error={mr.syncError} anchorRef={mr.anchorRef} onClose={mr.closeList}
             onSelect={(mrId) => { setDiffExpanded(false); void mr.select(mrId); }} onRefresh={mr.refresh}
             onConfigure={() => { mr.closeList(); setSettingsSection("gitlab"); setSettingsOpen(true); }} />
         </div>
@@ -10027,11 +10180,10 @@ export default function App() {
             }} />
         ) : null}</DialogPresence>
 
-        {prOpen && prInfo && (
-          <CreatePRDialog path={activeProject?.path} branches={branches} currentBranch={currentBranch} term={prInfo.term}
-            defaultTarget={["main", "master", "dev", "develop"].find((n) => branches.some((b) => b.name === n))
-              ?? branches.find((b) => b.name !== currentBranch)?.name ?? currentBranch}
-            onCancel={() => setPrOpen(false)} onConfirm={doCreatePR} />
+        {prSession?.context === prContext && prConnection && prRemote && path && (
+          <CreatePRDialog key={prContext + credentialRevision} path={path} branches={branches} currentBranch={currentBranch} term={term}
+            chooseSource={prSession.chooseSource} connection={prConnection} remote={prRemote} commits={commits} initialLookup={currentRequest}
+            onOpenRequest={openRequest} onCancel={() => setPrSession(null)} onConfirm={doCreatePR} />
         )}
 
         <DialogPresence>{acctPicker ? (

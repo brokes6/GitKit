@@ -28,8 +28,7 @@ export function useMergeRequests({ url, token, credentialRevision }: {
   const value = enabled && stored.key === key ? stored : empty(key);
   const storeRef = useRef(value); storeRef.current = value;
   const [listState, setListState] = useState<{key:string;open:boolean}>({key,open:false});
-  const hasRequests = enabled && (value.snapshot?.total ?? 0) > 0;
-  const listOpen = hasRequests && listState.key === key && listState.open;
+  const listOpen = listState.key === key && listState.open;
   const anchorRef = useRef<HTMLButtonElement>(null);
   const epochRef = useRef<number | null>(null);
   const detailRequest = useRef(0), diffRequest = useRef(0), discussionRequest = useRef(0);
@@ -84,10 +83,6 @@ export function useMergeRequests({ url, token, credentialRevision }: {
   }, [key, enabled, configureNative, applySnapshot]);
 
   useEffect(() => {
-    if (!hasRequests) setListState((previous) => previous.open ? {key,open:false} : previous);
-  }, [key, hasRequests]);
-
-  useEffect(() => {
     if (!enabled || epochRef.current === null) return;
     const report = () => { void invoke("mr_visibility", {visibility:{listOpen,detailId:value.selectedId,online:navigator.onLine}})
       .catch((error) => setStored((previous) => previous.key === key ? {...previous,syncError:mrErrorMessage(error)} : previous)); };
@@ -129,6 +124,7 @@ export function useMergeRequests({ url, token, credentialRevision }: {
           void loadDiscussions(true);
         }
       }
+      return snapshot;
     } catch(error) {
       if (request !== detailRequest.current || keyRef.current !== requestKey) return;
       if (keyRef.current === requestKey) setStored((previous) => previous.key === requestKey ?
@@ -501,6 +497,6 @@ export function useMergeRequests({ url, token, credentialRevision }: {
     setListState({key,open:false});
   };
   return {...value,error:value.error || value.syncError,enabled,listOpen,anchorRef,select,refresh,onTabChange,reviewLatest,downloadDiff,createDiffComment,participantCandidates,updateParticipants,merge,close,approve,commitMessages,openExternal,backWorkspace,
-    toggleList:()=>setListState({key,open:hasRequests && !listOpen}),closeList:()=>setListState({key,open:false}),
-    backList:()=>hasRequests ? setListState({key,open:true}) : backWorkspace()};
+    toggleList:()=>setListState({key,open:!listOpen}),closeList:()=>setListState({key,open:false}),
+    backList:()=>{ backWorkspace(); setListState({key,open:true}); }};
 }

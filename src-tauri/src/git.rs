@@ -18,6 +18,9 @@ pub mod project_overview;
 pub mod project_status;
 pub mod project_activity;
 pub mod file_trace;
+mod platform_request;
+#[cfg(test)]
+mod platform_request_tests;
 pub use operation::CancelState;
 use operation::GitOperation;
 #[cfg(all(test, unix))]
@@ -34,7 +37,7 @@ mod staging_tests;
 /// operations fail with "'git-lfs' was not found on your path" even though they
 /// work from a shell. Prepend the usual locations so the subprocess sees the
 /// same tools the user does.
-fn augmented_path() -> String {
+pub(crate) fn augmented_path() -> String {
     let extras = [
         "/opt/homebrew/bin", // Homebrew (Apple Silicon)
         "/opt/homebrew/sbin",
@@ -55,7 +58,7 @@ fn augmented_path() -> String {
 /// subprocess (git polls run constantly) must go through this, otherwise each
 /// spawn pops a cmd window that steals focus — on Windows the app looks like
 /// it's flickering a terminal nonstop.
-fn command(program: &str) -> Command {
+pub(crate) fn command(program: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(program);
     #[cfg(target_os = "windows")]
@@ -2275,6 +2278,30 @@ pub async fn git_pull(
     .await
 }
 
+/// Publish exactly the local branch shown in the PR dialog. Never force, and leave
+/// its upstream alone (it may intentionally track a different remote).
+#[tauri::command]
+pub async fn push_request_branch(
+    path: String, remote: String, remote_url: String, source: String,
+    expected_head: String, token: Option<String>,
+) -> Result<(), String> {
+    run_blocking(move || {
+        run_git(&path, &["check-ref-format", &format!("refs/heads/{source}")])?;
+        let urls = run_git(&path, &["remote", "get-url", "--push", "--all", "--", &remote])?;
+        if urls.lines().collect::<Vec<_>>() != [remote_url.as_str()] {
+            return Err("推送地址与创建请求的仓库不一致，请检查远程配置".into());
+        }
+        let head = run_git(&path, &["rev-parse", "--verify", &format!("refs/heads/{source}")])?;
+        if head.trim() != expected_head || !matches!(expected_head.len(), 40 | 64)
+            || !expected_head.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err("来源分支已变化，请重新检查后推送".into());
+        }
+        let refspec = format!("{expected_head}:refs/heads/{source}");
+        run_git_auth(&path, &["push", "--no-follow-tags", "--", &remote, &refspec], token.as_deref())?;
+        Ok(())
+    }).await
+}
+
 /// Push the current branch. Sets the upstream automatically if it has none.
 #[tauri::command]
 pub async fn git_push(path: String, token: Option<String>) -> Result<(), String> {
@@ -3123,27 +3150,6 @@ mod gitlab_token_tests {
     }
 }
 
-/// "owner/repo" (GitHub) or "group/…/project" (GitLab) parsed from a remote URL.
-fn repo_path_from_remote(url: &str) -> String {
-    // Share the SSH/scp/HTTP normalization used by "open remote". In particular,
-    // ssh://host:2222/group/repo has a port, not a "2222/group/repo" project.
-    let Some(web_url) = remote_web_url(url) else { return String::new(); };
-    web_url.split_once("://")
-        .and_then(|(_, rest)| rest.split_once('/'))
-        .map(|(_, path)| path.to_string())
-        .unwrap_or_default()
-}
-
-/// Percent-encode a GitLab project path (slashes → %2F) for use as the :id.
-fn urlencode_path(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            _ => format!("%{:02X}", c as u32),
-        })
-        .collect()
-}
-
 fn github_api_base(url: &str) -> String {
     let base = url.trim().trim_end_matches('/');
     if base.is_empty() || base.ends_with("github.com") {
@@ -3377,95 +3383,73 @@ pub async fn open_repository_remote(path: String) -> Result<String, String> {
     .await
 }
 
-/// Create a merge/pull request on the remote and open it in the browser.
-/// Returns the web URL of the created request.
+fn platform_transport<'a>(
+    client: &'a reqwest::Client,
+    token: &'a str,
+    use_glab: Option<bool>,
+) -> platform_request::Transport<'a> {
+    if use_glab == Some(true) {
+        platform_request::Transport::Glab
+    } else {
+        platform_request::Transport::Http { client, token }
+    }
+}
+
+/// Look up the platform default branch and the open pull/merge requests whose
+/// source is `source` in the remote's own repository (forks are excluded).
+/// `Err` = lookup failed; `Ok` with empty `requests` = no request exists.
+#[tauri::command]
+pub async fn lookup_branch_request(
+    provider: String,
+    instance_url: String,
+    remote_url: String,
+    token: Option<String>,
+    source: String,
+    use_glab: Option<bool>,
+) -> Result<platform_request::BranchRequestLookup, String> {
+    let target = platform_request::resolve_target(&provider, &instance_url, &remote_url)?;
+    let client = platform_request::http_client()?;
+    let token = token.unwrap_or_default();
+    platform_request::lookup(&platform_transport(&client, &token, use_glab), &target, &source).await
+}
+
+/// Create a merge/pull request on the remote. Returns the created request's
+/// identity; the caller decides whether to open it.
 #[tauri::command]
 pub async fn create_pull_request(
     provider: String,     // "gitlab" | "github"
     instance_url: String, // configured instance root (may be empty for github.com)
     remote_url: String,   // origin URL, to parse the project path
-    token: String,
+    token: Option<String>,
     source: String,
     target: String,
     title: String,
     description: String,
-) -> Result<String, String> {
-    if title.trim().is_empty() {
-        return Err("标题不能为空".into());
-    }
-    if source.trim() == target.trim() {
-        return Err("来源分支与目标分支不能相同".into());
-    }
-    let path = repo_path_from_remote(&remote_url);
-    if path.is_empty() {
-        return Err("无法从远程地址解析仓库路径".into());
-    }
-    let client = crate::network::client_builder()
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
+    use_glab: Option<bool>,
+) -> Result<platform_request::PlatformRequest, String> {
+    let repo = platform_request::resolve_target(&provider, &instance_url, &remote_url)?;
+    let client = platform_request::http_client()?;
+    let token = token.unwrap_or_default();
+    platform_request::create(
+        &platform_transport(&client, &token, use_glab),
+        &repo,
+        &source,
+        &target,
+        &title,
+        &description,
+    )
+    .await
+}
 
-    let web_url = if provider == "github" {
-        let base = github_api_base(&instance_url);
-        let mut seg = path.splitn(2, '/');
-        let owner = seg.next().unwrap_or("");
-        let repo = seg.next().unwrap_or("");
-        let endpoint = format!("{}/repos/{}/{}/pulls", base, owner, repo);
-        let body = serde_json::json!({
-            "title": title.trim(), "head": source.trim(), "base": target.trim(), "body": description,
-        });
-        let resp = client
-            .post(&endpoint)
-            .header("Authorization", format!("Bearer {}", token.trim()))
-            .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", "GitKit")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("请求失败：{}", e))?;
-        let ok = resp.status().is_success();
-        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-        if ok {
-            v.get("html_url").and_then(|x| x.as_str()).unwrap_or("").to_string()
-        } else {
-            let msg = v.get("message").and_then(|x| x.as_str()).unwrap_or("创建失败");
-            return Err(format!("GitHub：{}", msg));
-        }
-    } else {
-        let base = instance_url.trim().trim_end_matches('/');
-        if base.is_empty() {
-            return Err("请先在设置中填写 GitLab 实例地址".into());
-        }
-        let endpoint = format!("{}/api/v4/projects/{}/merge_requests", base, urlencode_path(&path));
-        let body = serde_json::json!({
-            "source_branch": source.trim(), "target_branch": target.trim(),
-            "title": title.trim(), "description": description,
-        });
-        let resp = client
-            .post(&endpoint)
-            .header("PRIVATE-TOKEN", token.trim())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("请求失败：{}", e))?;
-        let ok = resp.status().is_success();
-        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-        if ok {
-            v.get("web_url").and_then(|x| x.as_str()).unwrap_or("").to_string()
-        } else {
-            let msg = v
-                .get("message")
-                .or_else(|| v.get("error"))
-                .map(|m| m.to_string())
-                .unwrap_or_else(|| "创建失败".into());
-            return Err(format!("GitLab：{}", msg));
-        }
-    };
-
-    if !web_url.is_empty() {
-        let _ = open_in_browser(&web_url);
-    }
-    Ok(web_url)
+/// Open a pull/merge request web URL that belongs to the configured instance.
+#[tauri::command]
+pub async fn open_platform_request(url: String, instance_url: String, provider: String) -> Result<String, String> {
+    run_blocking(move || {
+        let url = platform_request::browser_url(&url, &instance_url, &provider)?;
+        open_in_browser(&url)?;
+        Ok(url)
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -4331,7 +4315,7 @@ pub fn suspend_project_watches(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod watch_tests {
     use super::{
-        parse_commit_log, patch_id_candidates, path_triggers_status, remote_web_url, repo_path_from_remote, sort_commits_date_order,
+        parse_commit_log, patch_id_candidates, path_triggers_status, remote_web_url, sort_commits_date_order,
         split_stash_subject, CommitInfo,
     };
     use std::path::Path;
@@ -4401,24 +4385,6 @@ mod watch_tests {
             Some("https://github.com/openai/codex")
         );
         assert_eq!(remote_web_url("../local-repo"), None);
-    }
-
-    #[test]
-    fn parses_api_project_paths_without_ssh_ports() {
-        for remote in [
-            "ssh://git@gitlab.example.com:2222/frontend/chain-website.git",
-            "ssh://git@gitlab.example.com/frontend/chain-website.git",
-            "git@gitlab.example.com:frontend/chain-website.git",
-            "https://gitlab.example.com/frontend/chain-website.git",
-            "https://user:password@gitlab.example.com:8443/frontend/chain-website.git/",
-        ] {
-            let path = repo_path_from_remote(remote);
-            assert_eq!(path, "frontend/chain-website", "{remote}");
-            assert_eq!(super::urlencode_path(&path), "frontend%2Fchain-website");
-        }
-        assert_eq!(repo_path_from_remote("ssh://git@host:2222/group/subgroup/app.git"), "group/subgroup/app");
-        assert_eq!(repo_path_from_remote("git@github.com:owner/repo.git"), "owner/repo");
-        assert!(repo_path_from_remote("../local-repo").is_empty());
     }
 
     #[test]

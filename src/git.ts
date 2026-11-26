@@ -757,16 +757,58 @@ export async function cherryPick(
   return invoke<CherryPickResult>("git_cherry_pick", { path, hash, target: target ?? null, useKaleidoscope });
 }
 
-/** Create a merge/pull request; resolves to the created request's web URL (also opened in the browser). */
-export async function createPullRequest(args: {
-  provider: "gitlab" | "github"; instanceUrl: string; remoteUrl: string; token: string;
-  source: string; target: string; title: string; description: string;
-}): Promise<string> {
-  return invoke<string>("create_pull_request", {
+export type PlatformProvider = "github" | "gitlab";
+
+/** A pull (GitHub) / merge (GitLab) request identity. */
+export interface PlatformRequest {
+  /** Platform-global id (GitHub PR id, GitLab MR id). */
+  id: number;
+  /** Repository-scoped number (GitHub number, GitLab iid). */
+  number: number;
+  /** Web URL on the configured instance host. */
+  url: string;
+  title: string;
+  target: string;
+  source: string;
+}
+
+export interface BranchRequestLookup {
+  /** Platform default branch; "" when the repository has none. */
+  defaultBranch: string;
+  /** Open requests whose source is `source` in the remote's own repository (forks excluded), newest first. */
+  requests: PlatformRequest[];
+}
+
+/**
+ * Default branch and open PR/MR for `source`. Rejects when the lookup fails;
+ * resolves with `requests: []` when there is none. `useGlab` (GitLab, HTTPS
+ * root-path instances only) uses the GitLab CLI auth instead of `token`.
+ */
+export function lookupBranchRequest(args: {
+  provider: PlatformProvider; instanceUrl: string; remoteUrl: string; token?: string;
+  source: string; useGlab?: boolean;
+}): Promise<BranchRequestLookup> {
+  return invoke<BranchRequestLookup>("lookup_branch_request", {
     provider: args.provider, instanceUrl: args.instanceUrl, remoteUrl: args.remoteUrl,
-    token: args.token, source: args.source, target: args.target,
-    title: args.title, description: args.description,
+    token: args.token ?? null, source: args.source, useGlab: args.useGlab ?? null,
   });
+}
+
+/** Create a merge/pull request; resolves to its identity. Does not open the browser. */
+export async function createPullRequest(args: {
+  provider: PlatformProvider; instanceUrl: string; remoteUrl: string; token?: string;
+  source: string; target: string; title: string; description: string; useGlab?: boolean;
+}): Promise<PlatformRequest> {
+  return invoke<PlatformRequest>("create_pull_request", {
+    provider: args.provider, instanceUrl: args.instanceUrl, remoteUrl: args.remoteUrl,
+    token: args.token ?? null, source: args.source, target: args.target,
+    title: args.title, description: args.description, useGlab: args.useGlab ?? null,
+  });
+}
+
+/** Open a PR/MR web URL in the browser; rejected unless it is http(s) on the configured instance host. */
+export function openPlatformRequest(url: string, instanceUrl: string, provider: PlatformProvider): Promise<string> {
+  return invoke<string>("open_platform_request", { url, instanceUrl, provider });
 }
 
 /** Open a provider's token settings without forwarding the configured token. */

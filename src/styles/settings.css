@@ -33,7 +33,7 @@
   flex-shrink: 0;
   gap: 6px;
   padding: 7px 11px;
-  border-radius: 7px;
+  border-radius: 8px;
   font-size: 12px;
   font-weight: 600;
   line-height: 18px;
@@ -43,6 +43,9 @@
 .gk-settings-page .gk-settings-primary { background: var(--gks-accent); color: #fff; }
 .gk-settings-page .gk-settings-primary:hover:not(:disabled) { filter: brightness(1.06); }
 .gk-settings-page .gk-settings-secondary { border: 1px solid var(--gks-input-border); background: var(--gks-dialog); color: var(--gks-secondary); }
+.gk-settings-page :is(.gk-settings-primary, .gk-settings-secondary):disabled {
+  background: var(--gks-disabled-bg); color: var(--gks-muted); border-color: var(--gks-border); opacity: 1;
+}
 .gk-settings-page .gk-settings-quiet { color: var(--gks-muted); }
 .gk-settings-page :is(.gk-settings-secondary, .gk-settings-quiet):hover:not(:disabled) { background: var(--gks-input-bg); }
 .gk-settings-page :is(.gk-settings-primary, .gk-settings-secondary, .gk-settings-quiet, .gk-settings-row-action):active:not(:disabled) { transform: scale(.975); }
@@ -55,7 +58,7 @@
 .gk-settings-page .gk-settings-danger { color: var(--gks-red); }
 .gk-settings-page .gk-settings-danger:hover:not(:disabled) { color: var(--gks-red); }
 
-.gk-settings-list, .gk-settings-language-group, .gk-settings-deps-group { border: 1px solid var(--gks-border); border-radius: 9px; overflow: hidden; }
+.gk-settings-list, .gk-settings-language-group, .gk-settings-deps-group { border-block: .5px solid var(--gks-border); overflow: hidden; }
 .gk-settings-identity-scroll { overflow-y: auto; overscroll-behavior: contain; }
 .gk-settings-identity-row {
   position: relative; display: flex; align-items: center; gap: 12px;
@@ -91,8 +94,8 @@
 .gk-settings-page .gk-settings-more-menu button:hover { background: var(--gks-input-bg); }
 
 .gk-settings-form {
-  display: flex; flex-direction: column; gap: 14px; padding: 16px;
-  border: 1px solid var(--gks-border); border-radius: 9px; background: var(--gks-input-bg);
+  display: flex; flex-direction: column; gap: 14px; padding: 16px 0;
+  border-top: .5px solid var(--gks-border);
   animation: gk-settings-form-in 170ms ease-out;
 }
 .gk-settings-form-title { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; }
@@ -100,12 +103,12 @@
 .gk-settings-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--gks-secondary); font-size: 12px; }
 .gk-settings-input {
   width: 100%; min-width: 0; height: 36px; padding: 8px 10px;
-  border: 1px solid var(--gks-input-border); border-radius: 7px; background: var(--gks-dialog);
+  border: .5px solid var(--gks-input-border); border-radius: 8px; background: var(--gks-dialog);
   color: var(--gks-text); font-size: 13px; caret-color: var(--gks-accent-fg);
-  transition: border-color 140ms ease, box-shadow 140ms ease;
+  transition: border-color 140ms ease;
 }
 .gk-settings-input::placeholder { color: var(--gks-muted); }
-.gk-settings-input:focus { border-color: var(--gks-accent-fg); box-shadow: 0 0 0 3px var(--gks-accent-bg); }
+.gk-settings-input:focus { border-color: var(--gks-accent-fg); }
 .gk-settings-input[aria-invalid="true"] { border-color: var(--gks-red); }
 .gk-settings-input[type="email"] { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; }
 .gk-settings-error { margin: 0; color: var(--gks-red); font-size: 12px; line-height: 20px; }

@@ -100,8 +100,8 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
     <div className="gk-activity-heading">
       <div><h2 id="workspace-activity-heading">{tx("工作区提交活动")}</h2><span>{tx("最近 12 个月")}</span></div>
       <div className="gk-activity-totals">
-        {loading ? <><Skeleton width={76} height={11} /><Skeleton width={64} height={10} /></>
-          : <><strong>{available ? tf("{0} 个提交", numberFormatter.format(data.totalCommits)) : "—"}</strong>
+        {loading ? <><Skeleton width={76} height={28} /><Skeleton width={64} height={10} /></>
+          : <><span className="gk-activity-total"><strong>{available ? numberFormatter.format(data.totalCommits) : "—"}</strong> {tx("次提交")}</span>
             {available && <span>{tf("{0} 个活跃日", numberFormatter.format(data.activeDays))}</span>}</>}
         {incomplete && !loading && <span>{tf("已读取 {0} / {1} 个项目", loadedCount, projects.length)}</span>}
         {refreshing && !loading && <span className="gk-activity-progress"><LoaderCircle size={12} className="gk-overview-spin" aria-hidden="true" />{tx("更新中")}</span>}
@@ -109,7 +109,7 @@ export function WorkspaceActivity({ projects, activity, onOpen }: WorkspaceActiv
     </div>
     {loading && <span className="sr-only" role="status">{tf("正在读取 {0} 个项目的提交活动", projects.length)}</span>}
     <div className="gk-activity-scope"><span>{tx("所有项目 · 仅设置中的提交者身份 · 按提交者日期 · 包含未推送提交")}</span>
-      {checkedAt && <span>{tf("活动读取于 {0}", new Intl.DateTimeFormat(locale, {
+      {checkedAt && <span className="gk-activity-updated">{tf("活动读取于 {0}", new Intl.DateTimeFormat(locale, {
         month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
       }).format(checkedAt))}</span>}
     </div>

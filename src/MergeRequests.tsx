@@ -28,6 +28,7 @@ function themeStyle(theme: ThemeColors): CSSProperties {
     "--gkm-accent-fg": theme.accentFg, "--gkm-green": theme.green, "--gkm-green-bg": theme.greenBg,
     "--gkm-red": theme.red, "--gkm-red-bg": theme.redBg, "--gkm-amber": theme.amber,
     "--gkm-hover": theme.rowHover, "--gkm-selected": theme.rowSelected,
+    "--gkm-disabled-bg": theme.disabledBg,
     "--gkm-input": theme.inputBg, "--gkm-input-border": theme.inputBorder, "--gkm-shadow": theme.shadowEl,
   } as CSSProperties;
 }
@@ -142,11 +143,10 @@ export interface MergeRequestEntryProps {
 }
 
 export function MergeRequestEntry({ theme, snapshot, open, anchorRef, onToggle }: MergeRequestEntryProps) {
-  if (!snapshot?.total) return null;
   const count = snapshot?.newCount || 0;
-  const title = snapshot?.lastCheckedAt === null || !snapshot ? tx("合并请求") : tf("{0} 条相关请求 · {1} 条新请求 · 上次同步 {2}", snapshot.total, count, dateLabel(snapshot.lastCheckedAt));
-  return <button ref={anchorRef} type="button" className={`gkm-entry${count ? " gkm-entry-unread" : ""}`} style={themeStyle(theme)} aria-haspopup="dialog" aria-expanded={open} aria-controls="gkm-mr-popover" onClick={onToggle} title={title}>
-    <GitPullRequest size={13} aria-hidden="true" /><span>{count > 0 ? tf("{0} 条新合并请求", count) : tf("{0} 条合并请求", snapshot.total)}</span>{count > 0 && <span className="gkm-entry-dot" aria-hidden="true" />}
+  const title = snapshot?.lastCheckedAt === null || !snapshot ? tx("GitLab 审阅收件箱") : tf("{0} 条相关请求 · {1} 条新请求 · 上次同步 {2}", snapshot.total, count, dateLabel(snapshot.lastCheckedAt));
+  return <button ref={anchorRef} type="button" className={`gkm-entry${count ? " gkm-entry-unread" : ""}`} style={themeStyle(theme)} aria-label={tx("GitLab 审阅收件箱")} aria-haspopup="dialog" aria-expanded={open} aria-controls="gkm-mr-popover" onClick={onToggle} title={title}>
+    <GitPullRequest size={13} aria-hidden="true" /><span>{tx("GitLab 审阅")}</span>{count > 0 && <strong className="gkm-entry-count" aria-label={tf("{0} 条新请求", count)}>{count}</strong>}
   </button>;
 }
 
@@ -154,16 +154,18 @@ export interface MergeRequestPopoverProps {
   theme: ThemeColors;
   snapshot: MrSnapshot | null;
   configured: boolean;
+  cliConnected?: boolean;
   error?: string | null;
   open: boolean;
   anchorRef: RefObject<HTMLButtonElement>;
   onClose: (reason: MergeRequestCloseReason) => void;
   onSelect: (mrId: number) => void;
-  onRefresh: () => void | Promise<void>;
+  onRefresh: () => void | Promise<unknown>;
   onConfigure?: () => void;
+  repository?: string | null;
 }
 
-export function MergeRequestPopover({ theme, snapshot, configured, error, open, anchorRef, onClose, onSelect, onRefresh, onConfigure }: MergeRequestPopoverProps) {
+export function MergeRequestPopover({ theme, snapshot, configured, cliConnected, error, open, anchorRef, onClose, onSelect, onRefresh, onConfigure, repository }: MergeRequestPopoverProps) {
   const [present, setPresent] = useState(open);
   const openRef = useRef(open);
   openRef.current = open;
@@ -176,7 +178,9 @@ export function MergeRequestPopover({ theme, snapshot, configured, error, open, 
   const contextRef = useRef<string | null>(snapshot?.contextKey ?? null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
-  const items = snapshot?.items || [];
+  const [allProjects, setAllProjects] = useState(false);
+  const scoped = !!repository && !allProjects;
+  const items = (snapshot?.items || []).filter(item => !scoped || item.projectPathWithNamespace === repository);
   const visible = filter === "all" ? items : items.filter(item => item.roles.includes(filter));
   const failure = error || refreshError || snapshot?.error?.message || null;
   const authError = snapshot?.error?.kind === "unauthorized" || snapshot?.error?.kind === "invalid_config";
@@ -199,14 +203,15 @@ export function MergeRequestPopover({ theme, snapshot, configured, error, open, 
   }, [open, present]);
 
   useLayoutEffect(() => {
-    const context = snapshot?.contextKey ?? null;
+    const context = JSON.stringify([snapshot?.contextKey, repository]);
     if (contextRef.current !== context) {
       contextRef.current = context;
       scrollPositions.current = { all: 0, reviewer: 0, assignee: 0, author: 0 };
       setFilter("all");
+      setAllProjects(false);
       setRefreshError(null);
     }
-  }, [snapshot?.contextKey]);
+  }, [snapshot?.contextKey, repository]);
 
   useLayoutEffect(() => {
     if (open && listRef.current) listRef.current.scrollTop = scrollPositions.current[filter];
@@ -225,7 +230,7 @@ export function MergeRequestPopover({ theme, snapshot, configured, error, open, 
       const width = viewport?.width || window.innerWidth;
       const rect = anchor.getBoundingClientRect();
       const popupWidth = Math.min(380, Math.max(0, width - 16));
-      const height = Math.min(600, Math.max(0, rect.top - offsetTop - 16));
+      const height = Math.min(configured ? 600 : 270, Math.max(0, rect.top - offsetTop - 16));
       popover.style.width = `${popupWidth}px`;
       popover.style.height = `${height}px`;
       popover.style.left = `${Math.max(offsetLeft + 8, Math.min(rect.left, offsetLeft + width - popupWidth - 8))}px`;
@@ -252,7 +257,7 @@ export function MergeRequestPopover({ theme, snapshot, configured, error, open, 
       window.visualViewport?.removeEventListener("resize", position);
       window.visualViewport?.removeEventListener("scroll", position);
     };
-  }, [open, anchorRef, snapshot?.newCount]);
+  }, [open, anchorRef, snapshot?.newCount, configured]);
 
   useEffect(() => {
     if (!open) return;
@@ -292,18 +297,21 @@ export function MergeRequestPopover({ theme, snapshot, configured, error, open, 
     onAnimationEnd={event => {
       if (!openRef.current && event.currentTarget === event.target && event.animationName === "gk-modal-out") setPresent(false);
     }}>
-    <header className="gkm-list-head"><div><h2 id="gkm-list-title">{tx("合并请求")}</h2><p title={snapshot?.instanceUrl ?? undefined}>{tx("所有项目")}{snapshot?.user && ` · @${snapshot.user.username}`}</p></div><button className="gkm-icon-button" type="button" aria-label={tx("刷新合并请求")} title={tx("刷新合并请求")} onClick={refresh} disabled={!configured || busy}><RefreshCw size={15} className={busy ? "gkm-spin" : undefined} aria-hidden="true" /></button><button className="gkm-icon-button" type="button" aria-label={tx("关闭合并请求")} onClick={() => { onClose("button"); anchorRef.current?.focus(); }}><X size={16} aria-hidden="true" /></button></header>
-    {configured && hasCache && <div className="gkm-list-count"><span>{tf("{0} 条相关请求", snapshot?.total || 0)}</span>{!!snapshot?.newCount && <strong>{tf("{0} 条新请求", snapshot.newCount)}</strong>}</div>}
+    <header className="gkm-list-head"><div><h2 id="gkm-list-title">{tx("GitLab 审阅")}</h2><p title={snapshot?.instanceUrl ?? undefined}>{scoped ? repository : tx("所有项目")}{snapshot?.user && ` · @${snapshot.user.username}`}</p></div><button className="gkm-icon-button" type="button" aria-label={tx("刷新合并请求")} title={tx("刷新合并请求")} onClick={refresh} disabled={!configured || busy}><RefreshCw size={15} className={busy ? "gkm-spin" : undefined} aria-hidden="true" /></button><button className="gkm-icon-button" type="button" aria-label={tx("关闭合并请求")} onClick={() => { onClose("button"); anchorRef.current?.focus(); }}><X size={16} aria-hidden="true" /></button></header>
+    {configured && hasCache && <div className="gkm-list-count">{repository && <select aria-label={tx("项目范围")} value={scoped ? "repo" : "all"} onChange={event => {
+      setAllProjects(event.target.value === "all"); scrollPositions.current = { all: 0, author: 0, reviewer: 0, assignee: 0 };
+      if (listRef.current) listRef.current.scrollTop = 0;
+    }}><option value="repo">{tx("当前仓库")}</option><option value="all">{tx("所有项目")}</option></select>}<span>{tf("{0} 条相关请求", items.length)}</span></div>}
     {configured && <div className="gkm-filters" aria-label={tx("按我的角色筛选")}>{filters.map(([value, label]) => <button type="button" key={value} aria-pressed={filter === value} className={filter === value ? "is-selected" : ""} onClick={() => setFilter(value)}>{tx(label)}{hasCache && <span>{value === "all" ? items.length : items.filter(item => item.roles.includes(value)).length}</span>}</button>)}</div>}
     <div className="gkm-list-body" ref={listRef} onScroll={event => { scrollPositions.current[filter] = event.currentTarget.scrollTop; }}>
-      {!configured ? <EmptyState title={tx("连接账号，查看相关请求")}>{tx("连接 GitLab 账号，同步所有项目中由你审核、指派给你和你发起的合并请求。")}{configure}</EmptyState> : <>
+      {!configured ? <EmptyState action={configure} title={cliConnected ? tx("连接令牌以同步个人收件箱") : tx("连接账号，查看相关请求")}>{cliConnected ? tx("分支请求已使用 glab。添加 GitLab 访问令牌后，可以在这里集中审阅分配给你的请求。") : tx("连接 GitLab 账号，同步所有项目中由你审核、指派给你和你发起的合并请求。")}</EmptyState> : <>
         {failure && <Banner tone="error" action={authError && onConfigure ? <button className="gkm-text-button" type="button" onClick={onConfigure}>{tx("更新凭据")}</button> : undefined}>{translateNativeMessage(failure)}{hasCache && <small>{tx("正在显示上次同步的结果。")}</small>}</Banner>}
         {snapshot?.stale && !failure && <Banner>{tx("缓存可能已过期，刷新后确认最新状态。")}</Banner>}
         {snapshot?.persistenceError && <Banner>{tx("已读记录保存失败，下次启动可能再次显示新提醒。")}</Banner>}
         {!hasCache && busy ? <MergeRequestListSkeleton /> : !hasCache && failure ? <EmptyState title={tx("暂时无法同步")}>{tx("连接恢复后可以重试。")}{configure}</EmptyState> : visible.length === 0 ? <EmptyState title={filter === "all" ? tx("没有相关的开放请求") : tx("这个角色下暂无请求")}>{filter === "all" ? tx("新请求会在这里出现。") : tx("可以切换到全部，查看其他相关请求。")}</EmptyState> : visible.map(item => <MergeRequestRow key={item.id} item={item} unread={!!snapshot?.unseenIds.includes(item.id)} onSelect={onSelect} />)}
       </>}
     </div>
-    <footer className="gkm-list-foot"><span>{busy ? tx("正在同步…") : hasCache ? tf("上次同步 {0}", dateLabel(snapshot!.lastCheckedAt)) : tx("同步所有项目的相关请求")}</span><span>{tx("打开列表不会清除新提醒")}</span></footer>
+    {configured && <footer className="gkm-list-foot"><span>{busy ? tx("正在同步…") : hasCache ? tf("上次同步 {0}", dateLabel(snapshot!.lastCheckedAt)) : tx("同步所有项目的相关请求")}</span></footer>}
   </div>, document.body);
 }
 

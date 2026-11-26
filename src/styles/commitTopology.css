@@ -6,7 +6,7 @@
   gap: 2px;
   padding: 2px;
   border: 0.5px solid var(--gk-mode-border);
-  border-radius: 7px;
+  border-radius: 8px;
   background: var(--gk-mode-bg);
 }
 .gk-history-mode-slider {
@@ -19,6 +19,13 @@
 .gk-history-mode[data-ready="true"] .gk-history-mode-slider {
   transition: transform 200ms cubic-bezier(0.16, 1, 0.3, 1),
     width 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+/* Unit-mass spring, stiffness 400 and damping 30, sampled every 25ms. */
+@supports (transition-timing-function: linear(0, 1)) {
+  .gk-history-mode[data-ready="true"] .gk-history-mode-slider {
+    transition: transform 450ms linear(0, .0969, .2982, .5143, .7, .8394, .9329, .9886, 1.0169, 1.0274, 1.0276, 1.0229, 1.0168, 1.011, 1.0064, 1.0031, 1.001, .9998, 1),
+      width 200ms ease-out;
+  }
 }
 .gk-history-mode button {
   position: relative;

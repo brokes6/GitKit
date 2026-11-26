@@ -219,3 +219,23 @@ fn history_reads_patch_ids_only_on_request_and_only_for_merge_candidates() {
     let with_ids = smart.iter().filter(|c| c.patch_id.is_some()).count();
     assert_eq!(with_ids, 2, "commits with a unique subject are not diffed");
 }
+
+#[test]
+fn request_branch_push_pins_source_and_destination() {
+    let local = ProjectFolder::new();
+    let remote = ProjectFolder::new();
+    run_git(remote.path(), &["init", "--bare"]).unwrap();
+    run_git(local.path(), &["init", "-b", "topic"]).unwrap();
+    run_git(local.path(), &["-c", "user.name=Test", "-c", "user.email=test@example.test",
+        "-c", "commit.gpgSign=false", "commit", "--allow-empty", "-m", "one"]).unwrap();
+    let head = run_git(local.path(), &["rev-parse", "HEAD"]).unwrap().trim().to_owned();
+    run_git(local.path(), &["remote", "add", "origin", remote.path()]).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let push = |url: &str, sha: &str| runtime.block_on(push_request_branch(
+        local.path().into(), "origin".into(), url.into(), "topic".into(), sha.into(), None));
+    assert!(push("different", &head).is_err());
+    assert!(push(remote.path(), &"a".repeat(40)).is_err());
+    assert!(run_git(remote.path(), &["rev-parse", "--verify", "refs/heads/topic"]).is_err());
+    push(remote.path(), &head).unwrap();
+    assert_eq!(run_git(remote.path(), &["rev-parse", "refs/heads/topic"]).unwrap().trim(), head);
+}
