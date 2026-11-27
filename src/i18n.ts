@@ -824,6 +824,7 @@ const EN: Record<string, string> = {
   "获取": "Fetch",
   "拉取": "Pull",
   "推送": "Push",
+  "同步操作": "Sync actions",
   "撤回": "Undo",
   "撤回分支创建": "Undo branch creation",
   "当前分支没有可撤回的操作": "No action to undo on this branch",

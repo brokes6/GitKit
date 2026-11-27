@@ -247,7 +247,7 @@ select:focus-visible,
 
 /* The status strip keeps the current theme's neutral chrome and uses one
    capsule geometry for its primary state and trailing action. */
-.gk-action-bar { height: 44px; }
+.gk-action-bar { height: 48px; }
 .gk-toolbar-shell { transition: background-color 140ms ease-out; }
 .gk-toolbar-content {
   display: flex;
@@ -256,6 +256,7 @@ select:focus-visible,
   min-width: 0;
   height: 100%;
 }
+.gk-toolbar-drag { flex: 1 0 48px; align-self: stretch; }
 @media (prefers-reduced-motion: reduce) {
   .gk-toolbar-shell { transition: none; }
 }
@@ -407,11 +408,29 @@ select:focus-visible,
   flex: 0 0 auto;
   background: var(--gk-status-divider);
 }
+.gk-status-capsule {
+  justify-self: center;
+  height: 24px;
+  border-radius: 12px;
+}
+.gk-status-summary {
+  display: flex;
+  min-width: 0;
+}
+.gk-status-summary > .gk-status-pill {
+  border: 0;
+  background: transparent;
+  white-space: nowrap;
+}
+.gk-status-summary > button:focus-visible {
+  outline: 2px solid var(--gk-accent);
+  outline-offset: -2px;
+}
 .gk-status-key {
   height: 16px;
   border-radius: 6px;
   background: var(--gk-status-key);
-  color: var(--gk-status-muted);
+  color: var(--gk-status-text);
   font-size: 10px;
   line-height: 1;
 }
@@ -582,6 +601,48 @@ select:focus-visible,
   pointer-events: none;
 }
 .gk-menu-closing { pointer-events: none; }
+.gk-toolbar-sync {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+.gk-toolbar-sync:is(:hover, :focus-within) { z-index: 2; }
+.gk-toolbar-sync-segment { position: relative; }
+.gk-toolbar-sync-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 34px;
+  min-width: 60px;
+  padding-inline: 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.gk-toolbar-sync-button .gk-git-action-icon { display: grid; place-items: center; }
+.gk-toolbar-sync-count { color: var(--gk-action-accent); font-size: 10px; }
+.gk-toolbar-sync-tooltip {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 50%;
+  z-index: 1;
+  transform: translateX(-50%);
+  padding: 4px 8px;
+  border: 0.5px solid var(--gk-sync-line);
+  border-radius: 6px;
+  background: var(--gk-sync-tooltip-bg);
+  color: var(--gk-sync-tooltip-text);
+  font-size: 11px;
+  white-space: nowrap;
+  visibility: hidden;
+  pointer-events: none;
+}
+.gk-toolbar-sync-segment:hover > .gk-toolbar-sync-tooltip {
+  visibility: visible;
+  transition: visibility 0s 360ms;
+}
+.gk-toolbar-sync-button:focus-visible + .gk-toolbar-sync-tooltip { visibility: visible; transition: none; }
 .gk-git-action {
   position: relative;
   overflow: hidden;
@@ -618,6 +679,20 @@ select:focus-visible,
 }
 .gk-git-action[data-running="true"] .gk-git-action-icon {
   animation: gk-action-breathe 1.15s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .gk-toolbar-sync-button[data-sync-action="fetch"][data-running="true"] .gk-git-action-icon {
+    animation: gk-toolbar-fetch-spin 950ms linear infinite;
+  }
+  .gk-toolbar-sync-button[data-sync-action="pull"] { --gk-sync-nudge: 3px; }
+  .gk-toolbar-sync-button[data-sync-action="push"] { --gk-sync-nudge: -3px; }
+  .gk-toolbar-sync-button:is([data-sync-action="pull"], [data-sync-action="push"])[data-sync-complete="true"] .gk-git-action-icon {
+    animation: gk-toolbar-sync-nudge 230ms ease-out;
+  }
+}
+@keyframes gk-toolbar-fetch-spin { to { transform: rotate(360deg); } }
+@keyframes gk-toolbar-sync-nudge {
+  45% { transform: translateY(var(--gk-sync-nudge)); }
 }
 .gk-shell-button:disabled[data-running="true"] { opacity: 1; }
 .gk-primary-sweep { position: relative; overflow: hidden; isolation: isolate; }

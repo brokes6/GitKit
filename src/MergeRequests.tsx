@@ -144,9 +144,15 @@ export interface MergeRequestEntryProps {
 
 export function MergeRequestEntry({ theme, snapshot, open, anchorRef, onToggle }: MergeRequestEntryProps) {
   const count = snapshot?.newCount || 0;
-  const title = snapshot?.lastCheckedAt === null || !snapshot ? tx("GitLab 审阅收件箱") : tf("{0} 条相关请求 · {1} 条新请求 · 上次同步 {2}", snapshot.total, count, dateLabel(snapshot.lastCheckedAt));
-  return <button ref={anchorRef} type="button" className={`gkm-entry${count ? " gkm-entry-unread" : ""}`} style={themeStyle(theme)} aria-label={tx("GitLab 审阅收件箱")} aria-haspopup="dialog" aria-expanded={open} aria-controls="gkm-mr-popover" onClick={onToggle} title={title}>
-    <GitPullRequest size={13} aria-hidden="true" /><span>{tx("GitLab 审阅")}</span>{count > 0 && <strong className="gkm-entry-count" aria-label={tf("{0} 条新请求", count)}>{count}</strong>}
+  const label = tx("GitLab 审阅");
+  const newRequests = count > 0 ? tf("{0} 条新请求", count) : "";
+  const entryLabel = newRequests ? `${label} · ${newRequests}` : label;
+  const syncDetails = snapshot?.lastCheckedAt == null ? "" : tf("{0} 条相关请求 · {1} 条新请求 · 上次同步 {2}", snapshot.total, count, dateLabel(snapshot.lastCheckedAt));
+  return <button ref={anchorRef} type="button" className={`gkm-entry${count ? " gkm-entry-unread" : ""}`} style={themeStyle(theme)}
+    aria-label={entryLabel} aria-haspopup="dialog" aria-expanded={open} aria-controls="gkm-mr-popover"
+    data-revealed={open || count > 0} onClick={onToggle} title={syncDetails ? `${label}\n${syncDetails}` : entryLabel}>
+    <GitPullRequest size={13} aria-hidden="true" />
+    <span className="gkm-entry-label" aria-hidden="true"><span>{label}{newRequests && <> · <strong>{newRequests}</strong></>}</span></span>
   </button>;
 }
 
@@ -233,7 +239,8 @@ export function MergeRequestPopover({ theme, snapshot, configured, cliConnected,
       const height = Math.min(configured ? 600 : 270, Math.max(0, rect.top - offsetTop - 16));
       popover.style.width = `${popupWidth}px`;
       popover.style.height = `${height}px`;
-      popover.style.left = `${Math.max(offsetLeft + 8, Math.min(rect.left, offsetLeft + width - popupWidth - 8))}px`;
+      const centeredLeft = rect.left + (rect.width - popupWidth) / 2;
+      popover.style.left = `${Math.max(offsetLeft + 8, Math.min(centeredLeft, offsetLeft + width - popupWidth - 8))}px`;
       popover.style.top = `${rect.top - height - 8}px`;
     };
     const position = () => {

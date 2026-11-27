@@ -23,7 +23,7 @@ import { createTokenInfoCache } from "./tokenInfoCache";
 import { DAILY_CHECK_DEFAULT, nextCheckLabel, shouldPresentCheck, validCheckTime } from "./dailyCheck";
 import type { DailyCheck, CheckProgress, CheckSnapshot, CheckResult } from "./dailyCheck";
 import {
-  GitBranch, GitMerge, GitPullRequest, Upload, Download, RefreshCw,
+  GitBranch, GitMerge, GitPullRequest, ArrowDownToLine, ArrowUpFromLine, Download, RefreshCw,
   Layers, ChevronRight, ChevronDown, Copy, Check, GitCommit, FileText, Info,
   Moon, Sun, Monitor, Plus, Minus, X, FolderOpen, ArrowRight,
   Pin, EyeOff, Eye, Folder, AlertCircle, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
@@ -542,9 +542,10 @@ function fileManagerActionLabel(): string {
 export function Avatar({ author, size = 28 }: { author: Pick<Author, "initials" | "color">; size?: number }) {
   const compact = size <= 18;
   return (
-    <div className="rounded-full flex items-center justify-center flex-shrink-0 font-semibold"
+    <div className="flex items-center justify-center flex-shrink-0 font-semibold"
       style={{
         width: size, height: size,
+        borderRadius: Math.min(R, Math.round(size / 4)),
         backgroundColor: author.color,
         backgroundImage: "linear-gradient(145deg, rgba(0, 0, 0, 0.16) 0%, rgba(0, 0, 0, 0.02) 48%, rgba(255, 255, 255, 0.28) 100%)",
         color: "#fff",
@@ -648,7 +649,6 @@ const THEME_META: Record<ThemeMode, { Icon: typeof Moon; label: string }> = {
 // macOS keeps its native traffic lights (Overlay title bar) and skips these.
 const IS_WINDOWS = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
 const WINDOW_CONTROL_WIDTH = 44;
-const WINDOW_CONTROLS_WIDTH = WINDOW_CONTROL_WIDTH * 3;
 
 // Minimize / maximize / close for the borderless Windows window.
 function WindowControls() {
@@ -660,7 +660,7 @@ function WindowControls() {
   });
   const cls = "flex items-center justify-center flex-shrink-0 cursor-pointer transition-colors duration-100";
   return (
-    <div className="flex items-stretch self-stretch flex-shrink-0" style={{ marginRight: -16, marginLeft: 6 }}>
+    <div className="flex items-stretch self-stretch flex-shrink-0 ml-1.5">
       <button title={tx("最小化")} aria-label={tx("最小化窗口")} onClick={() => { void win.minimize(); }} className={cls}
         style={{ width: WINDOW_CONTROL_WIDTH, color: t.textMuted }} {...hover(t.inputBg, t.text)}>
         <Minus size={15} />
@@ -677,21 +677,20 @@ function WindowControls() {
   );
 }
 
-function TitleBar({ themeMode, onThemeCycle, onOpenSettings }: {
+function TitleBar({ themeMode, onThemeCycle, onOpenSettings, background, children }: {
   themeMode: ThemeMode; onThemeCycle: () => void; onOpenSettings: () => void;
+  background: string; children: React.ReactNode;
 }) {
   const t = useTheme();
   const { Icon, label } = THEME_META[themeMode];
   const iconButton = "flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer transition-colors duration-150";
   return (
-    <div data-tauri-drag-region className="relative h-12 flex items-stretch flex-shrink-0 select-none"
-      style={{ ...glassStyle(t), paddingLeft: IS_WINDOWS ? 8 : 92, zIndex: 50 }}>
-      <div data-tauri-drag-region className="flex flex-1 min-w-0 items-center gap-2.5 px-3">
-        <span className="gk-heading pointer-events-none text-sm font-semibold" style={{ color: t.text }}>GitKit</span>
-        <span className="pointer-events-none text-xs" style={{ color: t.textMuted }}>Workspace</span>
-      </div>
-      <div className="flex items-center gap-0.5 px-2 flex-shrink-0"
-        style={{ borderLeft: `0.5px solid ${t.glassBorder}` }}>
+    <header className="gk-action-bar gk-toolbar-shell relative flex items-center gap-1.5 flex-shrink-0 select-none"
+      style={{ paddingLeft: IS_WINDOWS ? 8 : 92, paddingRight: IS_WINDOWS ? 0 : 8,
+        borderBottom: `0.5px solid ${t.border}`, background, color: t.textSec,
+        "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
+      {children}
+      <div className="flex items-center gap-0.5 pl-2 flex-shrink-0">
         <button onClick={onThemeCycle} className={iconButton}
           title={tf("主题：{0}", tx(label))} aria-label={tf("切换主题，当前{0}", tx(label))}
           style={{ color: t.textMuted, borderRadius: R - 3 }}
@@ -708,7 +707,7 @@ function TitleBar({ themeMode, onThemeCycle, onOpenSettings }: {
         </button>
       </div>
       {IS_WINDOWS && <WindowControls />}
-    </div>
+    </header>
   );
 }
 
@@ -1087,13 +1086,14 @@ function ProjectSidebar({ projects, activeId, homeActive, attentionCount, open, 
 
 // ─── ActionBar ────────────────────────────────────────────────────────────────
 
-function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch, onPull, onPush, onUndo, undoTitle, onForcePush,
-  onCreateTag, onCherryPick, onStash, onCreatePR, onOtherRequest, onRequestSettings, requestSettingsLabel, requestLabel, pushCount = 0, busy }: {
-  project?: Project; branch: string; canMerge: boolean;
+function ActionBar({ project, branch, projectSidebarOpen, canMerge, onMerge, onCreateBranch, onFetch, onPull, onPush, onUndo, undoTitle, onForcePush,
+  onCreateTag, onCherryPick, onStash, onCreatePR, onOtherRequest, onRequestSettings, requestSettingsLabel, requestLabel, pushCount = 0, busy, completed }: {
+  project?: Project; branch: string; projectSidebarOpen: boolean; canMerge: boolean;
   onMerge?: () => void;
   onCreateBranch?: () => void; onFetch?: () => void; onPull?: () => void; onPush?: () => void; onUndo?: () => void; undoTitle: string; onForcePush?: () => void;
   onCreateTag?: () => void; onCherryPick?: () => void; onStash?: () => void; onCreatePR?: () => void;
-  onOtherRequest?: () => void; onRequestSettings?: () => void; requestSettingsLabel: string; requestLabel: string; pushCount?: number; busy?: null | GitOperationKind | "other";
+  onOtherRequest?: () => void; onRequestSettings?: () => void; requestSettingsLabel: string; requestLabel: string; pushCount?: number;
+  busy?: null | GitOperationKind | "other"; completed?: GitOperationKind | "other";
 }) {
   const t = useTheme();
   const [morePos, setMorePos] = useState<{ kind: "repository" | "request"; x: number; y: number } | null>(null);
@@ -1102,7 +1102,7 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
   const moreMenu = useRef<HTMLDivElement>(null);
   useOutsideMenuPress(!!morePos, moreMenu, () => setMorePos(null), menuTrigger);
   const toolbarLayoutKey = JSON.stringify([
-    project?.id, project?.name, project?.initialized, branch, pushCount, getCurrentLanguage(),
+    project?.id, project?.name, project?.initialized, branch, projectSidebarOpen, pushCount, getCurrentLanguage(),
   ]);
   const toolbarRef = useToolbarLayoutMotion(toolbarLayoutKey);
   useEffect(() => { setMorePos(null); }, [toolbarLayoutKey, busy]);
@@ -1119,10 +1119,11 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
   }, [morePos]);
   const actions = [
     { label: tx("获取"), Icon: RefreshCw, action: onFetch, op: "fetch" },
-    { label: tx("拉取"), Icon: Download, action: onPull, op: "pull" },
-    { label: tx("推送"), Icon: Upload, action: onPush, op: "push" },
+    { label: tx("拉取"), Icon: ArrowDownToLine, action: onPull, op: "pull" },
+    { label: tx("推送"), Icon: ArrowUpFromLine, action: onPush, op: "push" },
   ] as const;
   const moreActions = [
+    { label: onUndo ? undoTitle : tx("撤回"), Icon: RotateCcw, action: onUndo },
     { label: tx("Cherry-pick"), Icon: GitCommit, action: onCherryPick },
     { label: tx("储藏"), Icon: Layers, action: onStash },
     { label: tx("创建 Tag 并推送"), Icon: TagIcon, action: onCreateTag },
@@ -1147,40 +1148,41 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
       role="group" aria-label={tx("仓库操作")}
       style={{ color: t.textSec,
         "--gk-shell-hover": t.rowHover } as React.CSSProperties}>
-      <div className="gk-toolbar-project relative flex items-center min-w-0 px-2 mr-1"
-        style={{ borderRight: "0.5px solid transparent" }}>
+      <div className="gk-toolbar-project flex items-center min-w-0 px-2 mr-1">
         <div className="gk-toolbar-metadata flex items-center min-w-0 gap-2">
-        <span className="gk-toolbar-name text-xs font-semibold truncate" title={project?.path} style={{ color: t.text }}><ToolbarText>{project?.name ?? "GitKit"}</ToolbarText></span>
-        <span className="flex items-center gap-1 min-w-0" style={{ color: t.textMuted }}>
-          <GitBranch size={12} className="flex-shrink-0" aria-hidden="true" />
-          <span className="gk-toolbar-branch text-[11px] truncate" title={branch}><ToolbarText order={1}>{project?.initialized === false ? tx("未初始化 Git") : project ? branch || tx("未检出分支") : tx("选择仓库")}</ToolbarText></span>
-        </span>
+          {!projectSidebarOpen && project && (
+            <span className="gk-toolbar-name text-xs font-medium truncate" title={project.path}>
+              <ToolbarText>{project.name}</ToolbarText>
+            </span>
+          )}
+          <span className="flex items-center gap-1 min-w-0" title={project ? [project.name, branch].filter(Boolean).join(" / ") : undefined}>
+            <GitBranch size={12} className="flex-shrink-0" aria-hidden="true" />
+            <span className="gk-toolbar-branch text-[11px] truncate"><ToolbarText order={1}>{project?.initialized === false ? tx("未初始化 Git") : project ? branch || tx("未检出分支") : tx("选择仓库")}</ToolbarText></span>
+          </span>
         </div>
-        <span data-gk-toolbar-move aria-hidden="true" className="absolute inset-y-0 right-0" style={{ background: t.border, width: 0.5 }} />
       </div>
-      {actions.map(({ label, Icon, action, op }, index) => {
-        const running = busy === op;
-        return (
-          <button data-gk-toolbar-move key={op} onClick={action} disabled={!action || !!busy} aria-busy={running || undefined}
-            data-running={running || undefined}
-            className="gk-shell-button gk-git-action flex items-center justify-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
-            style={{ borderRadius: R - 3,
-              "--gk-action-accent": t.accentFg,
-              "--gk-action-active-bg": t.accentBg } as React.CSSProperties}>
-            <Icon size={15} aria-hidden="true" className="gk-git-action-icon" />
-            <ToolbarText order={index + 2}>{label}</ToolbarText>
-            {op === "push" && pushCount > 0 && <span className="text-[10px] tabular-nums" style={{ color: t.accentFg }}>{pushCount}</span>}
-          </button>
-        );
-      })}
-      <button data-gk-toolbar-move onClick={onUndo} disabled={!onUndo || !!busy}
-        className="gk-shell-button gk-git-action flex items-center justify-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
-        title={onUndo ? undoTitle : tx("当前分支没有可撤回的操作")}
-        style={{ borderRadius: R - 3, "--gk-action-accent": t.accentFg,
-          "--gk-action-active-bg": t.accentBg } as React.CSSProperties}>
-        <RotateCcw size={15} aria-hidden="true" className="gk-git-action-icon" />
-        <ToolbarText order={5}>{tx("撤回")}</ToolbarText>
-      </button>
+      <div className="gk-toolbar-sync" data-gk-toolbar-move role="group" aria-label={tx("同步操作")} style={{
+        "--gk-sync-line": t.border, "--gk-sync-tooltip-bg": t.dialogBg, "--gk-sync-tooltip-text": t.text,
+        "--gk-action-accent": t.accentFg, "--gk-action-active-bg": t.accentBg,
+      } as React.CSSProperties}>
+        {actions.map(({ label, Icon, action, op }) => {
+          const running = busy === op;
+          const pendingPush = op === "push" && pushCount > 0;
+          const description = pendingPush ? `${label} · ${tf("待推送 {0} 个提交", pushCount)}` : label;
+          return (
+            <div className="gk-toolbar-sync-segment" key={op}>
+              <button type="button" onClick={action} disabled={!action || !!busy} aria-label={description} aria-busy={running || undefined}
+                data-sync-action={op} data-running={running || undefined}
+                data-sync-complete={completed === op || undefined}
+                className="gk-shell-button gk-git-action gk-toolbar-sync-button">
+                <span className="gk-git-action-icon" aria-hidden="true"><Icon size={18} /></span>
+                {pendingPush && <span className="gk-toolbar-sync-count tabular-nums" aria-hidden="true">{pushCount}</span>}
+              </button>
+              <span className="gk-toolbar-sync-tooltip" aria-hidden="true">{description}</span>
+            </div>
+          );
+        })}
+      </div>
       <button type="button" data-gk-toolbar-move disabled={!moreActions.some(({ action }) => !!action) || !!busy}
         aria-label={tx("更多仓库操作")} title={tx("更多仓库操作")} aria-haspopup="menu" aria-expanded={morePos?.kind === "repository"}
         onClick={event => openActions(event.currentTarget, "repository")}
@@ -1188,7 +1190,7 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
         className="gk-shell-button flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer">
         <MoreHorizontal size={18} aria-hidden="true" />
       </button>
-      <div className="flex-1" />
+      <div className="gk-toolbar-drag" data-tauri-drag-region />
       <button data-gk-toolbar-move onClick={onCreateBranch} disabled={!onCreateBranch || !!busy}
         className="gk-shell-button flex items-center gap-2 h-8 px-3 text-xs font-medium flex-shrink-0 cursor-pointer"
         style={{ borderRadius: R - 3 }}>
@@ -1198,8 +1200,8 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
         background: requestDisabled ? t.disabledBg : t.accent, color: requestDisabled ? t.textMuted : "#fff",
       }}>
         <button type="button" aria-label={requestLabel} title={requestLabel} disabled={requestDisabled} onClick={onCreatePR}
-          className="flex items-center gap-2 px-3 text-xs font-medium">
-          <GitPullRequest size={15} aria-hidden="true" /><ToolbarText order={7}>{requestLabel}</ToolbarText>
+          className="flex items-center px-3 text-xs font-medium">
+          <ToolbarText order={7}>{requestLabel}</ToolbarText>
         </button>
         <button type="button" disabled={requestDisabled} aria-label={requestMenuLabel} title={requestMenuLabel}
           aria-haspopup="menu" aria-expanded={morePos?.kind === "request"}
@@ -1408,26 +1410,18 @@ function StatusBar({ project, branch, changes, ready, errored, home, checkProgre
   const SyncIcon = !branch?.remote ? Cloud : branch.ahead || branch.behind ? RefreshCw : Check;
   const behind = branch?.behind ?? 0;
   const ahead = branch?.ahead ?? 0;
-  const statusSurface = t.isDark ? "#2B2D31" : "#E1E3E7";
-  const statusText = t.isDark ? "#D5D7DC" : "#4E535C";
-  const statusMuted = t.isDark ? "#A4A8B0" : "#717780";
-  const statusPill = t.isDark ? "rgba(255,255,255,0.09)" : "rgba(78,83,92,0.08)";
-  const statusHover = t.isDark ? "rgba(255,255,255,0.14)" : "rgba(78,83,92,0.13)";
-  const statusDivider = t.isDark ? "rgba(255,255,255,0.16)" : "rgba(78,83,92,0.18)";
-  const statusKey = t.isDark ? "rgba(255,255,255,0.11)" : "rgba(78,83,92,0.11)";
-  const statusBorder = t.isDark ? "rgba(255,255,255,0.06)" : "rgba(78,83,92,0.07)";
   return (
     <footer className="gk-status-bar grid items-center gap-4 px-2 flex-shrink-0 text-[11px] select-none"
       aria-label={tx("仓库状态")} style={{
-        background: statusSurface,
-        color: statusText,
-        "--gk-status-text": statusText,
-        "--gk-status-muted": statusMuted,
-        "--gk-status-pill": statusPill,
-        "--gk-status-pill-hover": statusHover,
-        "--gk-status-divider": statusDivider,
-        "--gk-status-key": statusKey,
-        "--gk-status-border": statusBorder,
+        background: t.bg,
+        color: t.text,
+        "--gk-status-text": t.text,
+        "--gk-status-muted": t.textSec,
+        "--gk-status-pill": t.rowCurrent,
+        "--gk-status-pill-hover": t.rowCurrentHover,
+        "--gk-status-divider": t.inputBorder,
+        "--gk-status-key": t.rowCurrent,
+        "--gk-status-border": t.border,
       } as React.CSSProperties}>
       <div className="gk-status-context flex items-center gap-1.5 min-w-0" role={checkProgress ? "status" : undefined}>
         {checkProgress ? (
@@ -1456,31 +1450,31 @@ function StatusBar({ project, branch, changes, ready, errored, home, checkProgre
           </>
         )}
       </div>
-      <div className="flex items-center justify-center min-w-0" role="status">
-        {home ? <span className="gk-status-pill px-3">{home.refreshing ? tx("正在刷新状态…") : tf("{0} 个项目需关注", home.attention)}</span>
-          : errored ? <span className="gk-status-pill px-3">{tx("仓库加载失败")}</span>
-          : project && !ready ? <span className="gk-status-pill px-3" aria-label={tx("正在加载仓库…")} aria-busy="true"><Skeleton width={90} height={10} color={t.rowHover} /></span>
-          : project?.initialized === false ? <span className="gk-status-pill px-3">{tx("点击推送以初始化 Git")}</span>
-          : ready ?
-          <button onClick={onShowChanges} className="gk-status-pill gk-shell-button flex items-center gap-2 px-3 flex-shrink-0 cursor-pointer tabular-nums"
-            title={changes ? tx("工作区有修改，点击查看") : tx("工作区干净，点击查看")}
-            aria-label={tf("查看工作区，{0} 个变更，待拉取 {1} 个提交，待推送 {2} 个提交", changes, behind, ahead)}>
-            <CircleDot size={12} aria-hidden="true" />
-            <span className="font-medium">{changes} {tx("个变更")}</span>
-            <span className="gk-status-divider" aria-hidden="true" />
-            <span className="flex items-center gap-1" title={tf("待拉取 {0} 个提交", behind)}>
-              <ArrowDown size={12} aria-hidden="true" />{behind}
-            </span>
-            <span className="flex items-center gap-1" title={tf("待推送 {0} 个提交", ahead)}>
-              <ArrowUp size={12} aria-hidden="true" />{ahead}
-            </span>
-            <span className="gk-status-divider" aria-hidden="true" />
-            <span className="gk-status-state-copy whitespace-nowrap">{changes ? tx("工作区有修改") : tx("工作区干净")}</span>
-          </button>
-        : <span className="gk-status-pill px-3 truncate">{tx("打开仓库以开始")}</span>}
+      <div className="gk-status-capsule gk-status-pill">
+        <div className="gk-status-summary" role="status">
+          {home ? <span className="gk-status-pill px-3">{home.refreshing ? tx("正在刷新状态…") : tf("{0} 个项目需关注", home.attention)}</span>
+            : errored ? <span className="gk-status-pill px-3">{tx("仓库加载失败")}</span>
+            : project && !ready ? <span className="gk-status-pill px-3" aria-label={tx("正在加载仓库…")} aria-busy="true"><Skeleton width={90} height={10} color={t.rowHover} /></span>
+            : project?.initialized === false ? <span className="gk-status-pill px-3">{tx("点击推送以初始化 Git")}</span>
+            : ready ?
+            <button onClick={onShowChanges} className="gk-status-pill gk-shell-button flex items-center gap-2 px-3 flex-shrink-0 cursor-pointer tabular-nums"
+              title={changes ? tx("工作区有修改，点击查看") : tx("工作区干净，点击查看")}
+              aria-label={tf("查看工作区，{0} 个变更，待拉取 {1} 个提交，待推送 {2} 个提交", changes, behind, ahead)}>
+              <CircleDot size={12} aria-hidden="true" />
+              <span className="font-medium">{changes} {tx("个变更")}</span>
+              <span className="gk-status-divider" aria-hidden="true" />
+              <span className="flex items-center gap-1" title={tf("待拉取 {0} 个提交", behind)}>
+                <ArrowDown size={12} aria-hidden="true" />{behind}
+              </span>
+              <span className="flex items-center gap-1" title={tf("待推送 {0} 个提交", ahead)}>
+                <ArrowUp size={12} aria-hidden="true" />{ahead}
+              </span>
+            </button>
+          : <span className="gk-status-pill px-3 truncate">{tx("打开仓库以开始")}</span>}
+        </div>
+        {mrEntry}
       </div>
       <div className="gk-status-actions">
-      {mrEntry}
       <button onClick={onSearch} disabled={!home && (!ready || project?.initialized === false)}
         className="gk-status-pill gk-shell-button justify-self-end flex items-center gap-2 pl-2.5 pr-1 flex-shrink-0 cursor-pointer">
         <Search size={12} aria-hidden="true" />
@@ -9570,11 +9564,8 @@ export default function App() {
               fontSize: 12, fontFamily: "inherit", borderRadius: R, paddingRight: 36 } }} />
 
           <TitleBar themeMode={themeMode} onThemeCycle={cycleTheme}
-            onOpenSettings={() => { setSettingsSection("identity"); setSettingsOpen(true); }} />
-
-          <div className="gk-action-bar gk-toolbar-shell flex items-center gap-1.5 px-3 flex-shrink-0 select-none"
-            style={{ borderBottom: `0.5px solid ${theme.border}`, background: workspaceView === "home" ? theme.bgPanel : theme.bg,
-              color: theme.textSec, "--gk-shell-hover": theme.rowHover } as React.CSSProperties}>
+            background={workspaceView === "home" ? theme.bgPanel : theme.bg}
+            onOpenSettings={() => { setSettingsSection("identity"); setSettingsOpen(true); }}>
             <button type="button" data-gk-project-toggle onClick={() => setProjectSidebarOpen((open) => !open)}
               className="gk-shell-button flex items-center justify-center w-8 h-8 flex-shrink-0 cursor-pointer"
               aria-label={projectSidebarOpen ? tx("收起项目栏") : tx("展开项目栏")}
@@ -9587,7 +9578,7 @@ export default function App() {
               reading={overview.refreshing && !projects.some((project) => overview.entries[project.id]?.summary)}
               refreshing={overview.refreshing || activity.refreshing} remoteBusy={checkBusy} remoteDisabled={!!gitBusy || !!busyLabel || pullBusy}
               onRefresh={() => { overview.refresh(); activity.refresh(); }} onCheckRemote={() => { void runUpdateCheck(); }} onAdd={handleOpenNew}
-            /> : <ActionBar project={activeProject} branch={dataReady ? currentBranch : activeProject?.branch ?? ""}
+            /> : <ActionBar project={activeProject} branch={dataReady ? currentBranch : activeProject?.branch ?? ""} projectSidebarOpen={projectSidebarOpen}
             canMerge={dataReady && hasHead && !switching && operationKnown && !activeRepoOperation}
             onMerge={() => openMergeDialog()}
             onCreateBranch={dataReady && hasHead && !switching && operationKnown && !activeRepoOperation ? () => setCreateBranchOpen(true) : undefined}
@@ -9608,9 +9599,11 @@ export default function App() {
               : currentRequest.data?.requests.length === 0 ? tf("创建{0}", term) : term}
             onCreatePR={hasHead && dataReady && !switching && remotes.length > 0 ? () => { void requestCreatePR(); } : undefined}
             pushCount={branches.find((b) => b.current)?.ahead ?? 0}
+            completed={operationDisplay?.outcome === "success" && operationDisplay.context.path === path && operationDisplay.context.branch === currentBranch
+              ? operationDisplay.kind : undefined}
             busy={gitBusy ?? (busyLabel || forcePushRequest || undoChecking || createRepoBusy ? "other" : null)} />}
             </div>
-          </div>
+          </TitleBar>
 
           <div className="gk-workspace flex-1 min-h-0 overflow-hidden" data-projects-open={projectSidebarOpen}>
             {(activeRepoOperation || (repoOperation && repoOperation.path === path && repoOperation.error)) && (

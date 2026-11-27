@@ -47,6 +47,7 @@ export function WorkbenchActionBar({ theme, total, attention, reading, refreshin
     <span className="gk-workbench-summary" title={summary} aria-busy={reading}>
       {reading ? <><Skeleton width={145} height={11} /><span className="sr-only">{summary}</span></> : summary}
     </span>
+    <div className="gk-toolbar-drag" data-tauri-drag-region />
     <div className="gk-workbench-actions" role="group" aria-label={tx("工作台操作")}>
       <button className="gk-overview-button gk-shell-button gk-git-action" onClick={onRefresh} disabled={refreshing || !total}
         data-running={refreshing || undefined} aria-busy={refreshing || undefined}
