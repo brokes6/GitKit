@@ -4,6 +4,15 @@ import nativeTranslations from "./i18n-native.json" with { type: "json" };
 export type Language = "zh-CN" | "en";
 
 const EN: Record<string, string> = {
+  "仓库工具": "Repository tools",
+  "可选工具": "Optional tools",
+  "明暗模式": "Appearance mode",
+  "尚未配置个人访问令牌": "No personal access token configured",
+  "检查计划": "Schedule",
+  "手动检查": "Manual check",
+  "已打开的项目": "Open projects",
+  "安装说明": "Installation instructions",
+  "GitLab 实例": "GitLab instance",
   "本地尚未记录远程分支 {0}/{1}。创建时将先推送此分支。": "No local record of {0}/{1}. Creating this request will push the branch first.",
   "本地预检通过 · 基于远程跟踪分支": "Local preview is clean against the remote-tracking branch",
   "创建前推送到 {0}/{1}": "Push to {0}/{1} before creating",
@@ -12,6 +21,7 @@ const EN: Record<string, string> = {
   "断开 CLI 连接": "Disconnect CLI",
   "连接 glab": "Connect glab",
   "使用 glab 的登录账号查看和创建当前分支的合并请求。": "View and create merge requests for the current branch with your glab account.",
+  "请先在终端用 glab auth login 登录此主机，并将 API 协议选为 http。": "Sign in to this host in your terminal with glab auth login and select http as the API protocol.",
   "首次使用请在终端运行 glab auth login。": "To sign in for the first time, run glab auth login in a terminal.",
   "同时推送 {0} 个本地提交": "Also push {0} local commits",
   "推送并创建{0}": "Push and create {0}",
@@ -154,7 +164,7 @@ const EN: Record<string, string> = {
   "添加名称与邮箱，即可在提交时快速选择。首个身份会自动设为默认。": "Add a name and email to choose at commit time. The first identity becomes the default.",
   "{0} 的更多操作": "More actions for {0}",
   "删除身份": "Delete identity",
-  "如：Blake": "e.g. Blake",
+  "如: User": "e.g. User",
   "请输入提交者名称": "Enter a committer name",
   "请输入有效的邮箱地址": "Enter a valid email address",
   "仓库可单独记住提交者身份。": "Each repository can remember its own committer identity.",
@@ -794,6 +804,11 @@ const EN: Record<string, string> = {
   "拉取": "Pull",
   "推送": "Push",
   "撤回": "Undo",
+  "撤回分支创建": "Undo branch creation",
+  "当前分支没有可撤回的操作": "No action to undo on this branch",
+  "正在撤回分支创建…": "Undoing branch creation…",
+  "将切换到 {0} 并删除本地分支 {1}。未提交的改动会保留。": "Switch to {0} and delete local branch {1}? Your uncommitted changes will be kept.",
+  "删除本地分支": "Delete local branch",
   "撤回最近一次未推送提交到工作区": "Undo the latest unpushed commit to the working tree",
   "当前分支没有可撤回的未推送提交": "No unpushed commit is available to undo on this branch",
   "撤回最近一次提交": "Undo latest commit",
@@ -868,6 +883,7 @@ const EN: Record<string, string> = {
   "下一个更改点": "Next change",
   "当前更改点": "Current change",
   "更改": "Change",
+  "显示选项": "Display options",
   "智能合并": "Smart merge",
   "其他引用": "Other refs",
   "非分支": "No branch",
@@ -1506,7 +1522,8 @@ export function translateNativeMessage(source: string): string {
     const nested = pattern.source === "{0}；恢复分支失败：{1}" || pattern.source === "任务失败：{0}";
     pattern.indexes.forEach((index, capture) => {
       const value = match[capture + 1];
-      values[index] = nested ? translateNativeMessage(value) : value;
+      const deletionError = index === 1 && pattern.source === "已切换到 {0}，但删除本地分支失败：{1}";
+      values[index] = nested || deletionError ? translateNativeMessage(value) : value;
     });
     return pattern.translation.replace(/\{(\d+)\}/g, (_, index: string) => values[Number(index)]);
   }

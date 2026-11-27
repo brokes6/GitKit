@@ -17,6 +17,6 @@ export function requestRepository(remoteUrl: string, instanceUrl: string): strin
 export function readGlabInstance(): string {
   try {
     const url = new URL(localStorage.getItem("gitkit.glab.instance") || "");
-    return url.protocol === "https:" && url.href === url.origin + "/" ? url.origin : "";
+    return ["http:", "https:"].includes(url.protocol) && url.href === url.origin + "/" ? url.origin : "";
   } catch { return ""; }
 }

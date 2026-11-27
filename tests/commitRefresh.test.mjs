@@ -57,6 +57,14 @@ test("commit updates the push count on success before the full history refresh",
   assert.equal(context.workingOperationRef.current, false);
 });
 
+test("the first commit on a newly created branch clears the creation undo action immediately", async () => {
+  const { state, run } = harness(async () => branch, {
+    branches: [{ ...branch, creation: { name: branch.name, head: "old-head", switchTo: "base" } }],
+  });
+  await run();
+  assert.equal(state.view.branches[0].creation, undefined);
+});
+
 test("commit uses the returned ahead and behind counts instead of incrementing stale UI state", async () => {
   const { state, run } = harness(async () => ({ ...branch, ahead: 4, behind: 2 }));
   await run();

@@ -7,12 +7,14 @@ struct TestRepo(PathBuf);
 
 impl TestRepo {
     fn new() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let serial = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let root =
-            std::env::temp_dir().join(format!("gitkit-operation-{}-{nonce}", std::process::id()));
+            std::env::temp_dir().join(format!("gitkit-operation-{}-{nonce}-{serial}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let repo = Self(root);
         repo.git(&["init", "--initial-branch=main"]);
@@ -127,6 +129,92 @@ fn undo_initial_commit_leaves_an_unborn_branch_and_keeps_files() {
     assert_eq!(std::fs::read_to_string(repo.0.join("initial.txt")).unwrap(), "initial\n");
     assert_eq!(std::fs::read_to_string(repo.0.join("staged.txt")).unwrap(), "staged\n");
     assert!(repo.git(&["ls-files"]).is_empty());
+}
+
+#[test]
+fn undo_branch_creation_keeps_the_base_commit_and_dirty_index_and_worktree() {
+    let repo = TestRepo::new();
+    let path = repo.path();
+    let name = "feature/fresh";
+    repo.git(&["config", "core.logAllRefUpdates", "false"]);
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.0.join("file"), "staged\n").unwrap();
+    repo.git(&["add", "file"]);
+    tauri::async_runtime::block_on(git_create_branch(path.into(), name.into(), "main".into(), true)).unwrap();
+    repo.git(&["tag", name]);
+    std::fs::write(repo.0.join("file"), "edited after branching\n").unwrap();
+    std::fs::write(repo.0.join("untracked"), "keep\n").unwrap();
+
+    let branches = tauri::async_runtime::block_on(git_branches(path.into())).unwrap();
+    let creation = branches.into_iter().find(|b| b.current).unwrap().creation.unwrap();
+    assert_eq!(creation.switch_to.as_deref(), Some("main"));
+    assert!(undo_commit_preview_inner(path).unwrap_err().contains("创建起点"));
+    tauri::async_runtime::block_on(branch_creation::git_undo_branch_creation(path.into(), creation)).unwrap();
+
+    assert_eq!(repo.git(&["branch", "--show-current"]), "main");
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), head);
+    assert!(repo.git(&["branch", "--list", name]).is_empty());
+    assert_eq!(repo.git(&["rev-parse", &format!("refs/tags/{name}")]), head);
+    assert_eq!(repo.git(&["show", ":file"]), "staged");
+    assert_eq!(std::fs::read_to_string(repo.0.join("file")).unwrap(), "edited after branching\n");
+    assert_eq!(std::fs::read_to_string(repo.0.join("untracked")).unwrap(), "keep\n");
+}
+
+#[test]
+fn undo_branch_creation_rechecks_checkout_and_refuses_new_commits() {
+    let repo = TestRepo::new();
+    repo.git(&["checkout", "-b", "fresh", "main"]);
+    let creation = tauri::async_runtime::block_on(branch_creation::git_branch_creation_preview(
+        repo.path().into(), "fresh".into())).unwrap().unwrap();
+    repo.git(&["checkout", "main"]);
+    assert!(branch_creation::undo(repo.path(), &creation).is_err());
+    assert_eq!(repo.git(&["branch", "--show-current"]), "main");
+
+    repo.git(&["checkout", "fresh"]);
+    repo.git(&["commit", "--allow-empty", "-m", "first on fresh"]);
+    assert!(branch_creation::undo(repo.path(), &creation).is_err());
+    let commit = undo_commit_preview_inner(repo.path()).unwrap();
+    assert_eq!(commit.branch, "fresh");
+    assert_eq!(commit.subject, "first on fresh");
+}
+
+#[test]
+fn undo_branch_creation_leaves_the_branch_and_edits_in_place_on_checkout_conflict() {
+    let repo = TestRepo::new();
+    let file = repo.0.join("file");
+    std::fs::write(&file, "base\n").unwrap();
+    repo.git(&["add", "file"]);
+    repo.git(&["commit", "-m", "base file"]);
+    repo.git(&["checkout", "-b", "fresh", "main"]);
+    let creation = tauri::async_runtime::block_on(branch_creation::git_branch_creation_preview(
+        repo.path().into(), "fresh".into())).unwrap().unwrap();
+    repo.git(&["checkout", "main"]);
+    std::fs::write(&file, "main moved\n").unwrap();
+    repo.git(&["commit", "-am", "advance main"]);
+    repo.git(&["checkout", "fresh"]);
+    std::fs::write(&file, "keep my edits\n").unwrap();
+
+    assert!(branch_creation::undo(repo.path(), &creation).is_err());
+    assert_eq!(repo.git(&["branch", "--show-current"]), "fresh");
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), creation.head);
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "keep my edits\n");
+}
+
+#[test]
+fn undo_branch_creation_of_a_tracking_branch_only_removes_its_local_ref() {
+    let (repo, remote) = force_push_fixture();
+    let remote_head = repo.git(&["rev-parse", "origin/main"]);
+    for checkout in [false, true] {
+        tauri::async_runtime::block_on(git_create_branch(repo.path().into(), "topic".into(), "origin/main".into(), checkout)).unwrap();
+        let creation = tauri::async_runtime::block_on(branch_creation::git_branch_creation_preview(
+            repo.path().into(), "topic".into())).unwrap().unwrap();
+        assert_eq!(creation.switch_to.as_deref(), checkout.then_some("local"));
+        branch_creation::undo(repo.path(), &creation).unwrap();
+        assert_eq!(repo.git(&["branch", "--show-current"]), "local");
+        assert!(repo.git(&["branch", "--list", "topic"]).is_empty());
+        assert_eq!(repo.git(&["rev-parse", "origin/main"]), remote_head);
+        assert_eq!(run_git(&remote, &["rev-parse", "refs/heads/main"]).unwrap().trim(), remote_head);
+    }
 }
 
 fn force_push_fixture() -> (TestRepo, String) {

@@ -50,9 +50,9 @@ pub(crate) struct RepoTarget {
     pub web_origin: String,
     /// `owner/repo` or `group/sub/project`.
     pub path: String,
-    /// `hostname[:port]` for the GitLab CLI; only HTTPS root-path GitLab
+    /// Web origin for the GitLab CLI; only root-path GitLab
     /// instances support it.
-    pub cli_host: Option<String>,
+    pub cli_origin: Option<String>,
 }
 
 /// Configured instance: API root, web host, web sub-path, CLI host.
@@ -60,7 +60,7 @@ struct Instance {
     api_base: String,
     web_origin: String,
     web_prefix: String,
-    cli_host: Option<String>,
+    cli_origin: Option<String>,
 }
 
 fn instance(provider: Provider, instance_url: &str) -> Result<Instance, String> {
@@ -76,7 +76,7 @@ fn instance(provider: Provider, instance_url: &str) -> Result<Instance, String> 
                     api_base: "https://api.github.com".into(),
                     web_origin: "https://github.com".into(),
                     web_prefix: String::new(),
-                    cli_host: None,
+                    cli_origin: None,
                 });
             }
             let url = parse_instance(raw)?;
@@ -87,7 +87,7 @@ fn instance(provider: Provider, instance_url: &str) -> Result<Instance, String> 
                 api_base: format!("{}{}/api/v3", origin_of(&url), web_path),
                 web_origin: origin_of(&url),
                 web_prefix: web_path.trim_matches('/').to_string(),
-                cli_host: None,
+                cli_origin: None,
             })
         }
         Provider::Gitlab => {
@@ -96,18 +96,12 @@ fn instance(provider: Provider, instance_url: &str) -> Result<Instance, String> 
             }
             let url = parse_instance(instance_url)?;
             let path = url.path().trim_end_matches('/');
-            let cli_host = (url.scheme() == "https" && path.is_empty()).then(|| {
-                let host = url.host_str().unwrap_or("").to_ascii_lowercase();
-                match url.port() {
-                    Some(port) => format!("{host}:{port}"),
-                    None => host,
-                }
-            });
+            let cli_origin = (url.path() == "/").then(|| origin_of(&url));
             Ok(Instance {
                 api_base: format!("{}{}/api/v4", origin_of(&url), path),
                 web_origin: origin_of(&url),
                 web_prefix: path.trim_matches('/').to_string(),
-                cli_host,
+                cli_origin,
             })
         }
     }
@@ -178,7 +172,7 @@ pub(crate) fn resolve_target(provider: &str, instance_url: &str, remote_url: &st
     let provider = parse_provider(provider)?;
     let (remote_host, remote_path) =
         remote_host_and_path(remote_url).ok_or_else(|| "无法从远程地址解析仓库路径".to_string())?;
-    let Instance { api_base, web_origin, web_prefix, cli_host } = instance(provider, instance_url)?;
+    let Instance { api_base, web_origin, web_prefix, cli_origin } = instance(provider, instance_url)?;
     let origin = Url::parse(&web_origin).map_err(|_| invalid_instance())?;
     let web_remote = Url::parse(remote_url).ok().filter(|url| matches!(url.scheme(), "https" | "http"));
     if remote_host != normalize_host(origin.host_str().unwrap_or(""))
@@ -194,7 +188,7 @@ pub(crate) fn resolve_target(provider: &str, instance_url: &str, remote_url: &st
     if provider == Provider::Github && path.split('/').count() != 2 {
         return Err("无法从远程地址解析 GitHub 仓库（应为 owner/repo）".into());
     }
-    Ok(RepoTarget { provider, api_base, web_origin, path, cli_host })
+    Ok(RepoTarget { provider, api_base, web_origin, path, cli_origin })
 }
 
 /// Validate a request web URL for opening in the browser: HTTP(S), no
@@ -285,8 +279,8 @@ impl Transport<'_> {
         match self {
             Transport::Http { token, .. } => check_token(token).map(|_| ()),
             Transport::Glab if target.provider != Provider::Gitlab => Err("GitLab CLI 仅可用于 GitLab".into()),
-            Transport::Glab if target.cli_host.is_none() => {
-                Err("GitLab CLI 仅支持 HTTPS 根路径实例，请改用访问令牌".into())
+            Transport::Glab if target.cli_origin.is_none() => {
+                Err("GitLab CLI 仅支持根路径实例，子路径实例请使用访问令牌".into())
             }
             Transport::Glab => Ok(()),
         }
@@ -300,8 +294,8 @@ async fn call(transport: &Transport<'_>, target: &RepoTarget, path: &str, body: 
     let (client, token) = match transport {
         Transport::Http { client, token } => (*client, token.trim()),
         Transport::Glab => {
-            let host = target.cli_host.as_deref().ok_or_else(|| "GitLab CLI 仅支持 HTTPS 根路径实例，请改用访问令牌".to_string())?;
-            let value = crate::glab::api(host, path.trim_start_matches('/'), body).await?;
+            let origin = target.cli_origin.as_deref().ok_or_else(|| "GitLab CLI 仅支持根路径实例，子路径实例请使用访问令牌".to_string())?;
+            let value = crate::glab::api(origin, path.trim_start_matches('/'), body).await?;
             if value.is_null() {
                 return Err(format!("{name}：响应格式无效"));
             }

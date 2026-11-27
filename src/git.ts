@@ -88,6 +88,7 @@ interface RBranch {
   behind: number;
   is_remote: boolean;
   worktree: string | null;
+  creation?: BranchCreation | null;
 }
 interface RFileStat {
   path: string;
@@ -353,6 +354,7 @@ export async function loadBranches(path: string, includeRemote = false): Promise
       color: branchColor(b.name),
       head: b.head_hash,
       worktree: b.worktree ?? undefined,
+      creation: b.creation ?? undefined,
     }));
 }
 
@@ -781,7 +783,7 @@ export interface BranchRequestLookup {
 
 /**
  * Default branch and open PR/MR for `source`. Rejects when the lookup fails;
- * resolves with `requests: []` when there is none. `useGlab` (GitLab, HTTPS
+ * resolves with `requests: []` when there is none. `useGlab` (GitLab, HTTP(S)
  * root-path instances only) uses the GitLab CLI auth instead of `token`.
  */
 export function lookupBranchRequest(args: {
@@ -820,6 +822,20 @@ export async function createBranch(
   path: string, name: string, base: string, checkout = true,
 ): Promise<void> {
   await invoke("git_create_branch", { path, name, base, checkout });
+}
+
+export interface BranchCreation {
+  name: string;
+  head: string;
+  switchTo: string | null;
+}
+
+export function branchCreationPreview(path: string, name: string): Promise<BranchCreation | null> {
+  return invoke("git_branch_creation_preview", { path, name });
+}
+
+export function undoBranchCreation(path: string, expected: BranchCreation): Promise<void> {
+  return invoke("git_undo_branch_creation", { path, expected });
 }
 
 /** Delete a local branch. `force` (-D) drops unmerged commits; the default (-d)

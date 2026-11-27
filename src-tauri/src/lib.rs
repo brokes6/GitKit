@@ -117,6 +117,8 @@ pub fn run() {
             git::git_cherry_pick,
             git::git_cherry_pick_preflight,
             git::git_create_branch,
+            git::branch_creation::git_branch_creation_preview,
+            git::branch_creation::git_undo_branch_creation,
             git::git_delete_branch,
             git::git_rename_branch,
             git::git_remove_worktree,

@@ -13,6 +13,7 @@ use tauri::Emitter;
 
 mod operation;
 mod snapshot_hash;
+pub mod branch_creation;
 pub mod local_merge;
 pub mod project_overview;
 pub mod project_status;
@@ -397,6 +398,8 @@ pub struct BranchInfo {
     pub ahead: u32,
     pub behind: u32,
     pub is_remote: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub creation: Option<branch_creation::BranchCreation>,
     /// Absolute path of the *linked* worktree that has this branch checked out,
     /// if any. Such a branch can be neither checked out nor deleted from the
     /// main worktree until that worktree is removed.
@@ -463,7 +466,9 @@ pub async fn git_branches(path: String) -> Result<Vec<BranchInfo>, String> {
         if f.len() < 6 {
             continue;
         }
-        let name = f[0].to_string();
+        // refname:short may include "heads/" when a tag has the same name.
+        // Local branch actions need the literal name below refs/heads/.
+        let name = f[4].strip_prefix("refs/heads/").unwrap_or(f[0]);
         // Skip the symbolic remote HEAD (e.g. "origin/HEAD").
         if name.ends_with("/HEAD") {
             continue;
@@ -483,7 +488,7 @@ pub async fn git_branches(path: String) -> Result<Vec<BranchInfo>, String> {
                     "rev-list",
                     "--left-right",
                     "--count",
-                    &format!("{name}...{up}"),
+                    &format!("{}...{up}", f[4]),
                 ],
             ) {
                 let nums: Vec<&str> = c.split_whitespace().collect();
@@ -499,9 +504,12 @@ pub async fn git_branches(path: String) -> Result<Vec<BranchInfo>, String> {
             worktrees.get(f[4]).cloned()
         };
         res.push(BranchInfo {
-            name,
+            name: name.to_string(),
             short_hash: f[1].to_string(),
             head_hash: f[5].to_string(),
+            // Only inspect the active branch during refresh. Other local branches
+            // can be checked individually when their context menu opens.
+            creation: if current { branch_creation::preview(&path, name, f[5], true) } else { None },
             upstream,
             current,
             ahead,
@@ -1810,7 +1818,7 @@ fn committed_branch(path: &str) -> Result<CommittedBranch, String> {
         (counts[0], counts[1])
     };
     Ok(CommittedBranch {
-        name: fields[1].to_string(),
+        name: reference.strip_prefix("refs/heads/").unwrap_or(fields[1]).to_string(),
         head_hash: fields[2].to_string(),
         upstream: if fields[4].is_empty() { None } else { Some(fields[4].to_string()) },
         ahead,
@@ -1874,9 +1882,14 @@ pub struct UndoCommitPreview {
 }
 
 fn undo_commit_preview_inner(path: &str) -> Result<UndoCommitPreview, String> {
-    let branch = run_git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .map_err(|_| "当前处于分离 HEAD 状态，无法撤回提交".to_string())?
-        .trim().to_string();
+    let branch = run_git(path, &["branch", "--show-current"])?.trim().to_string();
+    if branch.is_empty() {
+        return Err("当前处于分离 HEAD 状态，无法撤回提交".into());
+    }
+    let head = run_git(path, &["rev-parse", "HEAD"])?.trim().to_string();
+    if branch_creation::created_from(path, &branch, &head).is_some() {
+        return Err("这个提交来自分支的创建起点，当前分支还没有自己的提交".into());
+    }
     match run_git(path, &["rev-parse", "--symbolic-full-name", "@{upstream}"]) {
         Ok(upstream) => {
             if !upstream.trim().starts_with("refs/remotes/") {
@@ -1913,7 +1926,7 @@ fn undo_commit_preview_inner(path: &str) -> Result<UndoCommitPreview, String> {
     }
     Ok(UndoCommitPreview {
         branch,
-        head: run_git(path, &["rev-parse", "HEAD"])?.trim().to_string(),
+        head,
         subject: run_git(path, &["log", "-1", "--format=%s"])?.trim().to_string(),
         initial,
     })
@@ -1949,7 +1962,7 @@ fn undo_last_commit_inner(path: &str, expected_branch: &str, expected_head: &str
 
 #[tauri::command]
 pub async fn git_undo_last_commit(path: String, expected_branch: String, expected_head: String) -> Result<(), String> {
-    run_blocking(move || undo_last_commit_inner(&path, &expected_branch, &expected_head)).await
+    run_blocking(move || with_staging_lock(&path, || undo_last_commit_inner(&path, &expected_branch, &expected_head))).await
 }
 
 // Every git op shells out to `git`, which blocks. Tauri runs synchronous `#[command]`
@@ -2501,9 +2514,9 @@ pub async fn git_create_branch(
     }
     if checkout {
         local_merge::ensure_no_operation(&path)?;
-        run_git_nohooks(&path, &["checkout", "-b", name, base])?;
+        run_git_nohooks(&path, &["checkout", "-l", "-b", name, base])?;
     } else {
-        run_git(&path, &["branch", name, base])?;
+        run_git(&path, &["branch", "--create-reflog", "--", name, base])?;
     }
     Ok(())
     }))

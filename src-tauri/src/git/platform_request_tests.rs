@@ -15,7 +15,7 @@ fn resolves_public_enterprise_and_gitlab_targets() {
     assert_eq!(github.api_base, "https://api.github.com");
     assert_eq!(github.web_origin, "https://github.com");
     assert_eq!(github.path, "Owner/Repo");
-    assert_eq!(github.cli_host, None);
+    assert_eq!(github.cli_origin, None);
     assert_eq!(resolve_target("github", "https://api.github.com/", "https://github.com/o/r").unwrap().api_base, "https://api.github.com");
 
     for (instance, api) in [
@@ -34,19 +34,19 @@ fn resolves_public_enterprise_and_gitlab_targets() {
     assert_eq!(gitlab.provider, Provider::Gitlab);
     assert_eq!(gitlab.api_base, "https://gitlab.example.com/api/v4");
     assert_eq!(gitlab.path, "group/sub/project");
-    assert_eq!(gitlab.cli_host.as_deref(), Some("gitlab.example.com"));
+    assert_eq!(gitlab.cli_origin.as_deref(), Some("https://gitlab.example.com"));
     assert_eq!(
-        resolve_target("gitlab", "https://gitlab.example.com:8443", "https://gitlab.example.com:8443/g/p.git").unwrap().cli_host.as_deref(),
-        Some("gitlab.example.com:8443")
+        resolve_target("gitlab", "https://gitlab.example.com:8443", "https://gitlab.example.com:8443/g/p.git").unwrap().cli_origin.as_deref(),
+        Some("https://gitlab.example.com:8443")
     );
 
-    // Sub-path / plain-HTTP instances: HTTPS remote prefix stripped, no CLI.
+    // Sub-path instances use PAT transport; root HTTP instances retain their scheme.
     let nested = resolve_target("gitlab", "https://example.com/gitlab/", "https://example.com/gitlab/group/project.git").unwrap();
     assert_eq!(nested.api_base, "https://example.com/gitlab/api/v4");
     assert_eq!(nested.path, "group/project");
-    assert_eq!(nested.cli_host, None);
+    assert_eq!(nested.cli_origin, None);
     assert_eq!(resolve_target("gitlab", "https://example.com/gitlab", "git@example.com:group/project.git").unwrap().path, "group/project");
-    assert_eq!(resolve_target("gitlab", "http://gitlab.local", "http://gitlab.local/g/p").unwrap().cli_host, None);
+    assert_eq!(resolve_target("gitlab", "http://gitlab.local", "http://gitlab.local/g/p").unwrap().cli_origin.as_deref(), Some("http://gitlab.local"));
 }
 
 #[test]
@@ -119,13 +119,13 @@ fn browser_url_is_limited_to_the_instance_and_safe_characters() {
 }
 
 #[test]
-fn glab_transport_requires_https_root_gitlab_and_never_sends_http() {
+fn glab_transport_requires_a_root_gitlab_instance() {
     let runtime = runtime();
     let github = resolve_target("github", "", "git@github.com:o/r.git").unwrap();
     assert!(runtime.block_on(lookup(&Transport::Glab, &github, "feat")).is_err());
     let nested = resolve_target("gitlab", "https://example.com/gitlab", "git@example.com:g/p.git").unwrap();
     let error = runtime.block_on(lookup(&Transport::Glab, &nested, "feat")).unwrap_err();
-    assert!(error.contains("HTTPS"), "{error}");
+    assert!(error.contains("根路径"), "{error}");
     let client = http_client().unwrap();
     let missing = runtime.block_on(lookup(&Transport::Http { client: &client, token: " " }, &nested, "feat")).unwrap_err();
     assert!(missing.contains("令牌"), "{missing}");

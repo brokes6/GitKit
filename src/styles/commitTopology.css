@@ -45,6 +45,31 @@
   color: var(--gk-mode-accent-fg);
 }
 .gk-history-mode button:not([aria-pressed="true"]):hover { color: var(--gk-mode-text); }
+.gk-history-toolbar { position: relative; z-index: 2; container-type: inline-size; }
+.gk-history-options { position: relative; flex: none; }
+.gk-history-options-trigger {
+  display: flex; align-items: center; gap: 6px; min-height: 28px; padding: 3px 7px;
+  border-radius: 6px; color: var(--option-muted); font-size: 12px; white-space: nowrap; cursor: pointer;
+}
+.gk-history-options-trigger[data-enabled] { color: var(--option-accent); }
+.gk-history-options-trigger:hover, .gk-history-options-trigger[aria-expanded="true"] { background: var(--option-hover); color: var(--option-text); }
+.gk-history-options-trigger[aria-expanded="true"] svg:last-child { transform: rotate(180deg); }
+.gk-history-options-panel {
+  position: absolute; top: calc(100% + 5px); right: 0; width: min(242px, 95cqw);
+  padding: 4px; border: 1px solid var(--option-border); border-radius: 9px;
+  background: var(--option-panel); color: var(--option-text); box-shadow: var(--option-shadow);
+}
+.gk-history-options-panel label { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border-radius: 5px; cursor: pointer; }
+.gk-history-options-panel label:hover, .gk-history-options-panel label:focus-within { background: var(--option-hover); }
+.gk-history-options-panel strong, .gk-history-options-panel small { display: block; }
+.gk-history-options-panel strong { font-size: 13px; font-weight: 600; }
+.gk-history-options-panel small { margin-top: 3px; color: var(--option-muted); font-size: 11px; line-height: 1.45; }
+.gk-history-options-panel input { width: 15px; height: 15px; flex: none; accent-color: var(--option-accent); }
+@container (max-width: 410px) {
+  .gk-history-options-trigger span, .gk-history-options-trigger svg:last-child { display: none; }
+  .gk-history-options { position: static; }
+  .gk-history-options-panel { top: calc(100% - 4px); right: 8px; }
+}
 .gk-topology {
   display: flex;
   flex-direction: column;

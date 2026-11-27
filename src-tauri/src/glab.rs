@@ -4,10 +4,10 @@ use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
-/// Only a hostname (including an optional HTTPS port) crosses the CLI boundary.
-fn cli_host(instance: &str) -> Result<String, String> {
-    let url = Url::parse(instance).map_err(|_| "请输入 GitLab 的 HTTPS 实例地址")?;
-    if url.scheme() != "https"
+/// Keep the API protocol and hostname (including any non-default port) together.
+fn cli_endpoint(instance: &str) -> Result<Url, String> {
+    let url = Url::parse(instance).map_err(|_| "请输入 GitLab 的 HTTP 或 HTTPS 实例地址")?;
+    if !matches!(url.scheme(), "http" | "https")
         || url.host().is_none()
         || url.path() != "/"
         || !url.username().is_empty()
@@ -15,17 +15,20 @@ fn cli_host(instance: &str) -> Result<String, String> {
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err("glab 连接需要 HTTPS 根地址，例如 https://gitlab.com".into());
+        return Err("glab 连接需要 HTTP 或 HTTPS 根地址，仅填写协议、主机和可选端口".into());
     }
-    Ok(url
-        .origin()
-        .ascii_serialization()
-        .trim_start_matches("https://")
-        .to_string())
+    Ok(url)
 }
 
-pub(crate) async fn api(host: &str, endpoint: &str, body: Option<Value>) -> Result<Value, String> {
-    let host = cli_host(&format!("https://{host}"))?;
+pub(crate) async fn api(instance: &str, endpoint: &str, body: Option<Value>) -> Result<Value, String> {
+    let url = cli_endpoint(instance)?;
+    let host = url.host_str().ok_or("请输入 GitLab 的 HTTP 或 HTTPS 实例地址")?;
+    // glab api accepts only the bare hostname for the account selector.
+    // Bind its API destination separately so a non-default port is preserved.
+    let api_host = match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
     let mut cmd = crate::git::command("glab");
     #[cfg(target_os = "macos")]
     cmd.env("PATH", crate::git::augmented_path());
@@ -41,7 +44,6 @@ pub(crate) async fn api(host: &str, endpoint: &str, body: Option<Value>) -> Resu
         "CI_JOB_TOKEN",
         "GITLAB_REPO",
         "GITLAB_HOST",
-        "GITLAB_API_HOST",
         "GIT_DIR",
         "GIT_WORK_TREE",
         "GLAB_ENABLE_CI_AUTOLOGIN",
@@ -51,12 +53,14 @@ pub(crate) async fn api(host: &str, endpoint: &str, body: Option<Value>) -> Resu
         cmd.env_remove(var);
     }
     cmd.env("GLAB_CHECK_UPDATE", "false")
+        .env("GLAB_API_PROTOCOL", url.scheme())
+        .env("GITLAB_API_HOST", api_host)
         .env("NO_COLOR", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
         .args([
             "api",
             "--hostname",
-            &host,
+            host,
             "--method",
             if body.is_some() { "POST" } else { "GET" },
         ]);
@@ -98,7 +102,7 @@ pub(crate) async fn api(host: &str, endpoint: &str, body: Option<Value>) -> Resu
 
 #[tauri::command]
 pub async fn glab_account(instance_url: String) -> Result<String, String> {
-    let user = api(&cli_host(&instance_url)?, "user", None).await?;
+    let user = api(&instance_url, "user", None).await?;
     user["username"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -110,18 +114,24 @@ pub async fn glab_account(instance_url: String) -> Result<String, String> {
 mod tests {
     use super::*;
     #[test]
-    fn cli_instances_bind_to_exact_https_hosts() {
-        assert_eq!(
-            cli_host("https://git.example:8443/").unwrap(),
-            "git.example:8443"
-        );
+    fn cli_instances_bind_to_exact_protocol_host_and_port() {
+        for (instance, protocol, port) in [
+            ("http://git.example", "http", None),
+            ("http://git.example:8080", "http", Some(8080)),
+            ("https://git.example:8443/", "https", Some(8443)),
+        ] {
+            let url = cli_endpoint(instance).unwrap();
+            assert_eq!(url.scheme(), protocol);
+            assert_eq!(url.host_str(), Some("git.example"));
+            assert_eq!(url.port(), port);
+        }
         for bad in [
-            "http://git.example",
+            "ssh://git.example",
             "https://git.example/path",
             "https://user@git.example",
             "https://git.example?x=1",
         ] {
-            assert!(cli_host(bad).is_err());
+            assert!(cli_endpoint(bad).is_err());
         }
     }
 }
