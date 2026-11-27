@@ -1099,6 +1099,8 @@ const EN: Record<string, string> = {
   "当前分支": "Current branch",
   "当前检出分支": "Checked-out branch",
   "未知分支": "Unknown branch",
+  "定位到 {0}": "Locate {0}",
+  "{0} 的最新提交不在当前图中": "The tip of {0} is outside the current graph",
   "本地分支": "Local branch",
   "仅本地(未推送)": "Local only (not pushed)",
   "仅远端": "Remote only",

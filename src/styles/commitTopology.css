@@ -114,23 +114,23 @@
   z-index: 3;
   display: flex;
   flex-direction: column;
-  gap: 4px;
   max-width: min(220px, calc(100% - 24px));
-  max-height: min(220px, 45%);
-  margin: 0;
-  padding: 8px 10px;
-  overflow: auto;
-  overscroll-behavior: contain;
-  list-style: none;
-  border: 0.5px solid var(--gk-topology-border);
+  max-height: min(250px, 45%);
+  overflow: hidden;
+  border: .5px solid var(--gk-topology-border);
   border-radius: 6px;
   background: var(--gk-topology-surface);
   color: var(--gk-topology-text);
-  scrollbar-width: thin;
-  scrollbar-color: var(--gk-topology-border) transparent;
 }
-.gk-topology-legend li { display: flex; align-items: center; gap: 8px; min-height: 20px; flex-shrink: 0; }
-.gk-topology-legend:focus-visible { outline: 2px solid var(--gk-topology-accent); outline-offset: 2px; }
+.gk-topology-legend button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 2px 8px; text-align: left; cursor: pointer; }
+.gk-topology-legend button:hover:not(:disabled) { background: var(--gk-topology-hover); }
+.gk-topology-legend button:disabled { color: var(--gk-topology-muted); cursor: default; }
+.gk-topology-legend button:focus-visible { outline-offset: -2px; }
+.gk-topology-legend .gk-topology-legend-toggle { min-height: 28px; font-size: 11px; color: var(--gk-topology-secondary); }
+.gk-topology-legend-toggle svg { margin-left: auto; transition: transform 150ms ease-out; }
+.gk-topology-legend-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.gk-topology-legend-list { min-height: 0; max-height: 220px; margin: 0; padding: 0; list-style: none; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; transition: max-height 160ms ease-out; }
+.gk-topology-legend-list[aria-hidden="true"] { max-height: 0; visibility: hidden; transition: max-height 160ms ease-out, visibility 0s linear 160ms; }
 .gk-topology-legend-dot { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; }
 .gk-topology-legend-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 500; line-height: 20px; }
 .gk-topology-viewport {

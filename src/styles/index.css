@@ -37,6 +37,14 @@ html, body {
   position: fixed; z-index: 210; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain;
   padding: 4px; border: 1px solid; border-radius: 10px; font-family: var(--gk-font-ui);
 }
+.gk-branch-options { transition: height 160ms ease-out; animation: gk-branch-open 120ms ease-out; }
+.gk-branch-option[data-extra] { animation: gk-branch-open 150ms ease-out; }
+.gk-branch-option[aria-expanded] svg, .gk-branch-select svg { transition: transform 160ms ease-out; }
+.gk-branch-option[aria-expanded="true"] svg { transform: rotate(180deg); }
+@keyframes gk-branch-open { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .gk-branch-options, .gk-branch-option[data-extra], .gk-branch-option[aria-expanded] svg, .gk-branch-select svg { animation: none; transition: none; }
+}
 .gk-branch-option { min-height: 35px; padding: 6px 9px; border-radius: 6px; cursor: pointer; }
 .gk-branch-option[data-active] { background: var(--branch-hover); }
 .gk-branch-option[aria-selected="true"] { font-weight: 600; }

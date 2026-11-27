@@ -10,7 +10,7 @@ import { useBranchRequest, type RequestConnection } from "./useBranchRequest";
 import { copyWithToast } from "./clipboard";
 import { isTopDialog, useDialogFocus } from "./dialogFocus";
 import { setClockActive, subscribeClock, useClockTick } from "./clock";
-import { useExitPresence } from "./menuPresence";
+import { useExitPresence, useOutsideMenuPress } from "./menuPresence";
 import { HISTORY_PAGE_SIZE, isHistoryTruncated, nextHistoryLimit } from "./historyPaging";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
@@ -760,6 +760,7 @@ function HistoryDisplayOptions({ smartMerge, onSmartMerge, otherRefs, onOtherRef
   const t = useTheme();
   const id = useId();
   const [open, setOpen] = useState(false);
+  const presence = useExitPresence(open ? true : null);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -787,7 +788,9 @@ function HistoryDisplayOptions({ smartMerge, onSmartMerge, otherRefs, onOtherRef
       data-enabled={smartMerge || otherRefs || undefined} onClick={() => setOpen(value => !value)}>
       <SlidersHorizontal size={14} aria-hidden="true" /><span>{tx("显示选项")}</span><ChevronDown size={11} aria-hidden="true" />
     </button>
-    {open && <div id={id} className="gk-history-options-panel" role="group" aria-label={tx("显示选项")}>
+    {presence.shown && <div id={id} className="gk-history-options-panel gk-action-menu" role="group" aria-label={tx("显示选项")}
+      data-closing={presence.closing || undefined} aria-hidden={presence.closing || undefined}
+      ref={el => { if (el) el.inert = presence.closing; }}>
       {smartMerge !== undefined && <label>
         <span><strong>{tx("智能合并")}</strong><small>{tx("仅合并相同变更的展示，不会修改 Git 历史")}</small></span>
         <input type="checkbox" checked={smartMerge} onChange={e => onSmartMerge(e.target.checked)} />
@@ -964,11 +967,13 @@ function ProjectSidebar({ projects, activeId, homeActive, attentionCount, open, 
   const addMenuRef = useRef<HTMLDivElement>(null);
   const [addMenuPos, setAddMenuPos] = useState<{ left: number; top: number } | null>(null);
   const addMenuPresence = useExitPresence(addMenuPos);
+  useOutsideMenuPress(!!addMenuPos, addMenuRef, () => setAddMenuPos(null), addButtonRef);
   useEffect(() => {
     if (!open) { setAddMenuPos(null); return; }
+    if (homeActive) return;
     scrollRef.current?.querySelector<HTMLElement>("[data-project-active]")
       ?.scrollIntoView({ block: "nearest" });
-  }, [activeId, projects.length, open]);
+  }, [activeId, homeActive, open]);
 
   useEffect(() => {
     if (!addMenuPos) return;
@@ -976,15 +981,16 @@ function ProjectSidebar({ projects, activeId, homeActive, attentionCount, open, 
     const close = () => setAddMenuPos(null);
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        e.preventDefault(); e.stopPropagation();
         close();
-        addButtonRef.current?.focus();
+        addButtonRef.current?.focus({ preventScroll: true });
       }
     };
     window.addEventListener("resize", close);
-    window.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, true);
     return () => {
       window.removeEventListener("resize", close);
-      window.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keydown", onKeyDown, true);
     };
   }, [addMenuPos]);
 
@@ -1000,6 +1006,7 @@ function ProjectSidebar({ projects, activeId, homeActive, attentionCount, open, 
   };
   const chooseAddAction = (action: () => void) => {
     setAddMenuPos(null);
+    addButtonRef.current?.focus({ preventScroll: true });
     action();
   };
 
@@ -1046,14 +1053,16 @@ function ProjectSidebar({ projects, activeId, homeActive, attentionCount, open, 
 
       {addMenuPresence.shown && createPortal(
         <>
-          {!addMenuPresence.closing && <div className="fixed inset-0" style={{ zIndex: 80 }} onMouseDown={() => setAddMenuPos(null)} />}
           <div ref={addMenuRef} role="menu" aria-label={tx("添加仓库")}
             className={`fixed p-1.5 ${addMenuPresence.closing ? "gk-modal-out gk-menu-closing" : "gk-modal-in"}`}
             aria-hidden={addMenuPresence.closing || undefined}
+            onKeyDown={event => {
+              if (event.key === "Tab") { setAddMenuPos(null); addButtonRef.current?.focus({ preventScroll: true }); }
+            }}
             style={{ left: addMenuPresence.shown.left, top: addMenuPresence.shown.top, zIndex: 81, width: 196,
               background: t.dialogBg, border: `0.5px solid ${t.glassBorder}`,
               borderRadius: R, boxShadow: t.shadowWindow }}>
-            <button role="menuitem" onClick={() => chooseAddAction(onAdd)}
+            <button role="menuitem" disabled={addMenuPresence.closing} onClick={() => chooseAddAction(onAdd)}
               className="flex items-center gap-2.5 w-full px-2.5 py-2 text-left text-xs font-medium cursor-pointer"
               style={{ color: t.text, borderRadius: R - 3 }}
               onMouseEnter={(e) => { e.currentTarget.style.background = t.rowHover; }}
@@ -1061,7 +1070,7 @@ function ProjectSidebar({ projects, activeId, homeActive, attentionCount, open, 
               <FolderOpen size={14} aria-hidden="true" style={{ color: t.accent }} />
               {tx("打开本地项目")}
             </button>
-            <button role="menuitem" onClick={() => chooseAddAction(onClone)}
+            <button role="menuitem" disabled={addMenuPresence.closing} onClick={() => chooseAddAction(onClone)}
               className="flex items-center gap-2.5 w-full px-2.5 py-2 text-left text-xs font-medium cursor-pointer"
               style={{ color: t.text, borderRadius: R - 3 }}
               onMouseEnter={(e) => { e.currentTarget.style.background = t.rowHover; }}
@@ -1091,6 +1100,7 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
   const morePresence = useExitPresence(morePos);
   const menuTrigger = useRef<HTMLButtonElement | null>(null);
   const moreMenu = useRef<HTMLDivElement>(null);
+  useOutsideMenuPress(!!morePos, moreMenu, () => setMorePos(null), menuTrigger);
   const toolbarLayoutKey = JSON.stringify([
     project?.id, project?.name, project?.initialized, branch, pushCount, getCurrentLanguage(),
   ]);
@@ -1101,11 +1111,11 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
     moreMenu.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
     const close = () => setMorePos(null);
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { close(); menuTrigger.current?.focus(); }
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); menuTrigger.current?.focus({ preventScroll: true }); }
     };
-    window.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, true);
     window.addEventListener("resize", close);
-    return () => { window.removeEventListener("keydown", onKey); window.removeEventListener("resize", close); };
+    return () => { document.removeEventListener("keydown", onKey, true); window.removeEventListener("resize", close); };
   }, [morePos]);
   const actions = [
     { label: tx("获取"), Icon: RefreshCw, action: onFetch, op: "fetch" },
@@ -1200,8 +1210,7 @@ function ActionBar({ project, branch, canMerge, onMerge, onCreateBranch, onFetch
         </button>
       </div>
       {morePresence.shown && createPortal(<>
-        {!morePresence.closing && <div className="fixed inset-0" style={{ zIndex: 80 }} onMouseDown={() => setMorePos(null)} />}
-        <div ref={moreMenu} role="menu" aria-label={morePresence.shown.kind === "request" ? requestMenuLabel : tx("更多仓库操作")} className="gk-action-menu fixed p-1.5"
+        <div key={morePresence.shown.kind} ref={moreMenu} role="menu" aria-label={morePresence.shown.kind === "request" ? requestMenuLabel : tx("更多仓库操作")} className="gk-action-menu fixed p-1.5"
           onKeyDown={event => {
             if (event.key === "Tab") { setMorePos(null); menuTrigger.current?.focus(); return; }
             const keys = ["ArrowDown", "ArrowUp", "Home", "End"];
@@ -2344,8 +2353,8 @@ function DiffRows({ lines, filePath, activeHunk, lineComments }: { lines: string
   const discussionsByLine = useMemo(() => lineComments ? mrLineDiscussionIndex(lineComments.discussions, lineComments.refs, lineComments) : new Map(),
     [lineComments?.discussions, lineComments?.refs, lineComments?.oldPath, lineComments?.newPath]);
   useEffect(() => { if (menu) menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus(); }, [menu]);
-  const focusRow = (index: number) => rowsRef.current?.querySelectorAll<HTMLDivElement>(".gk-code-row")[index]?.focus();
-  const closeMenu = () => { if (menu) focusRow(menu.row); setMenu(null); };
+  const focusRow = (index: number) => rowsRef.current?.querySelectorAll<HTMLDivElement>(".gk-code-row")[index]?.focus({ preventScroll: true });
+  const closeMenu = (reason: MenuCloseReason) => { if (menu && reason !== "outside") focusRow(menu.row); setMenu(null); };
   const palette = useMemo<DiffSyntaxPalette>(() => ({
     name: `gitkit-${t.accent}-${t.isDark ? "dark" : "light"}`,
     dark: t.isDark, text: t.textSec, muted: t.textMuted,
@@ -2404,13 +2413,13 @@ function DetailMenuButton({ label, items }: { label: string; items: CtxItem[] })
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
   const presence = useExitPresence(position);
-  const close = () => { setPosition(null); requestAnimationFrame(() => triggerRef.current?.focus()); };
+  const close = (reason: MenuCloseReason) => { setPosition(null); if (reason !== "outside") triggerRef.current?.focus({ preventScroll: true }); };
   useEffect(() => {
     if (position) ref.current?.querySelector<HTMLButtonElement>(".gk-context-menu button")?.focus();
   }, [position]);
   return <div ref={ref} className="gk-detail-menu flex-shrink-0" onKeyDown={(event) => {
     if (!position) return;
-    if (event.key === "Escape") { event.stopPropagation(); close(); }
+    if (event.key === "Escape") { event.stopPropagation(); close("escape"); }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
       const buttons = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>(".gk-context-menu button") ?? []);
@@ -2424,7 +2433,7 @@ function DetailMenuButton({ label, items }: { label: string; items: CtxItem[] })
       onClick={(event) => { const rect = event.currentTarget.getBoundingClientRect(); setPosition(position ? null : { x: rect.right - 176, y: rect.bottom + 5 }); }}>
       <MoreHorizontal size={15} aria-hidden="true" />
     </button>
-    {presence.shown && <ContextMenu {...presence.shown} items={items} closing={presence.closing} onClose={close} />}
+    {presence.shown && <ContextMenu {...presence.shown} items={items} closing={presence.closing} trigger={triggerRef} onClose={close} />}
   </div>;
 }
 
@@ -3764,9 +3773,12 @@ function pickRemoteToken(remoteUrl: string): string | undefined {
 // mousedown just blurs the field and no `click` is dispatched. So dialog controls
 // act on `mousedown` (which always fires) instead, making them one-click reliable.
 const press = (fn: () => void) => ({
-  onMouseDown: (e: React.MouseEvent) => { e.preventDefault(); fn(); },
+  onMouseDown: (e: React.MouseEvent) => {
+    if (e.button !== 0 || (e.ctrlKey && navigator.platform.startsWith("Mac"))) return;
+    e.preventDefault(); fn();
+  },
   onKeyDown: (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fn(); }
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); if (!e.repeat) fn(); }
   },
 });
 
@@ -5134,6 +5146,7 @@ function IdentitySettings({ identities, setIdentities, defaultId, setDefaultId, 
   const [adding, setAdding] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [moreId, setMoreId] = useState<string | null>(null);
+  const morePresence = useExitPresence(moreId);
   const menuRef = useRef<HTMLDivElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const editRef = useRef<HTMLButtonElement>(null);
@@ -5261,7 +5274,8 @@ function IdentitySettings({ identities, setIdentities, defaultId, setDefaultId, 
                       aria-label={tf("{0} 的更多操作", i.name)} aria-expanded={moreId === i.id} className="gk-settings-more-summary">
                       <MoreHorizontal size={15} aria-hidden="true" />
                     </button>
-                    {moreId === i.id && <div className="gk-settings-more-menu">
+                    {morePresence.shown === i.id && <div className="gk-settings-more-menu" data-closing={morePresence.closing || undefined}
+                      aria-hidden={morePresence.closing || undefined} ref={el => { if (el) el.inert = morePresence.closing; }}>
                       {!isDefault && <button type="button" onClick={() => { setDefaultId(i.id); menuRef.current?.querySelector("button")?.focus(); setMoreId(null); }}
                         aria-label={tf("将 {0} 设为默认身份", i.name)}><Check size={13} />{tx("设为默认")}</button>}
                       <button type="button" {...press(() => remove(i.id))} className="gk-settings-danger" aria-label={tf("删除 {0}", i.name)}>
@@ -6671,11 +6685,14 @@ type CtxItem =
   | { sep?: false; label: string; Icon?: React.ElementType; danger?: boolean; onClick: () => void };
 interface CtxState { x: number; y: number; items: CtxItem[] }
 
-function ContextMenu({ x, y, items, onClose, closing = false }: {
-  x: number; y: number; items: CtxItem[]; onClose: () => void; closing?: boolean;
+type MenuCloseReason = "outside" | "escape" | "select";
+
+function ContextMenu({ x, y, items, onClose, closing = false, trigger }: {
+  x: number; y: number; items: CtxItem[]; onClose: (reason: MenuCloseReason) => void; closing?: boolean; trigger?: React.RefObject<HTMLElement>;
 }) {
   const t = useTheme();
   const ref = useRef<HTMLDivElement>(null);
+  useOutsideMenuPress(!closing, ref, () => onClose("outside"), trigger);
   const [pos, setPos] = useState({ left: x, top: y, originX: "left", originY: "top" });
   useLayoutEffect(() => {
     const el = ref.current; if (!el) return;
@@ -6690,14 +6707,15 @@ function ContextMenu({ x, y, items, onClose, closing = false }: {
   }, [x, y, items]);
   useEffect(() => {
     if (closing) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault(); e.stopPropagation(); onClose("escape");
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
   }, [onClose, closing]);
   return (
     <>
-      {!closing && <div className="fixed inset-0" style={{ zIndex: 200 }}
-        onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />}
       <div ref={ref} className="gk-context-menu fixed" data-closing={closing || undefined} style={{
         top: pos.top, left: pos.left, zIndex: 201, minWidth: 176,
         transformOrigin: `${pos.originX} ${pos.originY}`,
@@ -6709,7 +6727,7 @@ function ContextMenu({ x, y, items, onClose, closing = false }: {
         {items.map((it, i) => it.sep ? (
           <div key={i} role="separator" style={{ height: "0.5px", background: t.border, margin: "5px 6px" }} />
         ) : (
-          <button key={i} onClick={() => { onClose(); it.onClick(); }}
+          <button key={i} disabled={closing} onClick={() => { onClose("select"); it.onClick(); }}
             className="w-full flex items-center gap-2.5 px-2 py-1.5 text-left cursor-pointer"
             style={{ borderRadius: R - 3, color: it.danger ? t.red : t.text }}
             onMouseEnter={(e) => { e.currentTarget.style.background = it.danger ? t.redBg : t.rowHover; }}
@@ -7142,17 +7160,19 @@ export default function App() {
   // Otherwise Esc or a pointer press outside closes the detail overlay.
   useEffect(() => {
     if (!detailOpen || settingsOpen) return;
+    const modalIsOpen = () => !!document.querySelector('[role="dialog"][aria-modal="true"]:not([aria-hidden="true"])');
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || diffExpanded || detailPanelRef.current?.querySelector(".gk-detail-menu [aria-expanded='true']")) return;
+      if (e.key !== "Escape" || e.defaultPrevented || modalIsOpen() || diffExpanded || detailPanelRef.current?.querySelector(".gk-detail-menu [aria-expanded='true']")) return;
       if (fileTrace) exitFileTrace(); else closeDetail();
     };
     const onMouseDown = (e: MouseEvent) => {
-      if (detailPanelRef.current?.contains(e.target as Node)) return;
+      if (modalIsOpen() || detailPanelRef.current?.contains(e.target as Node)) return;
       if ((e.target as Element | null)?.closest?.(".gk-expanded-diff-overlay")) return;
       if ((e.target as Element | null)?.closest?.(".gk-operation-capsule, .gk-repo-operation")) return;
-      if ((e.target as Element | null)?.closest?.(".gk-project-sidebar")) return;
+      if ((e.target as Element | null)?.closest?.(".gk-project-sidebar, .gk-toolbar-shell, .gk-status-bar")) return;
       if (historyMode === "topology" && (e.target as Element | null)?.closest?.("[data-gk-project-toggle]")) return;
-      if (historyMode === "topology" && (e.target as Element | null)?.closest?.(".gk-topology-node")) return;
+      if ((e.target as Element | null)?.closest?.(".gk-context-menu, [role='menu'], [role='dialog'], .gk-branch-options")) return;
+      if ((e.target as Element | null)?.closest?.("[data-commit-hash], .gk-topology-legend")) return;
       e.preventDefault();
       e.stopPropagation();
       closeDetail();
@@ -7179,6 +7199,11 @@ export default function App() {
   const branches   = view?.branches ?? [];
   const checkedOut = branches.find((b) => b.current && b.name === currentBranch);
   const branchColors = view?.branchColors;
+  const topologyBranches = useMemo(() => {
+    const visible = branches.filter(branch => !hiddenBranches.includes(branch.name));
+    return [...visible.filter(branch => pinnedBranches.includes(branch.name)),
+      ...visible.filter(branch => !pinnedBranches.includes(branch.name))];
+  }, [branches, hiddenBranches, pinnedBranches]);
   const remotes    = view?.remotes ?? [];
   const commits    = view?.commits ?? [];
   const graphRows  = view?.graph ?? [];
@@ -9843,7 +9868,8 @@ export default function App() {
                   </div>
                 ) : historyMode === "topology" ? (
                   <CommitTopology key={`${activeProject?.path}:${focusBranch}:${timelineHiddenBranches.join("\u0000")}`}
-                    commits={scopedCommits} graph={topologyGraph} theme={theme} hoverBranch={hoverBranch}
+                    commits={scopedCommits} graph={topologyGraph} branches={topologyBranches} theme={theme} hoverBranch={hoverBranch}
+                    onDismissDetail={closeDetail}
                     detailPanelRef={detailPanelRef} detailFullWidth={topologyDetailFullWidth || !!fileTrace}
                     pulseActive={appForeground && mr.selectedId === null && !settingsOpen && !diffExpanded && !fileTrace && !topologyCovered && !historyModeChanging && !historyRefreshing}
                     selectedHash={detailOpen && !viewChanges ? inspectedTopologyCommit?.fullHash ?? null : null}

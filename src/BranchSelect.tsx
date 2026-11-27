@@ -25,6 +25,7 @@ export function BranchSelect({ theme, value, options, preferredOptions, onChange
   const trigger = buttonRef ?? ownRef;
   const list = useRef<HTMLDivElement>(null);
   const listId = useId();
+  const revealHighlight = useRef(false);
   const [open, setOpen] = useState(false);
   const [highlight, setHighlight] = useState<string | null>("");
   const [showOtherOptions, setShowOtherOptions] = useState(false);
@@ -35,8 +36,9 @@ export function BranchSelect({ theme, value, options, preferredOptions, onChange
   const preferred = preferredOptions?.filter(name => options.includes(name)) ?? options;
   const otherOptions = preferredOptions ? options.filter(name => !preferredOptions.includes(name)) : [];
   const collapsedRows: readonly (string | null)[] = otherOptions.length > 0 ? [...preferred, null] : preferred;
-  const rows = expanded && showOtherOptions ? [...preferred, ...otherOptions] : collapsedRows;
+  const rows = expanded && showOtherOptions ? [...collapsedRows, ...otherOptions] : collapsedRows;
   const rowCount = rows.length;
+  const fullHeight = Math.min(268, (options.length + Number(otherOptions.length > 0)) * 35 + 10);
   const activeIndex = Math.max(0, rows.indexOf(highlight));
   const label = (name: string) => name ? labelFor?.(name) ?? name : placeholder;
   const rowLabel = (name: string | null) => name === null ? tx("其他分支") : label(name);
@@ -49,7 +51,7 @@ export function BranchSelect({ theme, value, options, preferredOptions, onChange
       const rect = button.getBoundingClientRect();
       const below = window.innerHeight - rect.bottom - 12;
       const above = rect.top - 12;
-      const flip = below < Math.min(268, rowCount * 35 + 10) && above > below;
+      const flip = below < fullHeight && above > below;
       setPosition({ left: rect.left, width: rect.width, maxHeight: Math.max(0, Math.min(268, flip ? above : below)),
         ...(flip ? { bottom: window.innerHeight - rect.top + 4 } : { top: rect.bottom + 4 }) });
     };
@@ -68,12 +70,13 @@ export function BranchSelect({ theme, value, options, preferredOptions, onChange
       window.removeEventListener("resize", place);
       document.removeEventListener("scroll", onScroll, true);
     };
-  }, [expanded, rowCount, trigger]);
+  }, [expanded, fullHeight, trigger]);
 
   useLayoutEffect(() => {
     const menu = list.current;
     const option = menu?.children[activeIndex];
-    if (!expanded || !position || !menu || !option) return;
+    if (!expanded || !position || !menu || !option || !revealHighlight.current) return;
+    revealHighlight.current = false;
     const row = option.getBoundingClientRect();
     const bounds = menu.getBoundingClientRect();
     if (row.top < bounds.top) menu.scrollTop += row.top - bounds.top - 4;
@@ -94,7 +97,8 @@ export function BranchSelect({ theme, value, options, preferredOptions, onChange
   function show() {
     typed.current = { prefix: "", time: 0 };
     setHighlight(value);
-    setShowOtherOptions(false);
+    setShowOtherOptions(otherOptions.includes(value));
+    revealHighlight.current = true;
     setOpen(true);
   }
   function choose(name: string) {
@@ -106,8 +110,8 @@ export function BranchSelect({ theme, value, options, preferredOptions, onChange
       choose(name);
       return;
     }
-    setShowOtherOptions(true);
-    setHighlight(otherOptions[0]);
+    setShowOtherOptions(!showOtherOptions);
+    setHighlight(null);
   }
   function keyDown(event: KeyboardEvent<HTMLButtonElement>) {
     const { key } = event;
@@ -122,6 +126,7 @@ export function BranchSelect({ theme, value, options, preferredOptions, onChange
     }
     if (["ArrowDown", "ArrowUp", "Home", "End"].includes(key)) {
       event.preventDefault();
+      revealHighlight.current = true;
       if (!expanded) show();
       if (key === "Home") setHighlight(rows[0]);
       else if (key === "End") setHighlight(rows[rowCount - 1]);
@@ -140,7 +145,7 @@ export function BranchSelect({ theme, value, options, preferredOptions, onChange
       const name = searchRows[(Math.max(0, start) + step + (prefix.length === 1 ? 1 : 0)) % searchRows.length];
       if (name === null || !label(name).toLocaleLowerCase().startsWith(prefix)) continue;
       event.preventDefault();
-      if (expanded) setHighlight(name); else choose(name);
+      if (expanded) { revealHighlight.current = true; setHighlight(name); } else choose(name);
       break;
     }
   }
@@ -151,20 +156,31 @@ export function BranchSelect({ theme, value, options, preferredOptions, onChange
     <button {...aria} type="button" role="combobox" ref={trigger} autoFocus={autoFocus} disabled={unavailable}
       aria-haspopup="listbox" aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
       aria-activedescendant={expanded ? listId + "-" + activeIndex : undefined}
-      title={label(value)} className="gk-branch-select"
+      className="gk-branch-select"
       style={{ ...colors, color: theme.text, background: theme.inputBg, borderColor: invalid ? theme.red : theme.inputBorder }}
-      onClick={() => { trigger.current?.focus({ preventScroll: true }); if (expanded) setOpen(false); else show(); }}
+      onMouseDown={event => {
+        if (event.button !== 0) return;
+        // WKWebView may consume a click while the branch-name input loses focus.
+        event.preventDefault();
+        trigger.current?.focus({ preventScroll: true });
+        if (expanded) setOpen(false); else show();
+      }}
+      onClick={event => {
+        event.preventDefault();
+        if (event.detail === 0) { if (expanded) setOpen(false); else show(); }
+      }}
       onBlur={() => setOpen(false)} onKeyDown={keyDown}>
       <span>{label(value)}</span><ChevronDown size={16} aria-hidden="true" />
     </button>
     {expanded && position && createPortal(
       <div id={listId} role="listbox" ref={list} aria-label={aria["aria-label"]} aria-labelledby={aria["aria-labelledby"]}
-        className="gk-branch-options" style={{ ...colors, ...position, color: theme.text, background: theme.dialogBg,
+        className="gk-branch-options" style={{ ...colors, ...position, height: Math.min(Number(position.maxHeight), rowCount * 35 + 10), color: theme.text, background: theme.dialogBg,
           borderColor: theme.inputBorder, boxShadow: theme.shadowEl }}>
         {rows.map((name, index) => <div key={name === null ? "more" : `branch:${name}`} id={listId + "-" + index} role="option" aria-selected={name === value}
-          data-active={index === activeIndex || undefined} title={rowLabel(name)} className="gk-branch-option"
-          onPointerMove={event => { if (event.pointerType === "mouse" && index !== activeIndex) setHighlight(name); }}
-          onMouseDown={event => event.preventDefault()} onClick={() => activate(name)}>
+          data-active={index === activeIndex || undefined} data-extra={index >= collapsedRows.length || undefined}
+          aria-expanded={name === null ? showOtherOptions : undefined} className="gk-branch-option"
+          onPointerMove={event => { if (event.pointerType === "mouse" && index !== activeIndex) { revealHighlight.current = false; setHighlight(name); } }}
+          onMouseDown={event => event.preventDefault()} onClick={event => { event.preventDefault(); event.stopPropagation(); activate(name); }}>
           <span>{rowLabel(name)}</span>
           {name === null && <ChevronDown size={15} aria-hidden="true" style={{ color: theme.textMuted }} />}
           {name === value && <Check size={15} aria-hidden="true" />}

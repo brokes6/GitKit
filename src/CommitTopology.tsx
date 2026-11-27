@@ -1,8 +1,8 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent, PointerEvent, RefObject } from "react";
-import { Crosshair, GitBranch, GitMerge, Layers, Maximize2, Minus, Plus } from "lucide-react";
+import { ChevronDown, Crosshair, GitBranch, GitMerge, Layers, Maximize2, Minus, Plus } from "lucide-react";
 import { tf, tx } from "./i18n";
-import type { Commit, GraphRowInfo, ThemeColors } from "./App";
+import type { Branch, Commit, GraphRowInfo, ThemeColors } from "./App";
 import { buildCommitTopology } from "./commitTopologyLayout";
 import type { CommitTopologyNode as TopologyNode } from "./commitTopologyLayout";
 import "./styles/commitTopology.css";
@@ -10,6 +10,8 @@ import "./styles/commitTopology.css";
 interface Props {
   commits: Commit[];
   graph: GraphRowInfo[];
+  branches: Branch[];
+  onDismissDetail: () => void;
   theme: ThemeColors;
   selectedHash: string | null;
   hoverBranch: string | null;
@@ -60,18 +62,18 @@ const TopologyCommit = memo(function TopologyCommit({ node, selected, highlight,
   </button>;
 });
 
-export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranch, detailPanelRef, detailFullWidth, pulseActive, onSelect, onContextMenu }: Props) {
+export function CommitTopology({ commits, graph, branches, onDismissDetail, theme, selectedHash, hoverBranch, detailPanelRef, detailFullWidth, pulseActive, onSelect, onContextMenu }: Props) {
   const layout = useMemo(() => buildCommitTopology(commits, graph), [commits, graph]);
   const branchLegend = useMemo(() => {
-    const branches = new Map<string, { name: string; color: string }>();
-    for (const node of layout.nodes) {
-      const name = node.commit.branchLabel;
-      if (!node.commit.isStash && name && !branches.has(name)) {
-        branches.set(name, { name, color: node.color });
-      }
-    }
-    return [...branches.values()];
-  }, [layout]);
+    const byHash = new Map(layout.nodes.map(node => [node.commit.fullHash, node]));
+    return branches.map(branch => ({
+      ...branch, node: branch.head ? byHash.get(branch.head) : layout.nodes.find(node => node.commit.tags?.includes(branch.name)),
+    }));
+  }, [branches, layout]);
+  const legendId = useId();
+  const [legendOpen, setLegendOpen] = useState(true);
+  const [locatedHash, setLocatedHash] = useState<string | null>(null);
+  const pendingJump = useRef<TopologyNode | null>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const scrollRef = useRef({ left: 0, top: 0 });
@@ -254,6 +256,22 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
     return () => observer.disconnect();
   }, [selectedNode]);
 
+  // A split detail restores the previous camera on close. Jump after that
+  // restoration so the branch tip, rather than the previous commit, stays in view.
+  useLayoutEffect(() => {
+    if (!selectedNode && pendingJump.current) {
+      changeZoom(1, pendingJump.current);
+      pendingJump.current = null;
+    }
+  }, [selectedNode]);
+  const jumpToTip = (node: TopologyNode) => {
+    setLocatedHash(node.commit.fullHash);
+    if (selectedNode) {
+      pendingJump.current = node;
+      onDismissDetail();
+    } else changeZoom(1, node);
+  };
+
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || !event.isPrimary) return;
     const viewport = event.currentTarget;
@@ -387,17 +405,27 @@ export function CommitTopology({ commits, graph, theme, selectedHash, hoverBranc
           width: layout.width * zoom, height: layout.height * zoom }}>
           {layout.nodes.map(node => <TopologyCommit key={node.commit.fullHash} node={node}
             selected={selectedHash === node.commit.fullHash}
-            highlight={!!hoverBranch && (node.commit.branchLabels ?? [node.commit.branchLabel]).includes(hoverBranch)}
+            highlight={node.commit.fullHash === locatedHash || (!!hoverBranch && (node.commit.branchLabels ?? [node.commit.branchLabel]).includes(hoverBranch))}
             compact={zoom < 0.55} zoom={zoom} onSelect={onSelect} onContextMenu={onContextMenu} />)}
         </div>
       </div>
     </div>}
-    {branchLegend.length > 0 && <ul className="gk-topology-legend" role="list" aria-label={tx("分支")} tabIndex={0}>
-      {branchLegend.map(branch => <li key={branch.name} title={branch.name}>
-        <span className="gk-topology-legend-dot" style={{ background: branch.color }} aria-hidden="true" />
-        <span className="gk-topology-legend-name">{branch.name}</span>
-      </li>)}
-    </ul>}
+    {branchLegend.length > 0 && <div className="gk-topology-legend">
+      <button type="button" className="gk-topology-legend-toggle" aria-expanded={legendOpen} aria-controls={legendId}
+        onClick={() => setLegendOpen(open => !open)}>
+        <span>{tx("本地分支")}</span><span>{branchLegend.length}</span><ChevronDown size={13} aria-hidden="true" />
+      </button>
+      <ul id={legendId} className="gk-topology-legend-list" role="list" aria-label={tx("本地分支")}
+        aria-hidden={!legendOpen} ref={el => { if (el) el.inert = !legendOpen; }}>
+        {branchLegend.map(({name, color, node}) => <li key={name}>
+          <button type="button" disabled={!node} onClick={() => { if (node) jumpToTip(node); }}
+            title={node ? tf("定位到 {0}", name) : tf("{0} 的最新提交不在当前图中", name)}>
+            <span className="gk-topology-legend-dot" style={{ background: color }} aria-hidden="true" />
+            <span className="gk-topology-legend-name">{name}</span>
+          </button>
+        </li>)}
+      </ul>
+    </div>}
     </div>
     <div className="gk-topology-footer">
       <span>{tx("拖动平移 · 点击节点查看详情")}</span>

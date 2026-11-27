@@ -144,10 +144,14 @@
 }
 .gk-settings-more-summary:hover, .gk-settings-more-summary[aria-expanded="true"] { background: var(--gks-input-bg); }
 .gk-settings-more-menu {
+  animation: gk-settings-menu-in 140ms ease-out both;
   position: absolute; right: 32px; top: 50%; z-index: 5; transform: translateY(-50%);
   padding: 4px; background: var(--gks-dialog); border: 1px solid var(--gks-input-border);
   border-radius: 7px; box-shadow: 0 8px 24px rgb(0 0 0 / .16);
 }
+.gk-settings-more-menu[data-closing="true"] { animation: gk-settings-menu-out 140ms ease-in both; pointer-events: none; }
+@keyframes gk-settings-menu-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes gk-settings-menu-out { from { opacity: 1; } to { opacity: 0; } }
 .gk-settings-page .gk-settings-more-menu button {
   display: flex; align-items: center; gap: 6px; padding: 6px; border-radius: 4px;
   font-size: 12px; line-height: 18px; white-space: nowrap;
