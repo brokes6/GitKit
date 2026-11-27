@@ -11,6 +11,7 @@ pub fn run() {
         .manage(git::WatchState::default())
         .manage(git::CancelState::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
             use tauri::Manager;
             if window.label() != "main" { return; }

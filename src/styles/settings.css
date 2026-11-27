@@ -167,6 +167,21 @@
 .gk-settings-input[aria-invalid="true"] { border-color: var(--gks-red); }
 .gk-settings-input[type="email"] { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: 12px; }
 .gk-settings-error { margin: 0; color: var(--gks-red); font-size: 12px; line-height: 20px; }
+.gk-glab-steps {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;
+  list-style: none; margin: 0; padding: 0;
+}
+.gk-glab-steps li {
+  display: flex; align-items: center; gap: 5px; padding-top: 6px;
+  border-top: 2px solid var(--gks-border); color: var(--gks-muted); font-size: 11px;
+}
+.gk-glab-steps li[data-state="current"] { border-color: var(--gks-accent-fg); color: var(--gks-text); font-weight: 600; }
+.gk-glab-steps li[data-state="done"] { border-color: var(--gks-green); }
+.gk-glab-steps li[data-state="done"] svg { color: var(--gks-green); }
+.gk-glab-heading { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.gk-glab-command { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; }
+.gk-glab-command code { flex: 1; min-width: 0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; user-select: text; }
+.gk-glab-command button { flex-shrink: 0; }
 .gk-settings-form-footer { display: flex; justify-content: flex-end; gap: 8px; }
 .gk-settings-note { display: flex; align-items: flex-start; gap: 8px; color: var(--gks-muted); font-size: 12px; line-height: 20px; }
 .gk-settings-note > svg { margin-top: 2px; color: var(--gks-faint); }

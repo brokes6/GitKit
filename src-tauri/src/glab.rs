@@ -20,6 +20,31 @@ fn cli_endpoint(instance: &str) -> Result<Url, String> {
     Ok(url)
 }
 
+// glab diagnostics may contain credentials, headers or response bodies. Only
+// return fixed, translated descriptions for recognized failures.
+fn failure_message(stderr: &[u8], account_check: bool) -> &'static str {
+    let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    let has = |patterns: &[&str]| patterns.iter().any(|p| text.contains(*p));
+    if has(&["http 401", "401 unauthorized", "not been authenticated", "not logged in", "glab auth login"]) {
+        "glab 尚未登录此实例或凭据已失效，请在终端重新登录"
+    } else if has(&["http 403", "403 forbidden"]) {
+        if account_check { "GitLab 拒绝读取 glab 账号，请检查 CLI 凭据的 API 访问权限" }
+        else { "GitLab 拒绝此操作，请检查 glab 账号的项目权限" }
+    } else if has(&["x509:", "certificate verify", "certificate signed"]) {
+        "glab 无法验证 GitLab 证书，请检查证书信任设置"
+    } else if has(&["http response to https client", "first record does not look like a tls handshake", "client sent an http request to an https server"]) {
+        "GitLab API 协议不匹配，请核对实例地址的 http 或 https"
+    } else if has(&["no such host", "could not resolve", "name resolution", "connection refused", "network is unreachable", "no route to host", "proxyconnect"]) {
+        "glab 无法连接 GitLab，请检查实例地址、网络和代理"
+    } else if has(&["timeout", "timed out", "deadline exceeded"]) {
+        "glab 请求超时"
+    } else if account_check {
+        "无法验证 glab 账号，请在终端检查此实例的登录状态"
+    } else {
+        "glab 请求失败，请检查 CLI 登录状态和项目权限"
+    }
+}
+
 pub(crate) async fn api(instance: &str, endpoint: &str, body: Option<Value>) -> Result<Value, String> {
     let url = cli_endpoint(instance)?;
     let host = url.host_str().ok_or("请输入 GitLab 的 HTTP 或 HTTPS 实例地址")?;
@@ -90,8 +115,7 @@ pub(crate) async fn api(instance: &str, endpoint: &str, body: Option<Value>) -> 
         }
         let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
         if !output.status.success() {
-            // Diagnostic output can contain request headers when the CLI is configured for debugging.
-            return Err(format!("glab 请求失败，请检查 {host} 的登录状态和项目权限"));
+            return Err(failure_message(&output.stderr, endpoint == "user").to_string());
         }
         serde_json::from_slice(&output.stdout).map_err(|_| "glab 返回了无效的 JSON".into())
     };
@@ -113,6 +137,24 @@ pub async fn glab_account(instance_url: String) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cli_diagnostics_are_actionable_without_exposing_output() {
+        for (message, account_check, expected) in [
+            ("HTTP 401: invalid token", true, "重新登录"),
+            ("HTTP 403: forbidden", true, "API 访问权限"),
+            ("HTTP 403: forbidden", false, "项目权限"),
+            ("dial tcp: no such host", true, "网络"),
+            ("http: server gave HTTP response to HTTPS client", true, "协议"),
+            ("x509: certificate signed by unknown authority", true, "证书"),
+            ("context deadline exceeded", true, "超时"),
+            ("unrecognized failure", true, "登录状态"),
+        ] {
+            let diagnostic = format!("{message}\nPrivate-Token: secret-for-test");
+            let result = failure_message(diagnostic.as_bytes(), account_check);
+            assert!(result.contains(expected));
+            assert!(!result.contains("secret-for-test"));
+        }
+    }
     #[test]
     fn cli_instances_bind_to_exact_protocol_host_and_port() {
         for (instance, protocol, port) in [

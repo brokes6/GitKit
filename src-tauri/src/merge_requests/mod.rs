@@ -12,6 +12,7 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 const EVENT: &str = "merge-request-state";
@@ -42,6 +43,7 @@ pub struct Visibility {
     list_open: bool,
     detail_id: Option<u64>,
     online: bool,
+    language: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, PartialEq)]
@@ -107,6 +109,8 @@ struct Cache {
 struct SeenEntry {
     initialized: bool,
     viewed: HashSet<u64>,
+    #[serde(default)]
+    review_assignments: Option<HashSet<u64>>,
     used_at: i64,
 }
 
@@ -233,6 +237,60 @@ fn reconcile_seen(entry: &mut SeenEntry, current: &HashSet<u64>, at: i64) -> boo
     }
     entry.used_at = at;
     !initialized || before != entry.viewed
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewNotice {
+    epoch: u64,
+    mr_id: u64,
+    count: usize,
+    title: String,
+    description: String,
+}
+
+/// Compare only complete, successful inbox reads. An absent baseline (also
+/// used by older seen files) is different from a known empty reviewer queue.
+fn reconcile_reviews(
+    entry: &mut SeenEntry,
+    items: &[Summary],
+    user_id: u64,
+    epoch: u64,
+    english: bool,
+) -> (bool, Option<ReviewNotice>) {
+    let pending = items.iter().filter(|item| {
+        item.state == "opened" && !item.draft && item.author.id != user_id
+            && item.roles.iter().any(|role| role == "reviewer")
+    });
+    let current: HashSet<_> = pending.clone().map(|item| item.id).collect();
+    if entry.review_assignments.as_ref() == Some(&current) {
+        return (false, None);
+    }
+    let previous = entry.review_assignments.replace(current);
+    let notice = previous.and_then(|known| {
+        let mut added = pending.filter(|item| !known.contains(&item.id));
+        let first = added.next()?;
+        let count = 1 + added.count();
+        let title = match (english, count) {
+            (true, 1) => "GitLab review requested".into(),
+            (true, _) => format!("{count} GitLab merge requests need your review"),
+            (false, 1) => "有新的 GitLab 合并请求待你审阅".into(),
+            (false, _) => format!("有 {count} 个 GitLab 合并请求待你审阅"),
+        };
+        Some(ReviewNotice {
+            epoch, mr_id: first.id, count, title,
+            description: format!("{} !{} · {}", first.project_path_with_namespace, first.iid, first.title)
+                .chars().take(240).collect(),
+        })
+    });
+    (true, notice)
+}
+
+fn notify_review(app: &tauri::AppHandle, notice: ReviewNotice) {
+    if foreground(app) && app.emit_to("main", "gitlab-review-requested", &notice).is_ok() {
+        return;
+    }
+    let _ = app.notification().builder().title(notice.title).body(notice.description).show();
 }
 
 fn interval(foreground: bool, list: bool, detail: bool, ci_running: bool) -> i64 {
@@ -684,7 +742,8 @@ impl Inner {
                 .accounts
                 .iter()
                 .map(|(key, entry)| {
-                    key.len() + std::mem::size_of::<SeenEntry>() + entry.viewed.len() * 16
+                    key.len() + std::mem::size_of::<SeenEntry>()
+                        + (entry.viewed.len() + entry.review_assignments.as_ref().map_or(0, HashSet::len)) * 16
                 })
                 .sum::<usize>()
     }
@@ -998,6 +1057,7 @@ async fn refresh_list(
         return Err(error("stale", "合并请求状态或 GitLab 账号已变化，请刷新"));
     }
     let mut failure = None;
+    let mut notice = None;
     match result {
         Ok(list) => {
             let at = now();
@@ -1006,8 +1066,11 @@ async fn refresh_list(
                 list.user.id,
             );
             let current: HashSet<_> = list.items.iter().map(|item| item.id).collect();
+            let english = inner.visibility.language.as_deref() == Some("en");
             let entry = inner.seen.accounts.entry(key.clone()).or_default();
-            let persist = reconcile_seen(entry, &current, at);
+            let read_changed = reconcile_seen(entry, &current, at);
+            let (reviews_changed, new_notice) = reconcile_reviews(entry, &list.items, list.user.id, epoch, english);
+            notice = new_notice;
             let changed = inner.cache().is_none_or(|cache| {
                 cache.user.as_ref() != Some(&list.user)
                     || cache.items != list.items
@@ -1029,7 +1092,7 @@ async fn refresh_list(
             if let Some(active) = inner.active.as_mut() {
                 active.identity_verified = true;
             }
-            if persist {
+            if read_changed || reviews_changed {
                 inner.save_seen();
             }
             inner.trim_budget(CACHE_BUDGET);
@@ -1050,6 +1113,11 @@ async fn refresh_list(
     let snapshot = inner.snapshot();
     drop(inner);
     service.changed.notify_one();
+    if let Some(notice) = notice {
+        if service.lock().accepts(&context) {
+            notify_review(app, notice);
+        }
+    }
     failure.map_or(Ok(snapshot), Err)
 }
 
@@ -1481,19 +1549,24 @@ pub async fn mr_diffs(
     epoch: u64,
 ) -> Result<DiffVersion, ApiError> {
     let service = state.0.clone();
-    let _gate = service.diff_gate.lock().await;
-    let (context, request) = {
+    // A cached review should not queue behind an unrelated slow download.
+    // Recheck inside the gate so simultaneous misses fetch the version once.
+    let lookup = || {
         let inner = service.lock();
         let context = inner.context(epoch, false)?;
         let request = inner.request(mr_id)?;
-        if let Some(cached) = inner
-            .cache()
-            .and_then(|c| c.diffs.get(&(mr_id, version_id)))
-        {
-            return Ok(cached.value.clone());
-        }
-        (context, request)
+        let cached = inner.cache().and_then(|c| c.diffs.get(&(mr_id, version_id)))
+            .map(|entry| entry.value.clone());
+        Ok::<_, ApiError>((context, request, cached))
     };
+    if let (_, _, Some(cached)) = lookup()? {
+        return Ok(cached);
+    }
+    let _gate = service.diff_gate.lock().await;
+    let (context, request, cached) = lookup()?;
+    if let Some(cached) = cached {
+        return Ok(cached);
+    }
     let result = read_deadline(api::diffs(
         &context.config,
         request.project_id,
@@ -1508,9 +1581,13 @@ pub async fn mr_diffs(
     let result = match result {
         Ok(result) => result,
         Err(failure) => {
-            inner.request_failure(&context, failure.clone());
-            inner.publish(&app);
-            service.changed.notify_one();
+            // A slow patch is retryable in this tab. Authentication and rate
+            // limits still use the normal account-wide handling.
+            if !matches!(failure.kind.as_str(), "timeout" | "network") {
+                inner.request_failure(&context, failure.clone());
+                inner.publish(&app);
+                service.changed.notify_one();
+            }
             return Err(failure);
         }
     };
@@ -2406,6 +2483,40 @@ mod tests {
     }
 
     #[test]
+    fn reviewer_notifications_compare_ready_assignments_and_survive_restart() {
+        let mut baseline = row(41, 8);
+        baseline.roles = vec!["reviewer".into()];
+        let mut draft = row(42, 8);
+        draft.roles = vec!["reviewer".into()];
+        draft.draft = true;
+        let mut assignee = row(43, 8);
+        assignee.roles = vec!["assignee".into()];
+        let mut own = row(44, 8);
+        own.roles = vec!["reviewer".into()];
+        own.author.id = 100;
+        let mut items = vec![baseline, draft, assignee, own];
+        let mut entry = SeenEntry::default();
+        let (changed, first) = reconcile_reviews(&mut entry, &items, 100, 1, false);
+        assert!(changed && first.is_none());
+        assert_eq!(entry.review_assignments, Some(HashSet::from([41])));
+
+        items[1].draft = false;
+        items[2].roles.push("reviewer".into());
+        let (_, added) = reconcile_reviews(&mut entry, &items, 100, 1, false);
+        let notice = added.unwrap();
+        assert_eq!((notice.mr_id, notice.count), (42, 2));
+        assert!(notice.description.contains("team/project !42"));
+        let data = serde_json::to_string(&entry).unwrap();
+        let mut restored = serde_json::from_str(&data).unwrap();
+        items[1].title = "Updated title".into();
+        assert!(matches!(reconcile_reviews(&mut restored, &items, 100, 2, true), (false, None)));
+        items[1].roles.clear();
+        assert!(matches!(reconcile_reviews(&mut restored, &items, 100, 2, true), (true, None)));
+        items[1].roles.push("reviewer".into());
+        assert_eq!(reconcile_reviews(&mut restored, &items, 100, 2, true).1.unwrap().count, 1);
+    }
+
+    #[test]
     fn legacy_project_seen_records_load_without_reusing_their_iids_as_global_ids() {
         let mut store: SeenStore = serde_json::from_value(serde_json::json!({
             "projects": { "old-project": { "initialized": true, "viewed": [7], "used_at": 1 } }
@@ -2464,6 +2575,7 @@ mod tests {
             SeenEntry {
                 initialized: true,
                 viewed: HashSet::from([101]),
+                review_assignments: None,
                 used_at: 0,
             },
         );

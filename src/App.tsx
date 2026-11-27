@@ -5,7 +5,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useId, useMemo, useCallba
 import { createPortal } from "react-dom";
 import { Toaster } from "sonner";
 import { toast } from "./toast";
-import { requestRepository, readGlabInstance } from "./branchRequest";
+import { requestRepository, readGlabInstance, glabLoginCommand } from "./branchRequest";
 import { useBranchRequest, type RequestConnection } from "./useBranchRequest";
 import { copyWithToast } from "./clipboard";
 import { isTopDialog, useDialogFocus } from "./dialogFocus";
@@ -4426,6 +4426,7 @@ function CloneDialog({ onClose, onDone }: {
 
 // How to treat uncommitted changes when creating (and switching to) a branch.
 type DirtyMode = "carry" | "stash" | "discard";
+const PREFERRED_BRANCHES = ["master", "main", "test", "pre", "dev"] as const;
 
 function CreateBranchDialog({ branches, defaultBase, dirty, onCancel, onConfirm }: {
   branches: Branch[]; defaultBase: string; dirty: boolean;
@@ -4453,7 +4454,7 @@ function CreateBranchDialog({ branches, defaultBase, dirty, onCancel, onConfirm 
         disabled={!valid} danger={dirty && mode === "discard"} />}>
       <Field label={tx("基于分支")}>
         <BranchSelect theme={t} aria-label={tx("基于分支")} value={base}
-          options={branches.map(b => b.name)} onChange={setBase} />
+          options={branches.map(b => b.name)} preferredOptions={PREFERRED_BRANCHES} onChange={setBase} />
       </Field>
       <Field label={tx("分支名称")}>
         <input autoFocus value={name} onChange={(e) => setName(e.target.value)}
@@ -5007,7 +5008,7 @@ function CreatePRDialog({ path, branches, currentBranch, chooseSource, remote, c
           <ArrowRight size={14} aria-hidden="true" className="mb-[13px] hidden min-[460px]:block" style={{ color: t.textMuted }} />
           <label className="flex min-w-0 flex-col gap-1.5">
             <span id="pr-target-label" className="text-[11px] font-medium" style={{ color: t.textSec }}>{tx("目标分支")}</span>
-            <BranchSelect theme={t} buttonRef={retryTarget} value={target} options={target ? targets : ["", ...targets]}
+            <BranchSelect theme={t} buttonRef={retryTarget} value={target} options={targets} preferredOptions={PREFERRED_BRANCHES}
               aria-labelledby="pr-target-label" disabled={busy || !lookup.data} aria-invalid={same || undefined}
               aria-describedby={targetError || !lookup.data ? "pr-target-hint" : undefined} invalid={!!targetError}
               onChange={name => { setChosenTarget(name); setSubmitError(""); }} />
@@ -5315,61 +5316,144 @@ function TokenSettingsLink({ provider, url, tokenKind }: {
   </button>;
 }
 
-// GitLab integration settings and personal access token metadata.
+type GlabStep = "instance" | "login" | "checking" | "failed" | "connected";
+
+function GlabConnectDialog({ onClose, onConnected }: { onClose: () => void; onConnected: (origin: string) => void }) {
+  const [draft, setDraft] = useState(() => loadGitlab().url || "https://gitlab.com");
+  const [step, setStep] = useState<GlabStep>("instance");
+  const [error, setError] = useState("");
+  const [user, setUser] = useState("");
+  const [copied, setCopied] = useState(false);
+  const active = useRef(true);
+  const checking = useRef(false);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const loginCommand = glabLoginCommand(draft.trim());
+  const origin = loginCommand ? new URL(draft.trim()).origin : "";
+  const index = step === "instance" ? 0 : step === "login" ? 1 : 2;
+  const steps = [tx("确认实例"), tx("终端登录"), tx("验证连接")];
+
+  useLayoutEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
+  useLayoutEffect(() => { if (step !== "instance") heading.current?.focus(); }, [step]);
+  const close = () => { active.current = false; onClose(); };
+  const verify = useCallback(async () => {
+    if (!active.current || checking.current || !origin) return;
+    checking.current = true;
+    setError("");
+    setStep("checking");
+    try {
+      const account = await invoke<string>("glab_account", { instanceUrl: origin });
+      if (!active.current) return;
+      onConnected(origin);
+      setUser(account);
+      setStep("connected");
+    } catch (cause) {
+      if (active.current) { setError(String(cause)); setStep("failed"); }
+    } finally { checking.current = false; }
+  }, [origin, onConnected]);
+
+  useEffect(() => {
+    if (step !== "login") return;
+    // Returning from a terminal is a useful time to check. A manual check
+    // also works with an embedded terminal or a window that never lost focus.
+    let leftWindow = false;
+    const onBlur = () => { leftWindow = true; };
+    const onFocus = () => {
+      if (leftWindow) { leftWindow = false; void verify(); }
+    };
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    return () => { window.removeEventListener("blur", onBlur); window.removeEventListener("focus", onFocus); };
+  }, [step, verify]);
+
+  const back = () => {
+    setError(""); setCopied(false);
+    setStep(step === "failed" ? "login" : "instance");
+  };
+  const copyCommand = async () => {
+    if (!loginCommand) return;
+    try { await navigator.clipboard.writeText(loginCommand); setCopied(true); }
+    catch { toast.error(tx("无法复制到剪贴板")); }
+  };
+
+  return <SettingsFormDialog title={tx("连接 glab")} Icon={TerminalSquare} onClose={close} width={480}>
+    <ol className="gk-glab-steps" aria-label={tx("连接进度")}>{steps.map((label, n) => {
+      const done = n < index || step === "connected";
+      return <li key={n} data-state={done ? "done" : n === index ? "current" : undefined}
+        aria-current={n === index && step !== "connected" ? "step" : undefined}>
+        {done ? <Check size={13} aria-hidden="true" /> : <span aria-hidden="true">{n + 1}</span>}{label}
+      </li>;
+    })}</ol>
+    {step === "instance" ? <form noValidate className="flex flex-col gap-4" onSubmit={event => {
+      event.preventDefault();
+      if (!origin) { setError(tx("请输入 GitLab 的 HTTP 或 HTTPS 根地址，可包含端口。")); return; }
+      setError(""); setStep("login");
+    }}>
+      <label className="gk-settings-field">{tx("GitLab 实例地址")}
+        <input type="url" required autoFocus value={draft} onChange={event => { setDraft(event.target.value); setError(""); }}
+          placeholder="https://gitlab.com" className="gk-settings-input" aria-invalid={!!error}
+          aria-describedby={error ? "glab-instance-error" : undefined} />
+      </label>
+      {error && <p id="glab-instance-error" role="alert" className="gk-settings-error">{error}</p>}
+      <div className="gk-settings-form-footer"><button type="button" className="gk-settings-quiet" onClick={close}>{tx("取消")}</button>
+        <button type="submit" className="gk-settings-primary">{tx("下一步")}</button></div>
+    </form> : <>
+      <div className="flex min-w-0 flex-col gap-2">
+        <h3 ref={heading} tabIndex={-1} className="gk-glab-heading">
+          {step === "checking" && <RefreshCw size={15} className="motion-safe:animate-spin" aria-hidden="true" />}
+          {step === "login" ? tx("在终端登录 GitLab") : step === "checking" ? tx("正在验证 glab 账号…")
+            : step === "failed" ? tx("连接未成功") : tf("已通过 glab 连接 @{0}", user)}
+        </h3>
+        {step === "login" ? <>
+          <p className="gk-settings-description">{tx("打开终端，运行下面的命令，按终端提示完成登录。")}</p>
+          <div className="gk-glab-command">
+            <code>{loginCommand}</code>
+            <button type="button" className="gk-settings-quiet" onClick={() => { void copyCommand(); }}>
+              {copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}
+              {copied ? tx("已复制") : tx("复制命令")}
+            </button>
+          </div>
+          <p className="gk-settings-description">{tx("登录后回到 GitKit 会自动验证。已经登录过此实例，可以直接验证。")}</p>
+        </> : <>
+          <p className="gk-settings-description break-all">{origin}</p>
+          {step === "failed" && <p role="alert" className="gk-settings-error">{error}</p>}
+        </>}
+      </div>
+      <div className="gk-settings-form-footer">
+        {(step === "login" || step === "failed") && <button type="button" className="gk-settings-quiet" onClick={back}>
+          {step === "failed" ? tx("返回登录步骤") : tx("上一步")}</button>}
+        {step === "checking" ? <button type="button" className="gk-settings-quiet" onClick={close}>{tx("取消")}</button>
+          : step === "connected" ? <button type="button" className="gk-settings-primary" onClick={close}>{tx("完成")}</button>
+          : <button type="button" className="gk-settings-primary" onClick={() => { void verify(); }}>
+            {step === "failed" ? tx("重新验证") : tx("验证连接")}</button>}
+      </div>
+    </>}
+  </SettingsFormDialog>;
+}
+
 function GlabSettings() {
   const t = useTheme();
   const [instance, setInstance] = useState(readGlabInstance);
-  const [draft, setDraft] = useState(() => instance || loadGitlab().url || "https://gitlab.com");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const [open, setOpen] = useState(false);
-  const attempt = useRef(0);
-  useEffect(() => () => { attempt.current++; }, []);
-  const close = () => { attempt.current++; setOpen(false); setBusy(false); setError(""); };
-  const save = (value: string) => {
+  const [error, setError] = useState("");
+  const save = useCallback((value: string) => {
     localStorage.setItem("gitkit.glab.instance", value);
     setInstance(value);
     window.dispatchEvent(new Event("gitkit-credentials-changed"));
-  };
-  const connect = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (busy) return;
-    const request = ++attempt.current;
-    setBusy(true); setError("");
-    try {
-      const url = new URL(draft.trim());
-      const user = await invoke<string>("glab_account", { instanceUrl: url.href });
-      if (request === attempt.current) { save(url.origin); setOpen(false); toast.success(tf("已通过 glab 连接 @{0}", user)); }
-    } catch (cause) { if (request === attempt.current) setError(String(cause)); }
-    finally { if (request === attempt.current) setBusy(false); }
-  };
+  }, []);
   return <SettingsGroup title="GitLab CLI"><div className="gk-settings-inset flex flex-col gap-3">
     <p className="text-xs" style={{ color: t.textSec }}>{tx("使用 glab 的登录账号查看和创建当前分支的合并请求。")}</p>
     {instance ? <div className="flex items-center justify-between gap-3 text-xs"><code>{new URL(instance).host}</code>
       <button className="gk-conn-button px-2 py-1" onClick={() => { try { save(""); setError(""); } catch (e) { setError(String(e)); } }}>{tx("断开 CLI 连接")}</button></div>
-    : <button type="button" className="gk-settings-secondary self-start" onClick={() => {
-      setDraft(loadGitlab().url || "https://gitlab.com"); setError(""); setOpen(true);
-    }}>{tx("连接 glab")}</button>}
-    {open && <SettingsFormDialog title={tx("连接 glab")} Icon={TerminalSquare} onClose={close} width={440}>
-      <form onSubmit={connect} className="flex flex-col gap-4">
-        <label className="gk-settings-field">{tx("GitLab 实例地址")}
-          <input type="url" required autoFocus disabled={busy} value={draft} onChange={e => { setDraft(e.target.value); setError(""); }}
-            placeholder="https://gitlab.com" className="gk-settings-input" />
-        </label>
-        <p className="gk-settings-description">{draft.trim().toLowerCase().startsWith("http://")
-          ? tx("请先在终端用 glab auth login 登录此主机，并将 API 协议选为 http。")
-          : tx("首次使用请在终端运行 glab auth login。")}</p>
-        {error && <p role="alert" className="gk-settings-error">{error}</p>}
-        <div className="gk-settings-form-footer">
-          <button type="button" {...press(close)} className="gk-settings-quiet">{tx("取消")}</button>
-          <button type="submit" disabled={busy} className="gk-settings-primary">{busy ? tx("正在连接…") : tx("连接 glab")}</button>
-        </div>
-      </form>
-    </SettingsFormDialog>}
-    {!open && error && <p role="alert" className="gk-settings-error">{error}</p>}
+    : <button type="button" className="gk-settings-secondary self-start" onClick={() => { setError(""); setOpen(true); }}>{tx("连接 glab")}</button>}
+    {open && <GlabConnectDialog onClose={() => setOpen(false)} onConnected={save} />}
+    {error && <p role="alert" className="gk-settings-error">{error}</p>}
   </div></SettingsGroup>;
 }
 
+// GitLab integration settings and personal access token metadata.
 function RemoteConnSettings({ storageKey, title, desc, urlPlaceholder, tokenPlaceholder, hint, test }: {
   storageKey: string; title: string; desc: string;
   urlPlaceholder: string; tokenPlaceholder: string; hint: string;
@@ -8388,7 +8472,36 @@ export default function App() {
   const [checkFocused, setCheckFocused] = useState(false);
   const [credentialRevision, setCredentialRevision] = useState(0);
   const mrConnection = loadGitlab();
-  const mr = useMergeRequests({url: mrConnection.url, token: mrConnection.token, credentialRevision});
+  const mr = useMergeRequests({url: mrConnection.url, token: mrConnection.token, credentialRevision, language});
+  const inboxKey = mr.key;
+  const inboxEnabled = mr.enabled;
+  const inboxRef = useRef(mr);
+  inboxRef.current = mr;
+  useEffect(() => {
+    if (!inboxEnabled) return;
+    let disposed = false;
+    const notificationId = "gitlab-review-requested";
+    const registration = listen<{epoch:number;mrId:number;count:number;title:string;description:string}>(
+      "gitlab-review-requested", ({payload}) => {
+        const current = () => !disposed && inboxRef.current.key === inboxKey
+          && inboxRef.current.snapshot?.epoch === payload.epoch;
+        if (!current()) return;
+        toast.info(payload.title, {id:notificationId,description:payload.description, duration:10000,
+          action:{label:tx("查看审阅"),onClick:() => {
+            if (!current()) return;
+            setDiffExpanded(false);
+            if (inboxRef.current.snapshot?.items.some(item => item.id === payload.mrId)) {
+              void inboxRef.current.select(payload.mrId);
+            } else inboxRef.current.backList();
+          }},
+        });
+      }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      toast.dismiss(notificationId);
+      void registration.then(unlisten => unlisten?.());
+    };
+  }, [inboxEnabled, inboxKey]);
   const mrFiles = useMemo(() => mr.diffVersion ? mrCommitFiles(mr.diffVersion) : [], [mr.diffVersion, language]);
   const checkRevisionRef = useRef(-1);
   const completedCheckRef = useRef(0);

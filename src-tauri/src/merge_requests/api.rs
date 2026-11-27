@@ -568,6 +568,18 @@ impl Context {
         url.to_string()
     }
 
+    fn json_request(
+        &self,
+        method: Method,
+        parts: &[&str],
+        query: &[(&str, String)],
+    ) -> Result<reqwest::RequestBuilder, ApiError> {
+        Ok(self.client
+            .request(method, self.endpoint(parts, query)?)
+            .header("PRIVATE-TOKEN", self.token.clone())
+            .header(header::ACCEPT, "application/json"))
+    }
+
     async fn request(
         &self,
         method: Method,
@@ -582,11 +594,7 @@ impl Context {
             && body.as_ref().is_some_and(|body| {
                 body.get("assignee_ids").is_some() || body.get("reviewer_ids").is_some()
             });
-        let mut request = self
-            .client
-            .request(method, self.endpoint(parts, query)?)
-            .header("PRIVATE-TOKEN", self.token.clone())
-            .header(header::ACCEPT, "application/json");
+        let mut request = self.json_request(method, parts, query)?;
         if let Some(body) = body {
             request = request.json(&body);
         }
@@ -1669,24 +1677,24 @@ pub async fn diffs(
         return Err(invalid_config());
     }
     let context = Context::new(config)?;
-    context.project(project_id).await?;
-    let value = context
-        .get(
-            &[
-                "projects",
-                &project_id.to_string(),
-                "merge_requests",
-                &iid.to_string(),
-                "versions",
-                &version_id.to_string(),
-            ],
+    // The service resolved this numeric project from the account's MR list/detail.
+    // Fetch the immutable revision directly. Large patches get a longer total
+    // transfer deadline; connection timeout and decoded body limits still apply.
+    let response = context
+        .json_request(
+            Method::GET,
+            &["projects", &project_id.to_string(), "merge_requests", &iid.to_string(), "versions", &version_id.to_string()],
             &[],
-        )
-        .await?;
+        )?
+        .timeout(Duration::from_secs(75))
+        .send()
+        .await
+        .map_err(network_error)?;
+    let (value, _, _) = response_json(response, false, false).await?;
     diff_version(value, version_id)
 }
 
-fn diff_version(value: Value, version_id: u64) -> Result<DiffVersion, ApiError> {
+fn diff_version(mut value: Value, version_id: u64) -> Result<DiffVersion, ApiError> {
     let info = version_info(&value)?;
     if info.id != version_id {
         return Err(invalid_response());
@@ -1694,8 +1702,8 @@ fn diff_version(value: Value, version_id: u64) -> Result<DiffVersion, ApiError> 
     // This endpoint is a fixed version object. Its embedded diffs are subject to
     // GitLab's diff limits, not a paginated current-HEAD /diffs connection.
     let diffs = value
-        .get("diffs")
-        .and_then(Value::as_array)
+        .get_mut("diffs")
+        .and_then(Value::as_array_mut)
         .ok_or_else(invalid_response)?;
     if diffs.len() > MAX_DIFF_FILES {
         return Err(ApiError::new(
@@ -1704,8 +1712,8 @@ fn diff_version(value: Value, version_id: u64) -> Result<DiffVersion, ApiError> 
         ));
     }
     let mut files = Vec::with_capacity(diffs.len());
-    for value in diffs {
-        let file: RawDiffFile = decode(value.clone())?;
+    for value in std::mem::take(diffs) {
+        let file: RawDiffFile = decode(value)?;
         files.push(DiffFile {
             old_path: file.old_path,
             new_path: file.new_path,

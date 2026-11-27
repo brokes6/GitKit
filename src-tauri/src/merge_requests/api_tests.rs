@@ -1129,23 +1129,18 @@ fn version_diff_keeps_pinned_refs_rename_metadata_and_server_truncation() {
     version["diffs"] = json!([
         {"old_path": "old.ts", "new_path": "new.ts", "a_mode": "100644", "b_mode": "100644", "diff": "@@ -1 +1 @@\n-before\n+after\n", "new_file": false, "renamed_file": true, "deleted_file": false, "too_large": false, "collapsed": false},
         {"old_path": "large.bin", "new_path": "large.bin", "a_mode": "100644", "b_mode": "100644", "new_file": false, "renamed_file": false, "deleted_file": false, "too_large": true, "collapsed": false}]);
-    let (config, requests, server) = mock(vec![
-        get("/projects/9", project()),
-        get("/merge_requests/1/versions/5", version),
-    ]);
+    let (config, requests, server) = mock(vec![get("/projects/9/merge_requests/1/versions/5", version)]);
     let diff = run(diffs(&config, 9, 1, 5)).unwrap();
     server.join().unwrap();
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert!(recorded[0].to_ascii_lowercase().lines().any(|line| line.starts_with("accept-encoding:") && line.contains("gzip")));
     assert_eq!(diff.refs.base_sha, BASE);
     assert_eq!(diff.refs.start_sha, START);
     assert_eq!(diff.refs.head_sha, SHA);
     assert!(diff.truncated);
     assert!(diff.files[0].renamed_file);
     assert_eq!(diff.files[1].too_large, Some(true));
-    assert!(requests.lock().unwrap().iter().all(|request| !request
-        .lines()
-        .next()
-        .unwrap()
-        .contains("/diffs")));
 }
 
 #[test]

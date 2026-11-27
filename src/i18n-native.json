@@ -347,6 +347,14 @@
   "glab 返回了无效的 JSON": "glab returned invalid JSON.",
   "glab 连接需要 HTTP 或 HTTPS 根地址，仅填写协议、主机和可选端口": "Enter an HTTP or HTTPS root URL for glab with only the scheme, hostname, and optional port.",
   "glab 请求超时": "The glab request timed out.",
+  "glab 尚未登录此实例或凭据已失效，请在终端重新登录": "glab is not signed in to this instance or its credentials have expired. Sign in again in your terminal.",
+  "GitLab 拒绝读取 glab 账号，请检查 CLI 凭据的 API 访问权限": "GitLab denied access to the glab account profile. Check the API permissions of your CLI credentials.",
+  "GitLab 拒绝此操作，请检查 glab 账号的项目权限": "GitLab denied this operation. Check the project permissions of your glab account.",
+  "glab 无法验证 GitLab 证书，请检查证书信任设置": "glab could not verify the GitLab certificate. Check your certificate trust settings.",
+  "GitLab API 协议不匹配，请核对实例地址的 http 或 https": "GitLab API protocol mismatch. Check whether the instance URL uses HTTP or HTTPS.",
+  "glab 无法连接 GitLab，请检查实例地址、网络和代理": "glab could not reach GitLab. Check your instance URL, network, and proxy.",
+  "无法验证 glab 账号，请在终端检查此实例的登录状态": "Could not verify your glab account. Check the sign-in status for this host in your terminal.",
+  "glab 请求失败，请检查 CLI 登录状态和项目权限": "The glab request failed. Check your CLI sign-in and project permissions.",
   "glab 请求失败，请检查 {0} 的登录状态和项目权限": "glab request failed. Check your sign-in and project permissions on {0}.",
   "远程仓库不在已配置的实例路径下": "The repository is outside the configured instance path."
 }

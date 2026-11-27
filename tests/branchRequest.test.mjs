@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readGlabInstance, requestRepository } from "../src/branchRequest.ts";
+import { glabLoginCommand, readGlabInstance, requestRepository } from "../src/branchRequest.ts";
 
 test("repository scope is bound to its instance and namespace", () => {
   const instance = "https://git.example:8443/lab";
@@ -23,5 +23,13 @@ test("CLI settings restore the explicit HTTP or HTTPS root and reject other URLs
   }
   for (saved of ["http://git.example/subpath", "ssh://git.example", "http://user@git.example"]) {
     assert.equal(readGlabInstance(), "");
+  }
+});
+
+test("glab sign-in instructions preserve the API endpoint and omit unsafe inputs", () => {
+  assert.equal(glabLoginCommand("http://git.example"), "glab auth login --hostname git.example --api-protocol http");
+  assert.equal(glabLoginCommand("https://git.example:8443/"), "glab auth login --hostname git.example --api-host git.example:8443 --api-protocol https");
+  for (const bad of ["bad", "https://user:password@git.example", "https://git.example/subpath", "https://bad;host", "https://-flag", "https://git.example/?token=x"]) {
+    assert.equal(glabLoginCommand(bad), null);
   }
 });

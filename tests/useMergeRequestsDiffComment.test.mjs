@@ -237,3 +237,52 @@ test('detail refresh reloads remote line discussions while preserving the displa
   assert.deepEqual(discussionReads.map(call => call.args.force),[false,true]);
   assert.deepEqual(JSON.parse(JSON.stringify(discussionReads[1].args)),{mrId:501,epoch:1,force:true});
 });
+
+test('a pending or failed patch does not fetch discussions, and retry reads the pinned version once', async () => {
+  const pending = deferred();
+  let reads = 0;
+  const h = harness(command => {
+    if (command === 'mr_diffs') return ++reads === 1 ? pending.promise : version;
+  });
+  const loading = await h.ready();
+  loading.onTabChange('changes');
+  assert.equal(reads, 1);
+  pending.reject(new Error('GitLab request timed out'));
+  const failed = await h.settle();
+  assert.match(failed.diffError, /timed out/);
+  assert.equal(failed.error, null);
+  assert.ok(!h.calls.some(call => call.command === 'mr_discussions'));
+  failed.onTabChange('changes');
+  failed.onTabChange('changes');
+  const retried = await h.settle();
+  assert.equal(reads, 2);
+  assert.equal(retried.diffVersion, version);
+  assert.equal(retried.diffError, null);
+  assert.equal(h.calls.filter(call => call.command === 'mr_discussions').length, 1);
+});
+
+test('reopening a reviewed patch reuses it only for the same account, MR, version and refs', async () => {
+  let current = version;
+  const h = harness((command, args) => {
+    if (command === 'mr_detail') return {...detail,summary:{...detail.summary,id:args.mrId},
+      diffRefs:current.refs,diffVersions:[current]};
+    if (command === 'mr_diffs') return current;
+  });
+  let hook = await h.ready();
+  const reopen = async (id, reads) => {
+    hook.backList();
+    await h.render().select(id);
+    h.render().onTabChange('changes');
+    hook = await h.settle();
+    assert.equal(hook.diffVersion, current);
+    assert.equal(h.calls.filter(call => call.command === 'mr_diffs').length, reads);
+  };
+  await reopen(501, 1);
+  current = {...current, id:5};
+  await reopen(501, 2);
+  current = {...current, refs:{...refs,headSha:'updated'}};
+  await reopen(501, 3);
+  await reopen(502, 4);
+  hook = await h.switchAccount();
+  await reopen(502, 5);
+});

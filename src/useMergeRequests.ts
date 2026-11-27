@@ -17,8 +17,8 @@ const empty = (key: string): Store => ({ key, snapshot: null, selectedId: null, 
   discussions: [], discussionsLoaded: false, discussionsLoading: false, discussionsError: null });
 
 /** The account inbox survives local repository switches; Rust owns every timer. */
-export function useMergeRequests({ url, token, credentialRevision }: {
-  url: string; token: string; credentialRevision: number;
+export function useMergeRequests({ url, token, credentialRevision, language }: {
+  url: string; token: string; credentialRevision: number; language?: string;
 }) {
   const enabled = !!token.trim() && isTauri();
   const instanceUrl = url.trim() || "https://gitlab.com";
@@ -32,6 +32,9 @@ export function useMergeRequests({ url, token, credentialRevision }: {
   const anchorRef = useRef<HTMLButtonElement>(null);
   const epochRef = useRef<number | null>(null);
   const detailRequest = useRef(0), diffRequest = useRef(0), discussionRequest = useRef(0);
+  const diffInFlight = useRef<number | null>(null);
+  // Keep just the last displayed payload across navigation. Rust owns the bounded multi-version cache.
+  const lastDiff = useRef<{key:string;epoch:number;mrId:number;version:MrDiffVersion} | null>(null);
   const selectionRequest = useRef(0);
   const renderedSelection = selectionRequest.current;
   const diffCommentInFlight = useRef(false);
@@ -53,6 +56,7 @@ export function useMergeRequests({ url, token, credentialRevision }: {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     epochRef.current = null;
+    lastDiff.current = null;
     selectionRequest.current++;
     participantRequest.current++;
     detailRequest.current++; diffRequest.current++; discussionRequest.current++;
@@ -84,12 +88,12 @@ export function useMergeRequests({ url, token, credentialRevision }: {
 
   useEffect(() => {
     if (!enabled || epochRef.current === null) return;
-    const report = () => { void invoke("mr_visibility", {visibility:{listOpen,detailId:value.selectedId,online:navigator.onLine}})
+    const report = () => { void invoke("mr_visibility", {visibility:{listOpen,detailId:value.selectedId,online:navigator.onLine,language}})
       .catch((error) => setStored((previous) => previous.key === key ? {...previous,syncError:mrErrorMessage(error)} : previous)); };
     report();
     window.addEventListener("online", report); window.addEventListener("offline", report);
     return () => { window.removeEventListener("online",report); window.removeEventListener("offline",report); };
-  }, [key, enabled, listOpen, value.selectedId, value.snapshot?.epoch]);
+  }, [key, enabled, listOpen, value.selectedId, value.snapshot?.epoch, language]);
 
   const context = () => {
     const current = storeRef.current;
@@ -157,20 +161,34 @@ export function useMergeRequests({ url, token, credentialRevision }: {
 
   const loadDiff = async () => {
     const current = storeRef.current;
-    if (!current.detail || current.diffVersion || current.diffLoading) return;
+    if (!current.detail || current.diffLoading || diffInFlight.current === diffRequest.current) return false;
+    if (current.diffVersion) return true;
     const version = reviewVersion(current.detail);
-    if (!version) { setStored((previous) => ({...previous,diffError:tx("GitLab 尚未提供当前审阅版本的差异，请刷新后重试")})); return; }
-    const request = ++diffRequest.current;
+    if (!version) { setStored((previous) => ({...previous,diffError:tx("GitLab 尚未提供当前审阅版本的差异，请刷新后重试")})); return false; }
     const expected = context(), mrId = current.detail.summary.id;
+    const cached = lastDiff.current;
+    if (cached && !current.snapshot?.error && !current.snapshot?.stale && !current.syncError && !current.error
+      && cached.key === expected.key && cached.epoch === expected.epoch && cached.mrId === mrId
+      && cached.version.id === version.id && sameMrRefs(cached.version.refs, version.refs)) {
+      setStored(previous => ({...previous,diffVersion:cached.version,diffError:null}));
+      return true;
+    }
+    const request = ++diffRequest.current;
+    diffInFlight.current = request;
     setStored((previous) => ({...previous,diffLoading:true,diffError:null}));
     try {
       const diffVersion = await invoke<MrDiffVersion>("mr_diffs",{mrId,versionId:version.id,epoch:expected.epoch});
-      if (!sameMrRefs(diffVersion.refs,version.refs)) throw new Error(tx("服务器差异版本已改变，请重新审阅"));
-      if (request !== diffRequest.current || keyRef.current !== expected.key || epochRef.current !== expected.epoch) return;
+      if (request !== diffRequest.current || keyRef.current !== expected.key || epochRef.current !== expected.epoch) return false;
+      if (diffVersion.id !== version.id || !sameMrRefs(diffVersion.refs,version.refs)) throw new Error(tx("服务器差异版本已改变，请重新审阅"));
+      lastDiff.current = {...expected,mrId,version:diffVersion};
       setStored((previous) => ({...previous,diffVersion,diffLoading:false,diffError:null}));
+      return true;
     } catch (error) {
       if (request === diffRequest.current && keyRef.current === expected.key)
         setStored((previous) => ({...previous,diffLoading:false,diffError:mrErrorMessage(error)}));
+      return false;
+    } finally {
+      if (diffInFlight.current === request) diffInFlight.current = null;
     }
   };
   const loadDiscussions = async (force = false) => {
@@ -194,8 +212,12 @@ export function useMergeRequests({ url, token, credentialRevision }: {
     const failed = (error: unknown) => {
       if (keyRef.current === key) setStored((previous) => previous.key === key ? {...previous,error:mrErrorMessage(error)} : previous);
     };
-    if (tab === 'changes') void loadDiff().catch(failed);
-    if (tab === 'changes' || tab === 'discussion') void loadDiscussions().catch(failed);
+    if (tab === 'changes') {
+      const selection = selectionRequest.current;
+      void loadDiff().then(ready => {
+        if (ready && selectionRequest.current === selection && keyRef.current === key) return loadDiscussions();
+      }).catch(failed);
+    } else if (tab === 'discussion') void loadDiscussions().catch(failed);
   };
 
   const participantContext = () => {
@@ -369,8 +391,9 @@ export function useMergeRequests({ url, token, credentialRevision }: {
       const version = reviewVersion(detail);
       if (!version) throw new Error(tx("GitLab 尚未提供当前审阅版本的差异，请刷新后重试"));
       const diffVersion = await invoke<MrDiffVersion>("mr_diffs",{mrId,versionId:version.id,epoch:expected.epoch});
-      if (!sameMrRefs(diffVersion.refs,version.refs)) throw new Error(tx("服务器差异版本已改变，请重新审阅"));
+      if (diffVersion.id !== version.id || !sameMrRefs(diffVersion.refs,version.refs)) throw new Error(tx("服务器差异版本已改变，请重新审阅"));
       if (request !== detailRequest.current || keyRef.current !== expected.key || epochRef.current !== expected.epoch) return;
+      lastDiff.current = {...expected,mrId,version:diffVersion};
       setStored((previous) => ({...previous,detail,latest:detail,diffVersion,diffLoading:false,diffError:null,loading:false,
         discussions:[],discussionsLoaded:false,discussionsLoading:false,discussionsError:null}));
       void loadDiscussions(true);

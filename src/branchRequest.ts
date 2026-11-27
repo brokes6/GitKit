@@ -14,6 +14,19 @@ export function requestRepository(remoteUrl: string, instanceUrl: string): strin
   } catch { return null; }
 }
 
+/** Render a pasteable command using only the validated API endpoint, never credentials. */
+export function glabLoginCommand(instance: string): string | null {
+  try {
+    const url = new URL(instance);
+    if (!["http:", "https:"].includes(url.protocol) || url.href !== url.origin + "/") return null;
+    const ipv6 = url.hostname.startsWith("[");
+    if (!(ipv6 ? /^\[[0-9a-f:]+\]$/i : /^[a-z0-9_][a-z0-9._-]*$/i).test(url.hostname)) return null;
+    const hostname = ipv6 ? `"${url.hostname}"` : url.hostname;
+    const apiHost = ipv6 ? `"${url.host}"` : url.host;
+    return `glab auth login --hostname ${hostname}${url.port ? ` --api-host ${apiHost}` : ""} --api-protocol ${url.protocol.slice(0, -1)}`;
+  } catch { return null; }
+}
+
 export function readGlabInstance(): string {
   try {
     const url = new URL(localStorage.getItem("gitkit.glab.instance") || "");
