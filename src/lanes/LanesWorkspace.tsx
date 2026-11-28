@@ -31,7 +31,6 @@ import "./lanes-menus.css";
 // Lane.tsx / LaneCapsule.tsx / BranchTree.tsx (lane UI), LinkOverlay.tsx (dashed
 // links), Dock.tsx (dock + menus + create popover), PixelField.tsx (background).
 
-export { leaveLanes } from "./util";
 export type { LaneBusy, LaneMenuItem, LaneProjectRef, LanesWorkspaceProps } from "./types";
 
 const LANE_MIN = 290;
@@ -159,6 +158,13 @@ export function LanesWorkspace(props: LanesWorkspaceProps) {
   const [focus, setFocus] = useState<{ slotKey: number; branch: string } | null>(null);
   const [create, setCreate] = useState<CreateRequest | null>(null);
   const [busy, setBusy] = useState(false);
+  const createRequest = useRef<symbol | null>(null);
+  useLayoutEffect(() => {
+    setCreate(null);
+    setFocus(null);
+    setBusy(false);
+    return () => { createRequest.current = null; };
+  }, [path]);
 
   const laneIndex = useEvent((branch: string) => shown.findIndex((s) => s.branch === branch));
   /** Put `branch` at position `at`; if it is already shown elsewhere, the two swap. */
@@ -456,23 +462,30 @@ export function LanesWorkspace(props: LanesWorkspaceProps) {
   const closeMenu = useCallback(() => setMenu(null), []);
 
   const submitCreate = async (name: string, base: string) => {
-    if (!model) return;
+    if (!model || !create || createRequest.current) return;
+    const request = Symbol();
+    createRequest.current = request;
     const trunk = model.trunk;
     // From a commit, `base` is its hash; the recorded base is the lane it was picked in.
-    const from = create?.commit ? create.commit.short : base;
-    const recorded = create?.commit ? create.base : base;
+    const from = create.commit?.short ?? base;
+    const recorded = create.commit ? create.base : base;
     setBusy(true);
     try {
       await props.onCreateBranch(name, base);
-      if (recorded !== trunk) setBases(saveBase(path, name, recorded));
+      const updatedBases = recorded !== trunk ? saveBase(path, name, recorded) : null;
+      if (createRequest.current !== request) return;
+      if (updatedBases) setBases(updatedBases);
       // A fresh branch has no commits yet; mark it recent so it takes a "recent" lane.
       setTouched((t) => ({ ...t, [name]: Date.now() }));
-      setCreate(null);
+      setCreate(open => open === create ? null : open);
       toast.success(tf("已从 {0} 新建 {1}", from, name));
     } catch (e) {
-      toast.error(tf("创建失败：{0}", e instanceof Error ? e.message : String(e)));
+      if (createRequest.current === request) toast.error(tf("创建失败：{0}", e instanceof Error ? e.message : String(e)));
     } finally {
-      setBusy(false);
+      if (createRequest.current === request) {
+        createRequest.current = null;
+        setBusy(false);
+      }
     }
   };
 
@@ -486,13 +499,14 @@ export function LanesWorkspace(props: LanesWorkspaceProps) {
       <style ref={commitStyle} />
       <div className="lk-titlebar" data-tauri-drag-region>
         <span data-tauri-drag-region>{project?.name ?? "GitKit"}</span>
+        {props.windowControls}
       </div>
 
-      <main className="lk-stage" ref={stageRef}>
+      <main className="lk-stage" aria-busy={status === "loading" || props.refreshing} ref={stageRef}>
         {status === "none" ? <StageMessage title={tx("还没有打开仓库")} action={{ label: tx("打开仓库…"), onClick: props.onOpenProject }} />
           : status === "loading" ? <StageMessage title={tx("正在读取分支…")} />
           : status === "error" ? <StageMessage title={tx("读取仓库失败")} detail={props.error}
-            action={props.onRetry ? { label: tx("重试"), onClick: props.onRetry } : undefined} />
+            action={props.onInitialize ? { label: tx("初始化 Git 仓库"), onClick: props.onInitialize } : props.onRetry ? { label: tx("重试"), onClick: props.onRetry } : undefined} />
           : model && <>
           <div className="lk-lanes" ref={lanesRef} data-dragging={drag ? true : undefined}>
             {slots.map((slot) => {

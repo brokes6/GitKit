@@ -1,6 +1,4 @@
 @import './tailwind.css';
-@import './overview.css';
-@import './activity.css';
 @import './theme.css';
 
 :root {

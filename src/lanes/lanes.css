@@ -325,11 +325,14 @@ button.lk-seg:hover, .lk-seg[data-open] { background: var(--lk-seg-hover); }
 }
 .lk-drawer-host .lk-request-drawer > * { flex: 1; min-height: 0; }
 
-/* Width spring: while the dock animates, its children keep their natural size
-   and the bar is centred; the parts that don't fit yet stay hidden under the
-   rounded frame (clip-path keeps popovers, which sit outside, visible). */
+.lk-root .lk-dock :is(button, input):focus-visible { outline: 2px solid var(--lk-accent) !important; outline-offset: 1px; }
 .lk-dock > * { flex-shrink: 0; }
-.lk-dock > .lk-seg-wrap { flex-shrink: 1; }
+.lk-dock > .lk-seg-wrap { flex-shrink: 1; transition-property: none; }
+.lk-dock > .lk-seg-wrap > .lk-seg[data-measuring] { width: max-content; flex: none; }
+.lk-dock > .lk-dock-inbox > .lk-seg[data-measuring] { max-width: inherit; }
+@media (prefers-reduced-motion: no-preference) {
+  .lk-dock > .lk-seg-wrap { transition: width 260ms cubic-bezier(0.25, 0.8, 0.25, 1); }
+}
 
 /* ── "merged into" flow: test ✓ › pre ✓ › master ○ ── */
 .lk-flow {

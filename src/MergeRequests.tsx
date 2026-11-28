@@ -134,28 +134,6 @@ function DiscussionThread({ discussion, refs, onNavigate, onOpenExternal }: {
   </article>;
 }
 
-export interface MergeRequestEntryProps {
-  theme: ThemeColors;
-  snapshot: MrSnapshot | null;
-  open: boolean;
-  anchorRef: RefObject<HTMLButtonElement>;
-  onToggle: () => void;
-}
-
-export function MergeRequestEntry({ theme, snapshot, open, anchorRef, onToggle }: MergeRequestEntryProps) {
-  const count = snapshot?.newCount || 0;
-  const label = tx("GitLab 审阅");
-  const newRequests = count > 0 ? tf("{0} 条新请求", count) : "";
-  const entryLabel = newRequests ? `${label} · ${newRequests}` : label;
-  const syncDetails = snapshot?.lastCheckedAt == null ? "" : tf("{0} 条相关请求 · {1} 条新请求 · 上次同步 {2}", snapshot.total, count, dateLabel(snapshot.lastCheckedAt));
-  return <button ref={anchorRef} type="button" className={`gkm-entry${count ? " gkm-entry-unread" : ""}`} style={themeStyle(theme)}
-    aria-label={entryLabel} aria-haspopup="dialog" aria-expanded={open} aria-controls="gkm-mr-popover"
-    data-revealed={open || count > 0} onClick={onToggle} title={syncDetails ? `${label}\n${syncDetails}` : entryLabel}>
-    <GitPullRequest size={13} aria-hidden="true" />
-    <span className="gkm-entry-label" aria-hidden="true"><span>{label}{newRequests && <> · <strong>{newRequests}</strong></>}</span></span>
-  </button>;
-}
-
 export interface MergeRequestPopoverProps {
   theme: ThemeColors;
   snapshot: MrSnapshot | null;
@@ -250,7 +228,12 @@ export function MergeRequestPopover({ theme, snapshot, configured, cliConnected,
     // Establish the anchor before the entrance's first paint.
     place();
     const observer = new ResizeObserver(position);
-    if (anchorRef.current) observer.observe(anchorRef.current);
+    if (anchorRef.current) {
+      observer.observe(anchorRef.current);
+      // Adjacent segments can move the anchor without changing its own size.
+      const dock = anchorRef.current.closest(".lk-dock");
+      dock?.querySelectorAll(":scope > *").forEach(segment => observer.observe(segment));
+    }
     observer.observe(document.documentElement);
     window.addEventListener("resize", position);
     window.addEventListener("scroll", position, true);

@@ -45,7 +45,8 @@ export interface LaneRequest {
 export interface LaneInbox {
   configured: boolean;
   /** Items needing attention (review requested / assigned). */
-  total: number;
+  total: number | null;
+  failed: boolean;
   unread: number;
   /** The host renders its inbox popover anchored to this element. */
   anchorRef: { current: HTMLElement | null };
@@ -72,6 +73,9 @@ export interface LanesWorkspaceProps {
   onOpenProject: () => void;
   onCloneProject?: () => void;
   onRetry?: () => void;
+  onInitialize?: () => void;
+  windowControls?: ReactNode;
+  refreshing?: boolean;
   /** Create without switching; the workspace records the base itself. */
   onCreateBranch: (name: string, base: string) => Promise<void>;
   onCheckout: (branch: string) => void;

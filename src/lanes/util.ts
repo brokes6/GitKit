@@ -15,13 +15,6 @@ export function saveBase(path: string, branch: string, base: string): Record<str
   return all[path];
 }
 
-export function leaveLanes() {
-  localStorage.setItem("gitkit.shell", "classic");
-  const url = new URL(location.href);
-  url.searchParams.delete("shell");
-  location.replace(url);
-}
-
 export function relTime(date: string): string {
   const diff = Date.now() - new Date(date).getTime();
   const min = Math.floor(diff / 60000), h = Math.floor(min / 60), d = Math.floor(h / 24);

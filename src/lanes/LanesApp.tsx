@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
-import { Columns3 } from "lucide-react";
 import { createDemoRepo } from "./demoRepo";
 import type { DemoRepo } from "./demoRepo";
-import { LanesWorkspace, leaveLanes } from "./LanesWorkspace";
+import { LanesWorkspace } from "./LanesWorkspace";
 import type { LaneProjectRef } from "./LanesWorkspace";
 import type { LaneWorkingFile } from "./types";
 import { tx } from "../i18n";
 
-// Browser-only host for the lanes workspace (`npm run dev` + `?shell=lanes`).
+// Browser-only host for the lanes workspace.
 // Inside Tauri the full app hosts the workspace instead, with real data,
 // dialogs and settings.
 
@@ -55,7 +54,7 @@ export default function LanesApp() {
       }}
       onFetch={onlyInApp} onPull={onlyInApp} onPush={onlyInApp}
       onOpenChanges={onlyInApp} onOpenCommit={onlyInApp} onOpenSettings={onlyInApp}
-      moreActions={[{ label: tx("回到经典界面"), icon: <Columns3 size={14} aria-hidden="true" />, onClick: leaveLanes }]} />
+      moreActions={[]} />
     <Toaster position="top-center" theme={theme} />
   </>;
 }

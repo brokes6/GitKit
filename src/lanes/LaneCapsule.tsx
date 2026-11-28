@@ -14,13 +14,14 @@ export const LaneCapsule = memo(function LaneCapsule({ model, branch, role, inde
 }) {
   const [menu, setMenu] = useState(false);
   const capsuleRef = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
   const presence = usePresence(menu, popRef);
   const close = useCallback(() => setMenu(false), []);
-  useDismiss(menu, capsuleRef, close);
+  useDismiss(menu, capsuleRef, close, undefined, trigger);
 
   return <div className="lk-capsule-wrap" ref={capsuleRef}>
-      <button type="button" className="lk-capsule" data-role={role} aria-expanded={menu} onClick={() => setMenu((v) => !v)}>
+      <button type="button" ref={trigger} className="lk-capsule" data-role={role} aria-expanded={menu} onClick={() => setMenu((v) => !v)}>
         <span className="lk-capsule-index">{index + 1}</span>
         <span className="lk-capsule-name">{branch}</span>
         <ChevronDown size={13} aria-hidden="true" />

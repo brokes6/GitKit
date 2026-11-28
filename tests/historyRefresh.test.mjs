@@ -2,10 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
-import React from "react";
 import ts from "typescript";
 import { branchColor, createBranchColors } from "../src/branchColors.ts";
-import { attributeBranches, computeGraph } from "../src/git.ts";
+import { attributeBranches } from "../src/git.ts";
 
 const app = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"),
   ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -18,10 +17,7 @@ const visit = node => {
 };
 visit(app);
 assert.ok(effect);
-const components = app.statements.filter(node => ts.isFunctionDeclaration(node)
-  && ["CommitHistorySkeleton", "HistoryRefreshBoundary"].includes(node.name?.text));
-const source = ts.transpileModule(`${components.map(node => node.getText(app)).join("\n")}
-globalThis.readHistory = ${effect.getText(app)};`, {
+const source = ts.transpileModule(`globalThis.readHistory = ${effect.getText(app)};`, {
   compilerOptions: { target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.React },
 }).outputText;
 const deferred = () => {
@@ -35,18 +31,16 @@ function harness(history = async () => [], info = { initialized: true, has_head:
   const selection = { fullHash: "selected-commit" };
   const state = { loadingPath: null, error: null, data: { path: "/repo", commits: [selection] }, selection, opens: 0 };
   const context = {
-    React, HistoryRefreshCtx: React.createContext(false), useTheme: () => ({}), tx: value => value, Skeleton: () => null,
-    branchColor, createBranchColors, realData: state.data, hiddenBranchesRef: { current: [] },
+    branchColor, createBranchColors, realData: state.data,
     path: "/repo", lastLoadedPath: { current: "/repo" },
-    pendingViewReset: { current: false }, smartMergeRef: { current: false },
+    pendingViewReset: { current: false },
     commitDiffRequestRef: { current: 0 }, activePathRef: { current: "/repo" },
     realCache: { current: new Map() }, workingCache: { current: new Map() },
-    historyLimits: { current: new Map() }, HISTORY_PAGE_SIZE: 400, showOtherRefsRef: { current: false },
     cacheRealData: (cache, path, data) => cache.set(path, data),
     openRepo: async () => { state.opens++; return info; },
     loadHistory: history, loadBranches: async () => [], loadRemotes: async () => [], stashList: async () => [],
     requestWorkingStatusRef: { current: async () => [] }, applyWorkingStatusRef: { current() {} },
-    attributeBranches, computeGraph, startSwitch: apply => apply(),
+    attributeBranches, startSwitch: apply => apply(),
     setHistoryReadPath: value => { state.loadingPath = value; },
     setLoadError: value => { state.error = value; }, setRealData: value => { state.data = value; },
     setSelectedCommit: value => { state.selection = value; },
@@ -72,7 +66,7 @@ test("a same-repository refresh loads until history is ready and preserves the s
   assert.equal(state.selection, selection);
 });
 
-test("repository loading publishes one shared palette for its branch list and graph", async () => {
+test("repository loading publishes the active palette for its branch list", async () => {
   const branches = [{ name: "master", head: "master-tip", current: true },
     { name: "test", head: "test-tip" }, { name: "feature/rpc-proxy-fallback", head: "feature-tip" }];
   const commits = branches.map(branch => ({ fullHash: branch.head, parents: [] }));
@@ -82,7 +76,7 @@ test("repository loading publishes one shared palette for its branch list and gr
   const colors = state.data.branchColors;
   assert.equal(new Set(state.data.branches.map(branch => branch.color)).size, 3);
   state.data.branches.forEach(branch => assert.equal(branch.color, colors.get(branch.name)));
-  commits.forEach((commit, index) => assert.equal(state.data.graph[index].colors.dot, colors.get(commit.branchLabel)));
+  state.data.branches.forEach(branch => assert.equal(branch.color, colors.get(branch.name)));
 });
 
 test("a failed history refresh ends loading and exposes the error", async () => {
@@ -134,44 +128,6 @@ test("a cache hit and a project without a Git repository never leave loading act
   plain.start(); await flush();
   assert.equal(plain.state.loadingPath, null);
   assert.equal(plain.state.data.initialized, false);
-});
-
-test("refresh keeps the same interactive viewport alongside a nonblocking status", () => {
-  const { context } = harness();
-  const viewport = React.createElement("div", { key: "viewport" });
-  for (const refreshing of [true, false]) {
-    const boundary = context.HistoryRefreshBoundary({ refreshing, children: viewport });
-    const [content, status] = boundary.props.children;
-    assert.equal(content.props.children, viewport);
-    assert.equal(boundary.props.inert, undefined);
-    assert.equal(boundary.props["aria-hidden"], undefined);
-    if (refreshing) {
-      assert.equal(status.props.role, "status");
-      assert.match(status.props.className, /pointer-events-none/);
-    } else assert.equal(status, false);
-  }
-});
-
-test("a reload keeps the history depth the user already scrolled to", async () => {
-  const limits = [];
-  const { context, start } = harness(async (path, limit) => { limits.push(limit); return []; });
-  start();
-  await flush();
-  context.historyLimits.current.set("/repo", 1200);
-  context.realCache.current.clear();
-  start();
-  await flush();
-  assert.deepEqual(limits, [400, 1200]);
-});
-
-test("history is read without internal refs unless the user switched them on", async () => {
-  const flags = [];
-  const { context, start } = harness(async (path, limit, includeOtherRefs) => { flags.push(includeOtherRefs); return []; });
-  start(); await flush();
-  context.realCache.current.clear();
-  context.showOtherRefsRef.current = true;
-  start(); await flush();
-  assert.deepEqual(flags, [false, true]);
 });
 
 test("ref notifications invalidate the right history while file-only events keep it cached", () => {

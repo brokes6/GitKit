@@ -5,10 +5,9 @@ import type { RefObject } from "react";
  * Close on outside pointer-down or Escape. `ignore` skips matching toggles.
  *
  * Dismissal never consumes the press: the outside element still receives its
- * click (one click closes this menu *and* activates what was clicked), and it
- * never moves focus.
+ * click and keeps focus. Escape can restore focus to the trigger.
  */
-export function useDismiss(open: boolean, ref: RefObject<HTMLElement>, onClose: () => void, ignore?: string) {
+export function useDismiss(open: boolean, ref: RefObject<HTMLElement>, onClose: () => void, ignore?: string, trigger?: RefObject<HTMLElement | null>) {
   useEffect(() => {
     if (!open) return;
     const down = (e: PointerEvent) => {
@@ -17,9 +16,14 @@ export function useDismiss(open: boolean, ref: RefObject<HTMLElement>, onClose: 
       onClose();
     };
     // An inner menu that handles Esc calls preventDefault; only the innermost closes.
-    const key = (e: KeyboardEvent) => { if (e.key === "Escape" && !e.defaultPrevented) onClose(); };
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.preventDefault();
+      onClose();
+      trigger?.current?.focus({ preventScroll: true });
+    };
     document.addEventListener("pointerdown", down, true);
     document.addEventListener("keydown", key);
     return () => { document.removeEventListener("pointerdown", down, true); document.removeEventListener("keydown", key); };
-  }, [open, ref, onClose, ignore]);
+  }, [open, ref, onClose, ignore, trigger]);
 }
