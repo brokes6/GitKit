@@ -521,7 +521,7 @@ export function MergeRequestDetail(props: MergeRequestDetailProps) {
   useEffect(() => {
     if (!detail) return;
     setSquash(detail.squash);
-    setDeleteSource(detail.deleteSourceDefault);
+    setDeleteSource(false);
     setMergeMessage(detail.mergeCommitMessage || "");
     setSquashMessage(detail.squashCommitMessage || "");
     messagesEditedRef.current = { merge: false, squash: false };

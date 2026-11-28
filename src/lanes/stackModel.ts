@@ -214,7 +214,7 @@ export function buildStackModel(
   roots.sort((a, b) => Number(nodes.get(a)!.empty) - Number(nodes.get(b)!.empty)
     || nodes.get(b)!.updated - nodes.get(a)!.updated);
 
-  const facts = mergeFacts(trunk, trunkCommits, nodes, byHash);
+  const facts = mergeFacts(trunk, trunkCommits, nodes, byHash, branches);
   const { merges } = facts;
   const given = (options.longLived ?? []).filter((n) => n !== trunk && nodes.has(n));
   const longLived = given.length ? [...given, trunk] : facts.longLived;
@@ -249,11 +249,26 @@ const LONG_LIVED_MERGES = 3;
  * branch back from its tip, each commit used as a merge's second parent gives
  * "merged into <owner>" — the newest version per target wins.
  */
-function mergeFacts(trunk: string, trunkCommits: LaneCommit[], nodes: Map<string, StackNode>, byHash: Map<string, LaneCommit>) {
+function mergeFacts(trunk: string, trunkCommits: LaneCommit[], nodes: Map<string, StackNode>, byHash: Map<string, LaneCommit>, branches: LaneBranch[]) {
   const owner = new Map<string, string>();
   for (const c of trunkCommits) owner.set(c.hash, trunk);
   for (const node of nodes.values()) for (const c of node.commits) if (!owner.has(c.hash)) owner.set(c.hash, node.name);
   const trunkFp = new Set(trunkCommits.map((c) => c.hash));
+
+  // A server-side merge can be ahead of the local target. Attribute just
+  // the fetched first-parent extension, leaving the local lane at its own tip.
+  const tracking = new Map(branches.filter(b => b.isRemote).map(b => [b.name, b.head]));
+  for (const branch of branches) {
+    const tip = branch.upstream && tracking.get(branch.upstream);
+    if (branch.isRemote || !tip || tip === branch.head || branch.ahead > 0) continue;
+    const extension = firstParentChain(tip, byHash, 1000);
+    const at = extension.findIndex(c => c.hash === branch.head);
+    if (at < 0) continue;
+    for (const commit of extension.slice(0, at)) {
+      if (!owner.has(commit.hash)) owner.set(commit.hash, branch.name);
+      if (branch.name === trunk) trunkFp.add(commit.hash);
+    }
+  }
 
   const mergedBy = new Map<string, LaneCommit[]>();
   const intake = new Map<string, Set<string>>();

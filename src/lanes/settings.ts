@@ -23,7 +23,7 @@ export interface LaneSettings {
   /** Long-lived branches in promotion order (e.g. test, pre, master); empty = detect from history. */
   envOrder: string[];
   showLinks: boolean;
-  pixels: boolean;
+  pixels: boolean; // Legacy fallback until an appearance preference is saved.
 }
 
 export const MAX_LANES = 4;

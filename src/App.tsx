@@ -31,7 +31,7 @@ import {
   ArrowDown, ArrowUp, ExternalLink, Maximize2, History, ChevronsUpDown, MessageSquare, Columns3,
 } from "lucide-react";
 import {
-  invoke, pickRepoFolder, openRepo, initRepo, loadBranches, loadRemotes, loadHistory,
+  loadProjectStatusSummary, invoke, pickRepoFolder, openRepo, initRepo, loadBranches, loadRemotes, loadHistory,
   loadWorkingStatus, ignoreUntracked, stageFiles, unstageFiles, loadCommitFiles, commitFileDiff, workingFileDiff, filePreview,
   attributeBranches, hasChanges, checkoutBranch, stashPush, stashApply, stashDrop, stashFiles, stashFileDiff, cherryPick, cherryPickPreflight,
   createBranch, undoBranchCreation, type BranchCreation, deleteBranch, renameBranch, removeWorktree, checkoutSync, commit as gitCommit, undoCommitPreview, undoLastCommit, fetchAll, pull, push, forcePushTarget, forcePushPreview, forcePush, gitlabTest, gitlabTokenInfo, githubTokenInfo,
@@ -53,6 +53,8 @@ import type { BranchColors } from "./branchColors";
 import { LanesWorkspace } from "./lanes/LanesWorkspace";
 import type { LaneMenuItem } from "./lanes/LanesWorkspace";
 import { laneRequestItem, useLaneRequests } from "./lanes/useLaneRequests";
+import { updateBackground, useBackgroundSettings } from "./lanes/backgroundSettings";
+import { WorkspaceBackground } from "./lanes/PixelField";
 import { LanesSettings } from "./lanes/LanesSettings";
 import type { LanesSettingsProject } from "./lanes/LanesSettings";
 import "./lanes/drawer.css";
@@ -60,6 +62,7 @@ import { DialogPresence, useDialogPresence } from "./DialogPresence";
 import { Skeleton, CodeSkeleton } from "./Skeleton";
 import { useAppForeground } from "./useAppForeground";
 import { MergeRequestPopover, MergeRequestDetail } from "./MergeRequests";
+import type { MrSummary } from "./mergeRequestTypes";
 import { useMergeRequests } from "./useMergeRequests";
 import { mrCommitFiles } from "./mergeRequestHelpers";
 export type { WorkingFile } from "./workingStatus";
@@ -2105,6 +2108,11 @@ function cacheRealData(cache: Map<string, RealData>, path: string, data: RealDat
 
 // Per-repo UI state (hidden/pinned branches, collapsed folders) persisted in
 // localStorage so it survives restarts and is remembered per project.
+async function readProjectChanges(path: string): Promise<number | null> {
+  const summary = await loadProjectStatusSummary(path);
+  return summary.initialized ? summary.changedFiles : null;
+}
+
 function loadProjects(): Project[] {
   try {
     const raw = localStorage.getItem("gitkit.projects");
@@ -2355,10 +2363,10 @@ const press = (fn: () => void) => ({
 
 type DlgIcon = typeof GitPullRequest;
 
-export function Modal({ title, Icon, onClose, width = 480, children, footer, closing: ownClosing = false, onExited, theme }: {
+export function Modal({ title, Icon, onClose, width = 480, children, footer, closing: ownClosing = false, onExited, theme, variant }: {
   title: string; Icon: DlgIcon; onClose: () => void; width?: number;
   children: React.ReactNode; footer?: React.ReactNode; closing?: boolean; onExited?: () => void;
-  theme?: ThemeColors;
+  theme?: ThemeColors; variant?: "lanes";
 }) {
   const inheritedTheme = useTheme();
   const t = theme ?? inheritedTheme;
@@ -2373,9 +2381,9 @@ export function Modal({ title, Icon, onClose, width = 480, children, footer, clo
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose, closing]);
   return (
-    <div className="fixed inset-0 flex items-center justify-center" style={{ zIndex: 200, pointerEvents: closing ? "none" : undefined }}>
+    <div data-modal-variant={variant} className="fixed inset-0 flex items-center justify-center" style={{ ...(variant ? lanesTokens(t) : {}), zIndex: 200, pointerEvents: closing ? "none" : undefined }}>
       <div className={`absolute inset-0 ${closing ? "gk-overlay-out" : "gk-overlay-in"}`}
-        style={{ background: "rgba(0,0,0,0.45)" }} {...press(onClose)} />
+        style={{ background: variant ? "rgba(12,16,24,0.30)" : "rgba(0,0,0,0.45)" }} {...press(onClose)} />
       <div role="dialog" aria-modal="true" aria-label={title} aria-hidden={closing || undefined}
         ref={element => { dialogRef.current = element; if (element) element.inert = closing; }}
         className={`relative flex flex-col ${closing ? "gk-modal-out" : "gk-modal-in"}`}
@@ -2384,9 +2392,9 @@ export function Modal({ title, Icon, onClose, width = 480, children, footer, clo
         }}
         style={{ width, maxWidth: "calc(100vw - 32px)", maxHeight: "85vh",
         background: t.dialogBg,
-        border: `0.5px solid ${t.glassBorder}`, borderRadius: R + 2, boxShadow: t.shadowWindow, overflow: "hidden" }}>
-        <div className="flex-shrink-0 flex items-center gap-2.5 px-5 py-3.5" style={{ borderBottom: `0.5px solid ${t.border}` }}>
-          <div className="flex items-center justify-center rounded-full flex-shrink-0" style={{ width: 30, height: 30, background: t.accentBg }}>
+        border: `0.5px solid ${t.glassBorder}`, borderRadius: variant ? 20 : R + 2, boxShadow: t.shadowWindow, overflow: "hidden" }}>
+        <div className="flex-shrink-0 flex items-center gap-2.5 px-5 py-3.5" style={{ borderBottom: variant ? undefined : `0.5px solid ${t.border}` }}>
+          <div className="flex items-center justify-center rounded-full flex-shrink-0" style={{ width: 30, height: 30, borderRadius: variant ? 10 : undefined, background: t.accentBg }}>
             <Icon size={15} style={{ color: t.accent }} />
           </div>
           <span className="gk-heading text-sm font-semibold flex-1" style={{ color: t.text }}>{title}</span>
@@ -2400,7 +2408,7 @@ export function Modal({ title, Icon, onClose, width = 480, children, footer, clo
         </div>
         <div className="flex-1 overflow-y-auto overscroll-contain px-5 py-4 flex flex-col gap-4">{children}</div>
         {footer && (
-          <div className="flex-shrink-0 flex items-center justify-end gap-2 px-5 py-3.5" style={{ borderTop: `0.5px solid ${t.border}` }}>
+          <div className="gk-modal-footer flex-shrink-0 flex items-center justify-end gap-2 px-5 py-3.5" style={{ borderTop: `0.5px solid ${t.border}` }}>
             {footer}
           </div>
         )}
@@ -3579,11 +3587,11 @@ function CreatePRDialog({ path, branches, currentBranch, initialTarget, chooseSo
     }
   }, [lookup.data, lookup.error]);
   return (
-    <Modal title={term} Icon={GitPullRequest} onClose={requestClose} width={560}
+    <Modal title={term} Icon={GitPullRequest} onClose={requestClose} width={580} variant="lanes"
       closing={closing} onExited={finishClose}
       footer={<ModalFooter onCancel={requestClose} onConfirm={submit} confirmLabel={confirmLabel} disabled={!valid} busy={busy} />}>
-      <div className="flex flex-col gap-2" style={lookup.data ? { paddingBottom: 12, borderBottom: `0.5px solid ${t.border}` } : undefined}>
-        <div className="grid grid-cols-1 gap-x-2.5 gap-y-2 min-[460px]:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] min-[460px]:items-end">
+      <div className="gk-request-route flex flex-col gap-2.5">
+        <div className="grid grid-cols-1 gap-x-2.5 gap-y-2 min-[460px]:grid-cols-[minmax(0,1.2fr)_auto_minmax(0,1fr)] min-[460px]:items-end">
           <label className="flex min-w-0 flex-col gap-1.5">
             <span id="pr-source-label" className="text-[11px] font-medium" style={{ color: t.textSec }}>{tx("来源分支")}</span>
             <BranchSelect theme={t} value={source} options={branches.map(b => b.name)} aria-labelledby="pr-source-label"
@@ -3591,7 +3599,7 @@ function CreatePRDialog({ path, branches, currentBranch, initialTarget, chooseSo
                 setSource(name); setChosenTarget(""); setEditedTitle(null); setIncludeLocal(false); setSubmitError("");
               }} />
           </label>
-          <ArrowRight size={14} aria-hidden="true" className="mb-[13px] hidden min-[460px]:block" style={{ color: t.textMuted }} />
+          <ArrowRight size={14} aria-hidden="true" className="mb-[11px] hidden min-[460px]:block" style={{ color: t.textMuted }} />
           <label className="flex min-w-0 flex-col gap-1.5">
             <span id="pr-target-label" className="text-[11px] font-medium" style={{ color: t.textSec }}>{tx("目标分支")}</span>
             <BranchSelect theme={t} buttonRef={retryTarget} value={target} options={targets} preferredOptions={PREFERRED_BRANCHES}
@@ -3644,9 +3652,9 @@ function CreatePRDialog({ path, branches, currentBranch, initialTarget, chooseSo
         <strong className="text-sm break-words" style={{ color: t.text }}>{connection.provider === "gitlab" ? "!" : "#"}{existing.number} · {existing.title}</strong>
       </div> : <>
         <Field label={tx("标题")}><input value={title} disabled={busy} onChange={e => setEditedTitle(e.target.value)}
-          placeholder={tf("{0}标题", term)} className="text-xs px-2.5 py-2 outline-none w-full" style={dlgCtl(t)} /></Field>
-        <Field label={tx("描述（可选）")}><textarea value={desc} disabled={busy} onChange={e => setDesc(e.target.value)} rows={4}
-          placeholder={tx("补充说明…")} className="text-xs px-2.5 py-2 outline-none w-full resize-none max-[459px]:h-14" style={{ ...dlgCtl(t), fontFamily: "inherit" }} /></Field>
+          placeholder={tf("{0}标题", term)} className="gk-request-field" /></Field>
+        <Field label={tx("描述（可选）")}><textarea value={desc} disabled={busy} onChange={e => setDesc(e.target.value)} rows={3}
+          placeholder={tx("补充说明…")} className="gk-request-field resize-y" /></Field>
         {missingTrackingRef ? <p className="text-[11px] [overflow-wrap:anywhere]" style={{ color: t.textSec }}>{tf("本地尚未记录远程分支 {0}/{1}。创建时将先推送此分支。", remote.name, source)}</p>
         : (ahead || !tracking) && <label className="flex items-center gap-2 text-[11px]" style={{ color: t.textSec }}>
           <input type="checkbox" disabled={busy} checked={includeLocal} onChange={e => setIncludeLocal(e.target.checked)} />
@@ -4537,6 +4545,64 @@ function GithubAccountsSettings() {
 }
 
 // Second-level pane: theme palette and mode.
+function BackgroundAppearance() {
+  const saved = useBackgroundSettings();
+  const [draft, setDraft] = useState<Partial<typeof saved>>({});
+  const bg = { ...saved, ...draft };
+  const changed = (Object.keys(draft) as (keyof typeof saved)[]).some(key => draft[key] !== saved[key]);
+  const preview = (patch: Partial<typeof saved>) => setDraft(previous => ({ ...previous, ...patch }));
+  const t = useTheme();
+  const styles = [["plain", tx("纯色")], ["dots", tx("像素点阵")], ["waves", tx("像素波纹")], ["bars", tx("窄条光斑")], ["droplets", tx("光雨")]] as const;
+  const pattern = bg.style;
+  return <section className="gk-settings-group">
+    <div className="gk-background-heading">
+      <h3>{tx("工作区背景")}</h3>
+      <button type="button" className="gk-settings-primary" disabled={!changed}
+        onClick={() => { updateBackground(draft); setDraft({}); }}>{tx("应用")}</button>
+    </div>
+    <div className="gk-settings-sheet">
+      <SettingsRow label={tx("背景样式")}>
+        <div className="gk-settings-segment" role="group" aria-label={tx("背景样式")}>
+          {styles.map(([style, label]) => <button key={style} type="button" aria-pressed={pattern === style}
+            onClick={() => preview({ style })}>{label}</button>)}
+        </div>
+      </SettingsRow>
+      <div className="gk-background-preview" data-theme={t.isDark ? "dark" : "light"} style={lanesTokens(t)} aria-hidden="true">
+        <WorkspaceBackground preview={bg} />
+        <div className="gk-background-lanes">{["feature/workspace", "main"].map(branch =>
+          <div key={branch}><strong>{branch}</strong><i /><i /></div>)}</div>
+        <div className="gk-background-dock"><span>GitKit</span><span>main</span><b>{tx("新建分支")}</b></div>
+      </div>
+      {pattern !== "plain" && <>
+        <SettingsRow label={tx("纹理强度")}>
+          <label className="gk-background-range">
+            <input aria-label={tx("纹理强度")} type="range" min={pattern === "bars" ? 15 : 20} max={pattern === "bars" ? 100 : 180} step={5} value={bg[pattern]}
+              onChange={e => preview({ [pattern]: e.currentTarget.valueAsNumber })} />
+            <output>{bg[pattern]}%</output>
+          </label>
+        </SettingsRow>
+        {pattern === "bars" && <>
+          <SettingsRow label={tx("条宽")}>
+            <label className="gk-background-range"><input type="range" aria-label={tx("条宽")} min={10} max={26}
+              value={bg.barWidth} onChange={e => preview({ barWidth: e.currentTarget.valueAsNumber })} />
+              <output>{bg.barWidth} px</output></label>
+          </SettingsRow>
+          <SettingsRow label={tx("流动速度")}>
+            <div className="gk-settings-segment" role="group" aria-label={tx("流动速度")}>
+              {([1, 2] as const).map(speed => <button type="button" key={speed} aria-pressed={bg.barSpeed === speed}
+                onClick={() => preview({ barSpeed: speed })}>{speed}×</button>)}
+            </div>
+          </SettingsRow>
+        </>}
+        <SettingsRow label={tx("背景动态")}>
+          <button type="button" className="gk-settings-switch" role="switch" aria-label={tx("背景动态")}
+            aria-checked={bg.animated} onClick={() => preview({ animated: !bg.animated })}><span /></button>
+        </SettingsRow>
+      </>}
+    </div>
+  </section>;
+}
+
 function AppearanceSettings({ paletteId, setPaletteId, themeMode, setThemeMode }: {
   paletteId: PaletteId; setPaletteId: (id: PaletteId) => void;
   themeMode: ThemeMode; setThemeMode: (m: ThemeMode) => void;
@@ -4584,6 +4650,7 @@ function AppearanceSettings({ paletteId, setPaletteId, themeMode, setThemeMode }
         })}
       </div>
     </section>
+    <BackgroundAppearance />
   </section>;
 }
 
@@ -5252,7 +5319,7 @@ function UpdatesDialog({ rows, busy, onPull, onClose }: {
   );
 }
 
-type RealData = { path: string; initialized: boolean; hasHead: boolean; currentBranch: string; branches: Branch[]; branchColors: BranchColors; remotes: Remote[]; commits: Commit[]; working: WorkingFile[] };
+type RealData = { path: string; initialized: boolean; hasHead: boolean; currentBranch: string; branches: Branch[]; trackingBranches: Branch[]; branchColors: BranchColors; remotes: Remote[]; commits: Commit[]; working: WorkingFile[] };
 
 // ─── ContextMenu ────────────────────────────────────────────────────────────────
 // A single right-click menu, positioned at the cursor and clamped to the viewport.
@@ -5665,10 +5732,10 @@ export default function App() {
   const changesCount = workingFileCount(activeWorking);
   const remoteNames = useMemo(() => remotes.map((r) => r.name), [remotes]);
   // Lanes shell inputs — memoised so stack inference only reruns on new data.
-  const lanesBranches = useMemo(() => branches.filter((b) => b.head).map((b) => ({
+  const lanesBranches = useMemo(() => branches.concat(view?.trackingBranches ?? []).filter((b) => b.head).map((b) => ({
     name: b.name, head: b.head!, current: b.current, upstream: b.remote,
     ahead: b.ahead, behind: b.behind, isRemote: b.isRemote,
-  })), [branches]);
+  })), [branches, view?.trackingBranches]);
   const lanesCommits = useMemo(() => commits.filter((c) => !c.isStash && !c.otherRefsOnly).map((c) => ({
     hash: c.fullHash, short: c.hash, message: c.message, author: c.author.name,
     initials: c.author.initials, color: c.author.color, date: c.date, parents: c.parents,
@@ -6202,7 +6269,7 @@ export default function App() {
         if (cancelled) return;
         if (!info.initialized) {
           const data: RealData = { path, initialized: false, hasHead: false, currentBranch: "",
-            branches: [], branchColors: createBranchColors([]), remotes: [], commits: [], working: [] };
+            branches: [], trackingBranches: [], branchColors: createBranchColors([]), remotes: [], commits: [], working: [] };
           cacheRealData(realCache.current, path, data);
           applyWorkingStatusRef.current(path, []);
           setRealData(data);
@@ -6226,7 +6293,7 @@ export default function App() {
         // A watcher event may have produced a newer status while history loaded.
         const latestWorking = workingCache.current.get(path) ?? working;
         const data: RealData = { path, initialized: true, hasHead: info.has_head, currentBranch: info.current_branch,
-          branches: branchList, branchColors: colors, remotes: remoteList, commits: commitList, working: latestWorking };
+          branches: branchList, trackingBranches: historyBranches.filter(b => b.isRemote), branchColors: colors, remotes: remoteList, commits: commitList, working: latestWorking };
         cacheRealData(realCache.current, path, data);
         if (cancelled) return;
         const apply = () => {
@@ -7378,6 +7445,10 @@ export default function App() {
   latestConnection.current = prConnection;
   const stillHere = () => currentPRContext.current === prContext && latestConnection.current === prConnection;
   const currentRequest = useBranchRequest(prConnection, hasHead ? currentBranch : "");
+  const laneRequestBranches = useMemo(() =>
+    lanesBranches.filter((b) => !b.isRemote).map((b) => ({ name: b.name, head: b.head })), [lanesBranches]);
+  const { requests: laneRequests, refresh: refreshLaneRequest } = useLaneRequests(hasHead ? prConnection : null, laneRequestBranches,
+    mr.snapshot?.items, mr.snapshot?.instanceUrl ?? (mrConnection.url || "https://gitlab.com"));
   const requestSettingsSection = useMemo(() => prConnection?.provider
     ?? (requestRepository(prUrl, "https://github.com") || (prUrl && matchingPRAccounts(prUrl).length) ? "github" : "gitlab"),
     [prConnection, prUrl, credentialRevision]);
@@ -7603,12 +7674,48 @@ export default function App() {
               </div>
   ) : null;
 
+  const refreshedMerges = useMemo(() => new Set<number>(), [mr.key, path, prUrl]);
+  const syncReviewedMerge = useCallback((summary: MrSummary) => {
+    if (!path || summary.state !== "merged" || refreshedMerges.has(summary.id)) return;
+    const instance = mrConnection.url || "https://gitlab.com";
+    const remote = remotes.find(r => requestRepository(r.url, instance) === summary.projectPathWithNamespace);
+    if (!remote) return;
+    refreshedMerges.add(summary.id);
+    if (remote.url === prUrl) refreshLaneRequest(summary.sourceBranch, summary.id);
+    // Fetch failure must not turn a confirmed merge into a failed submission.
+    void invoke("git_refresh_remote_branches", {
+      path, remote: remote.name, expectedUrl: remote.url, token: mrConnection.token,
+    }).then(() => {
+      realCache.current.delete(path);
+      if (activePathRef.current === path) setReloadTick(n => n + 1);
+    }).catch(error => {
+      refreshedMerges.delete(summary.id);
+      if (activePathRef.current === path) toast.warning(tx("合并已完成，分支列表刷新失败"), { description: String(error) });
+    });
+  }, [path, prUrl, remotes, mrConnection.url, mrConnection.token, refreshedMerges, refreshLaneRequest]);
+
+  // A pending submission can be confirmed later by the detail subscription.
+  const reviewedSummary = mr.latest?.summary ?? mr.detail?.summary;
+  useEffect(() => {
+    if (reviewedSummary) syncReviewedMerge(reviewedSummary);
+  }, [reviewedSummary, syncReviewedMerge]);
+
+  const mergeReviewedRequest: typeof mr.merge = async options => {
+    try {
+      const result = await mr.merge(options);
+      if (result.state === "merged" && result.summary) syncReviewedMerge(result.summary);
+      return result;
+    } finally {
+      currentRequest.refresh();
+    }
+  };
+
   const mrDetail = mr.selectedId !== null ? <MergeRequestDetail key={`${mr.key}:${mr.selectedId}`}
               theme={theme} detail={mr.detail} latest={mr.latest} snapshot={mr.snapshot}
               loading={mr.loading} error={mr.error} files={mrFiles} diffVersion={mr.diffVersion}
               diffLoading={mr.diffLoading} diffError={mr.diffError} discussions={mr.discussions}
               discussionsLoading={mr.discussionsLoading} discussionsError={mr.discussionsError}
-              onRefresh={async () => { await mr.refresh(); }} onReviewLatest={mr.reviewLatest} onDownloadDiff={mr.downloadDiff} onMerge={async options => { try { return await mr.merge(options); } finally { currentRequest.refresh(); } }} onCommitMessages={mr.commitMessages} onCancel={async () => { try { return await mr.close(); } finally { currentRequest.refresh(); } }} onApprove={mr.approve} onOpenExternal={mr.openExternal}
+              onRefresh={async () => { await mr.refresh(); }} onReviewLatest={mr.reviewLatest} onDownloadDiff={mr.downloadDiff} onMerge={mergeReviewedRequest} onCommitMessages={mr.commitMessages} onCancel={async () => { try { return await mr.close(); } finally { currentRequest.refresh(); } }} onApprove={mr.approve} onOpenExternal={mr.openExternal}
               onBackList={mr.backList} onBackWorkspace={mr.backWorkspace} onTabChange={mr.onTabChange}
               onCreateDiffComment={mr.createDiffComment} onParticipantCandidates={mr.participantCandidates} onUpdateParticipants={mr.updateParticipants}
               renderDiff={(files, selected, onSelect, sourceKey, lineComments) => <FileDiffView files={files} selectedFile={selected}
@@ -7638,10 +7745,6 @@ export default function App() {
     if (commit) openTimelineCommit(commit);
   };
   // ── merge / pull requests in the lanes ──
-  const laneRequestBranches = useMemo(() =>
-    lanesBranches.filter((b) => !b.isRemote).map((b) => ({ name: b.name, head: b.head })), [lanesBranches]);
-  const laneRequests = useLaneRequests(hasHead ? prConnection : null, laneRequestBranches,
-    mr.snapshot?.items, mr.snapshot?.instanceUrl ?? (mrConnection.url || "https://gitlab.com"));
   const openLaneRequest = (branch: string) => {
     const request = laneRequests[branch];
     if (!request) return;
@@ -7786,6 +7889,7 @@ export default function App() {
             )}
           <LanesWorkspace refreshing={historyRefreshing} theme={effectiveDark ? "dark" : "light"} tokens={lanesTokens(theme)}
             project={activeProject ? { id: activeProject.id, name: activeProject.name, path: activeProject.path } : null}
+            readProjectChanges={readProjectChanges}
             projects={projects.map((p) => ({ id: p.id, name: p.name, path: p.path }))}
             status={!activeProject ? "none" : errored || (dataReady && !gitAvailable) ? "error" : !dataReady ? "loading" : "ready"}
             error={errored ? loadError?.msg : tx("此项目尚未初始化 Git")}

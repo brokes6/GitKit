@@ -19,6 +19,47 @@ html, body {
 }
 #root { height: 100vh; }
 
+/* Request composer uses the same surfaces and high-contrast action as the lane dock. */
+[data-modal-variant="lanes"] {
+  --request-surface: color-mix(in srgb, var(--lk-text) 5%, var(--lk-pop));
+}
+.gk-request-route {
+  padding: 13px;
+  border-radius: 14px;
+  background: var(--request-surface);
+}
+.gk-request-route button.gk-branch-select {
+  height: 36px;
+  border-radius: 10px;
+  font-size: 13px;
+  background: var(--lk-pop) !important;
+}
+.gk-request-field {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--lk-border);
+  border-radius: 10px;
+  background: var(--request-surface);
+  color: var(--lk-text);
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.gk-request-field:focus-visible { outline: 2px solid var(--lk-accent); outline-offset: 1px; }
+[data-modal-variant="lanes"] .gk-modal-footer > button {
+  min-height: 34px;
+  border-radius: 12px !important;
+}
+[data-modal-variant="lanes"] .gk-modal-footer > button:first-child {
+  background: var(--request-surface);
+  border-color: transparent !important;
+  color: var(--lk-sec) !important;
+}
+[data-modal-variant="lanes"] .gk-modal-footer > button:last-child:enabled {
+  background: var(--lk-text) !important;
+  color: var(--lk-bg) !important;
+}
+
 .gk-branch-select, .gk-branch-option {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
   min-width: 0; text-align: left; font-size: 14px; line-height: 20px;

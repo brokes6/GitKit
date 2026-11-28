@@ -6,6 +6,7 @@
   --lk-text: #f1f1f2; --lk-sec: #a1a1a6; --lk-muted: #6c6c72;
   --lk-border: rgba(255, 255, 255, 0.075);
   --lk-accent: #35b8a7; --lk-amber: #e2a645; --lk-green: #57b97a; --lk-red: #e5534b;
+  --lk-wave: color-mix(in srgb, var(--lk-accent) 40%, var(--lk-sec));
   --lk-pixel: var(--lk-sec); --lk-pixel-alpha: 0.26;
   --lk-shadow: 0 22px 60px -24px rgba(0, 0, 0, 0.85);
   --lk-card-shadow: 0 10px 22px -14px rgba(0, 0, 0, 0.9);
@@ -39,7 +40,9 @@
   --lk-card-shadow: 0 10px 22px -16px rgba(0, 0, 0, 0.35);
   --lk-dock: color-mix(in srgb, var(--lk-card) 96%, var(--lk-bg));
 }
-.lk-root button { font: inherit; color: inherit; cursor: pointer; }
+.lk-root button { font: inherit; cursor: pointer; }
+/* Merge-request action buttons define foregrounds for primary, secondary and danger states. */
+.lk-root button:where(:not(.gkm-button)) { color: inherit; }
 .lk-root button:disabled { cursor: default; opacity: 0.45; }
 /* No focus rings in the lanes UI: pointer users never see them, and keyboard
    users get state from the existing hover/active/selected styles. Overrides the
@@ -412,3 +415,11 @@ button.lk-seg:hover, .lk-seg[data-open] { background: var(--lk-seg-hover); }
 .lk-merge-source { flex: 0 1 auto; }
 .lk-merge-target { flex: 0 0 auto; max-width: 45%; }
 .lk-merge-arrow { flex-shrink: 0; color: var(--lk-muted); }
+
+/* The appearance preview and workspace share the same light cores and cool-gray bars. */
+:is(.lk-root, .gk-background-preview)[data-theme="light"] {
+  --lk-bar-base: #e7ecf1; --lk-bar-color: #6a89b0; --lk-bar-glow: #fff;
+}
+:is(.lk-root, .gk-background-preview)[data-theme="dark"] {
+  --lk-bar-base: #22272e; --lk-bar-color: #9ab1cd; --lk-bar-glow: #c0d8f4;
+}

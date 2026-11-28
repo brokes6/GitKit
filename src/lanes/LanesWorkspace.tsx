@@ -10,7 +10,7 @@ import type { LaneRole, LaneView } from "./laneLayout";
 import { Dock } from "./Dock";
 import { EmptyLane, Lane, StageMessage } from "./Lane";
 import { LinkOverlay } from "./LinkOverlay";
-import { PixelField } from "./PixelField";
+import { WorkspaceBackground } from "./PixelField";
 import type { PixelFieldHandle } from "./PixelField";
 import type { CreateRequest, LaneHandlers, LaneMenuItem, LaneMenuTarget, LanesWorkspaceProps, Slot } from "./types";
 import { loadBases, saveBase } from "./util";
@@ -494,7 +494,7 @@ export function LanesWorkspace(props: LanesWorkspaceProps) {
 
   return (
     <div className="lk-root" data-theme={theme} style={tokens} data-request-drag={requestDrag ? true : undefined}>
-      {settings.pixels && <PixelField ref={pixelRef} className="lk-pixels" />}
+      <WorkspaceBackground ref={pixelRef} />
       <style ref={hoverStyle} />
       <style ref={commitStyle} />
       <div className="lk-titlebar" data-tauri-drag-region>
@@ -549,7 +549,7 @@ export function LanesWorkspace(props: LanesWorkspaceProps) {
         create={create} defaultBase={defaultBase} busyCreate={busy}
         onOpenCreate={() => setCreate({ base: defaultBase, slotKey: focus?.slotKey })}
         onCloseCreate={() => setCreate(null)} onSubmitCreate={submitCreate}
-        existing={branches.map((b) => b.name)} demo={demo} />
+        existing={branches.filter(b => !b.isRemote).map(b => b.name)} demo={demo} />
     </div>
   );
 }

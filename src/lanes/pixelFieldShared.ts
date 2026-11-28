@@ -24,6 +24,7 @@ export function hash(x: number, y: number): number {
 export interface Ripple { x: number; y: number; start: number }
 
 export interface FieldTheme {
+  barColor?: string;
   /** The raw CSS colour (used as-is by Canvas2D). */
   css: string;
   /** Parsed colour, 0–1 channels; `a` is the colour's own alpha. */

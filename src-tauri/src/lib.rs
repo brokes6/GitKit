@@ -132,6 +132,7 @@ pub fn run() {
             git::git_undo_last_commit,
             git::git_fetch,
             git::git_check_updates,
+            git::git_refresh_remote_branches,
             git::git_sync_local,
             daily_check::daily_check_reconcile,
             git::git_pull,

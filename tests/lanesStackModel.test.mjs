@@ -94,3 +94,15 @@ test("a user-chosen trunk and long-lived order override detection", () => {
   assert.deepEqual(model.longLived, ["test", "pre"]);
   assert.equal(buildStackModel(branches, envCommits, {}, { trunk: "missing" }).trunk, "master");
 });
+
+test("a merge fetched on the remote target appears before the local target advances", () => {
+  for (const target of ["main", "test"]) {
+    const refs = [b(target, "base", { upstream: "origin/" + target, behind: 1 }),
+      b("origin/" + target, "merge", { isRemote: true }), b("topic", "feature")];
+    if (target !== "main") refs.unshift(b("main", "base"));
+    const model = buildStackModel(refs, [c("merge", ["base", "feature"]), c("feature", ["base"]), c("base")]);
+    assert.equal(model.merges.get("topic")[0].into, target);
+    assert.equal(model.nodes.has("origin/" + target), false);
+    assert.equal(refs.find(branch => branch.name === target).head, "base");
+  }
+});

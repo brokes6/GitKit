@@ -373,6 +373,26 @@ fn cancellation_interrupts_git_status_during_local_sync() {
 }
 
 #[test]
+fn post_merge_refresh_fetches_and_prunes_only_the_reviewed_remote() {
+    let remote = TestRepo::new();
+    remote.git(&["branch", "topic"]);
+    let checkout = remote.0.join("checkout");
+    remote.git(&["clone", remote.path(), checkout.to_str().unwrap()]);
+    let path = checkout.to_str().unwrap();
+    let before = run_git(path, &["rev-parse", "HEAD"]).unwrap();
+    remote.git(&["commit", "--allow-empty", "-m", "merged"]);
+    remote.git(&["branch", "-d", "topic"]);
+    let refresh = |url: &str| tauri::async_runtime::block_on(git_refresh_remote_branches(
+        path.into(), "origin".into(), url.into(), None,
+    ));
+    assert!(refresh("different repository").is_err());
+    refresh(remote.path()).unwrap();
+    assert_eq!(run_git(path, &["rev-parse", "HEAD"]).unwrap(), before);
+    assert_eq!(run_git(path, &["rev-parse", "origin/main"]).unwrap().trim(), remote.git(&["rev-parse", "HEAD"]));
+    assert!(run_git(path, &["rev-parse", "--verify", "refs/remotes/origin/topic"]).is_err());
+}
+
+#[test]
 fn scheduled_check_fetches_remote_refs_without_moving_local_head() {
     let remote = TestRepo::new();
     let checkout = remote.0.join("checkout");

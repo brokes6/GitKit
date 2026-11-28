@@ -61,6 +61,7 @@ export interface LanesWorkspaceProps {
   demo?: boolean;
   project: LaneProjectRef | null;
   projects: LaneProjectRef[];
+  readProjectChanges?: (path: string) => Promise<number | null>;
   status: "none" | "loading" | "error" | "ready";
   error?: string;
   branches: LaneBranch[];

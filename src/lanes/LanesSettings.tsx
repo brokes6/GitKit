@@ -124,7 +124,7 @@ export function LanesSettings({ theme, project }: { theme: ThemeColors; project?
   // Remounts the text inputs after 恢复默认 so they show the reset values.
   const [resetKey, setResetKey] = useState(0);
   const [highlighted, setHighlighted] = useState<number | null>(null);
-  const dirty = JSON.stringify(settings) !== JSON.stringify(DEFAULT_LANE_SETTINGS) || !!trunk;
+  const dirty = JSON.stringify({ ...settings, pixels: DEFAULT_LANE_SETTINGS.pixels }) !== JSON.stringify(DEFAULT_LANE_SETTINGS) || !!trunk;
 
   return <section className="gk-settings-page">
     <header className="gk-settings-page-header">
@@ -133,7 +133,7 @@ export function LanesSettings({ theme, project }: { theme: ThemeColors; project?
         <p className="gk-settings-description">{tx("调整新界面主页上的分支卡片：主分支是哪条、每个卡片默认显示什么、点开的分支放在哪里。")}</p>
       </div>
       <button type="button" className="gk-settings-secondary" disabled={!dirty}
-        onClick={() => { setLaneSettings(DEFAULT_LANE_SETTINGS); if (project) setLaneTrunk(project.path, ""); setResetKey((k) => k + 1); }}>
+        onClick={() => { setLaneSettings(prev => ({ ...DEFAULT_LANE_SETTINGS, pixels: prev.pixels })); if (project) setLaneTrunk(project.path, ""); setResetKey((k) => k + 1); }}>
         {tx("恢复默认")}
       </button>
     </header>
@@ -181,9 +181,6 @@ export function LanesSettings({ theme, project }: { theme: ThemeColors; project?
       </Row>
       <Row label={tx("分支关系虚线")} description={tx("在卡片之间画出分出、合并的关系")}>
         <Switch label={tx("分支关系虚线")} checked={settings.showLinks} onChange={(showLinks) => update({ showLinks })} />
-      </Row>
-      <Row label={tx("像素背景动画")} description={tx("关闭可以减少耗电")}>
-        <Switch label={tx("像素背景动画")} checked={settings.pixels} onChange={(pixels) => update({ pixels })} />
       </Row>
     </Group>
   </section>;

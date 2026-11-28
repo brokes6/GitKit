@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import {
-  ArrowDown, ArrowRight, ArrowUp, Check, ChevronDown, ChevronRight, Download, FolderGit2, FolderOpen,
+  ArrowDown, ArrowRight, ArrowUp, Check, ChevronDown, ChevronRight, Download, Files, FolderGit2, FolderOpen,
   GitBranch, MoreHorizontal, RefreshCw, Settings, Upload,
 } from "lucide-react";
+import { createProjectReadQueue } from "../projectReadQueue";
 import { branchColor } from "../git";
 import { BranchPicker } from "./BranchPicker";
 import { BranchTree } from "./BranchTree";
@@ -28,7 +29,7 @@ function measureDockSegments(buttons: HTMLButtonElement[]) {
 }
 
 export function Dock({ project, projects, model, demo, status, changes, current, laneIndex, onPick, onSelectProject, onOpenProject, onCloneProject,
-  onOpenChanges, changesOpen, onFetch, onPull, onPush, busy, moreActions, onOpenSettings, inbox,
+  readProjectChanges, onOpenChanges, changesOpen, onFetch, onPull, onPush, busy, moreActions, onOpenSettings, inbox,
   create, defaultBase, busyCreate, onOpenCreate, onCloseCreate, onSubmitCreate, existing }: LanesWorkspaceProps & {
   model: StackModel | null; current?: LaneBranch; laneIndex: (branch: string) => number; onPick: (b: string) => void;
   create: CreateRequest | null; defaultBase: string; busyCreate: boolean;
@@ -99,13 +100,8 @@ export function Dock({ project, projects, model, demo, status, changes, current,
         value={repoName} className="lk-seg-repo">
         <div className="lk-menu">
           <div className="lk-tree-title">{tx("切换仓库")}</div>
-          <div className="lk-tree-scroll">
-            {projects.map((p) => <button key={p.id} type="button" className="lk-menu-row" data-active={p.path === project?.path || undefined}
-              onClick={() => { setMenu(null); onSelectProject(p); }}>
-              <FolderGit2 size={14} aria-hidden="true" /><span>{p.name}</span>
-              {p.path === project?.path && <Check size={13} aria-hidden="true" />}
-            </button>)}
-          </div>
+          <ProjectRows projects={projects} activePath={project?.path} activeCount={status === "ready" ? changes : null}
+            open={menu === "project"} read={readProjectChanges} select={p => { close(); onSelectProject(p); }} />
           {!projects.length && <div className="lk-tree-none">{demo ? tx("浏览器中只能查看演示数据") : tx("还没有添加项目")}</div>}
           {!demo && <>
             <div className="lk-menu-sep" />
@@ -185,6 +181,46 @@ export function Dock({ project, projects, model, demo, status, changes, current,
   </div>;
 }
 
+function ProjectRows({ projects, activePath, activeCount, open, read, select }: {
+  projects: LanesWorkspaceProps["projects"]; activePath?: string; activeCount: number | null;
+  open: boolean; read: LanesWorkspaceProps["readProjectChanges"]; select: LanesWorkspaceProps["onSelectProject"];
+}) {
+  const [counts, setCounts] = useState(new Map<string, number | null>());
+  const otherPaths = JSON.stringify(projects.filter(p => p.path !== activePath).map(p => p.path));
+  useEffect(() => {
+    if (!open || !read) return;
+    const queue = createProjectReadQueue(read, {
+      onBatch(results) {
+        setCounts(previous => {
+          const next = new Map(previous);
+          for (const { path, value } of results) next.set(path, value);
+          return next;
+        });
+      },
+    });
+    queue.setPaths(JSON.parse(otherPaths));
+    queue.setActive(true);
+    return () => queue.dispose();
+  }, [open, read, otherPaths]);
+
+  return <div className="lk-tree-scroll">
+    {projects.map(p => {
+      const active = p.path === activePath;
+      const count = active ? activeCount : counts.get(p.path);
+      const label = count == null ? tx("未取得文件数") : tf("{0} 个未提交文件", count);
+      return <button key={p.id} type="button" className="lk-menu-row"
+        data-active={active || undefined} onClick={() => select(p)} aria-label={p.name + " · " + label}>
+        <FolderGit2 size={14} aria-hidden="true" /><span>{p.name}</span>
+        {active && <Check size={13} className="shrink-0" aria-hidden="true" />}
+        {count !== 0 && <small className="lk-project-count" data-dirty={!!count || undefined} title={label}>
+          {count != null && <Files size={11} aria-hidden="true" />}
+          {count ?? (count === undefined ? "…" : "—")}
+        </small>}
+      </button>;
+    })}
+  </div>;
+}
+
 function RoundButton({ label, title, icon, onClick, busy, badge, active }: {
   label: string; title?: string; icon: ReactNode; onClick?: React.MouseEventHandler<HTMLButtonElement>; busy?: boolean; badge?: number | string; active?: boolean;
 }) {
@@ -247,12 +283,12 @@ function CreatePopover({ trigger, popRef, attrs, open, model, initialBase, commi
       {commit ? <div className="lk-create-commit" title={commit.message}>
         <code>{commit.short}</code><span>{commit.message.split("\n", 1)[0]}</span>
       </div> : <div className="lk-base-options">
-        <button type="button" className="lk-base-option" data-active={onTrunk || undefined} onClick={() => setBase(model.trunk)}>
-          <GitBranch size={13} aria-hidden="true" />{model.trunk}
+        <button type="button" className="lk-base-option" title={model.trunk} aria-pressed={onTrunk} data-active={onTrunk || undefined} onClick={() => setBase(model.trunk)}>
+          <GitBranch size={13} aria-hidden="true" /><span className="lk-picker-label">{model.trunk}</span>
         </button>
-        {initialBase !== model.trunk && <button type="button" className="lk-base-option" data-active={base === initialBase || undefined}
+        {initialBase !== model.trunk && <button type="button" className="lk-base-option" title={initialBase} aria-pressed={base === initialBase} data-active={base === initialBase || undefined}
           style={{ "--lk-branch": branchColor(initialBase) } as CSSProperties} onClick={() => setBase(initialBase)}>
-          <span className="lk-dot" aria-hidden="true" />{initialBase}
+          <span className="lk-dot" aria-hidden="true" /><span className="lk-picker-label">{initialBase}</span>
         </button>}
         <BranchPicker model={model} value={base} onChange={setBase} showValue={base !== model.trunk && base !== initialBase} />
       </div>}

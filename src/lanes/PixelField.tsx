@@ -1,5 +1,9 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { createCanvas2dRenderer } from "./pixelField2d";
+import { useBackgroundSettings, type BackgroundSettings } from "./backgroundSettings";
+import { createDropletRenderer } from "./lightDroplets";
+import { createGradientBars } from "./gradientBars";
+import { createWaveRenderer } from "./pixelWaves";
 import { createWebGLRenderer } from "./pixelFieldGL";
 import { RIPPLE_LIFE, TIME_WRAP, parseColor } from "./pixelFieldShared";
 import type { FieldRenderer, FieldTheme, Ripple } from "./pixelFieldShared";
@@ -21,9 +25,28 @@ export interface PixelFieldHandle {
 const FPS_ACTIVE = 20;
 
 
-export const PixelField = forwardRef<PixelFieldHandle, { className?: string }>(function PixelField({ className }, ref) {
+interface PixelFieldProps {
+  className?: string;
+  pattern: "dots" | "waves" | "bars" | "droplets";
+  barWidth: number;
+  barSpeed: number;
+  strength: number;
+  animated: boolean;
+}
+
+export const PixelField = forwardRef<PixelFieldHandle, PixelFieldProps>(function PixelField({ className, pattern, strength, animated, barWidth, barSpeed }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const kick = useRef<(x: number, y: number) => void>(() => {});
+
+  const options = useRef({ width: barWidth, strength, speed: barSpeed });
+  const motion = useRef(animated);
+  const redraw = useRef<() => void>(() => {});
+  useEffect(() => { motion.current = animated; redraw.current(); }, [animated]);
+
+  useEffect(() => {
+    options.current = { width: barWidth, strength, speed: barSpeed };
+    if (pattern === "bars") redraw.current();
+  }, [barWidth, barSpeed, strength, pattern]);
 
   useImperativeHandle(ref, () => ({
     ripple: (x, y) => kick.current(x, y),
@@ -34,7 +57,10 @@ export const PixelField = forwardRef<PixelFieldHandle, { className?: string }>(f
     if (!canvas) return;
     let available = true;
     const contextChanged = (ready: boolean) => { available = ready; dirty = true; refresh(); };
-    const renderer: FieldRenderer | null = createWebGLRenderer(canvas, contextChanged) ?? createCanvas2dRenderer(canvas);
+    const renderer: FieldRenderer | null = pattern === "bars" ? createGradientBars(canvas, () => options.current)
+      : pattern === "droplets" ? createDropletRenderer(canvas)
+      : pattern === "waves" ? createWaveRenderer(canvas)
+      : createWebGLRenderer(canvas, contextChanged) ?? createCanvas2dRenderer(canvas);
     if (!renderer) return;
     canvas.dataset.renderer = renderer.kind;
 
@@ -45,23 +71,26 @@ export const PixelField = forwardRef<PixelFieldHandle, { className?: string }>(f
     let dirty = true;
     const ripples: Ripple[] = [];
     const theme: FieldTheme = { css: "#888", r: 0.53, g: 0.53, b: 0.53, a: 1, alpha: 0.12 };
-    const t0 = performance.now();
+    let elapsed = 0, lastFrame = 0;
 
     const readTheme = () => {
       const style = getComputedStyle(canvas);
-      const css = style.getPropertyValue("--lk-pixel").trim();
+      if (pattern === "bars") theme.barColor = style.getPropertyValue("--lk-bar-color").trim();
+      const css = style.getPropertyValue(pattern === "bars" ? "--lk-bar-glow" : pattern === "droplets" ? "--lk-accent" : pattern === "waves" ? "--lk-wave" : "--lk-pixel").trim();
       const rgba = css ? parseColor(css) : null;
       if (rgba) { [theme.r, theme.g, theme.b, theme.a] = rgba; theme.css = css; }
-      theme.alpha = parseFloat(style.getPropertyValue("--lk-pixel-alpha")) || theme.alpha;
+      theme.alpha = (parseFloat(style.getPropertyValue("--lk-pixel-alpha")) || 0.24) * 1.8;
     };
 
     const canDraw = () => available && visible && !document.hidden && width > 0 && height > 0;
-    const animate = () => focused && !reduced.matches;
+    const animate = () => focused && motion.current && !reduced.matches;
     const frame = (now: number) => {
       raf = 0;
       if (!canDraw()) return;
       while (ripples.length && now - ripples[0].start >= RIPPLE_LIFE * 1000) ripples.shift();
-      const t = reduced.matches ? 0 : ((now - t0) / 1000) % TIME_WRAP;
+      if (animate() && lastFrame) elapsed += Math.min(0.2, (now - lastFrame) / 1000) * (pattern === "bars" ? options.current.speed : 1);
+      lastFrame = now;
+      const t = reduced.matches ? 0 : elapsed % TIME_WRAP;
       renderer.draw(t, now, ripples, theme);
       dirty = false;
       if (animate()) {
@@ -77,10 +106,13 @@ export const PixelField = forwardRef<PixelFieldHandle, { className?: string }>(f
       clearTimeout(timer);
       cancelAnimationFrame(raf);
       timer = raf = 0;
+      lastFrame = 0;
       due = performance.now();
       if (canDraw() && (animate() || dirty)) raf = requestAnimationFrame(frame);
     };
+    redraw.current = () => { dirty = true; ripples.length = 0; refresh(); };
     kick.current = (x, y) => {
+      if (pattern !== "dots") return;
       if (!animate() || !canDraw()) return;
       if (ripples.length === 4) ripples.shift();
       ripples.push({ x, y, start: performance.now() });
@@ -91,7 +123,7 @@ export const PixelField = forwardRef<PixelFieldHandle, { className?: string }>(f
       const box = entry.contentRect;
       if (width === box.width && height === box.height) return;
       width = box.width; height = box.height;
-      renderer.resize(width, height, 1);
+      renderer.resize(width, height, pattern === "bars" || pattern === "droplets" ? Math.min(2, window.devicePixelRatio || 1) : 1);
       dirty = true;
       refresh();
     });
@@ -103,7 +135,7 @@ export const PixelField = forwardRef<PixelFieldHandle, { className?: string }>(f
     io?.observe(canvas);
     readTheme();
     const mo = new MutationObserver(() => { readTheme(); dirty = true; refresh(); });
-    const root = canvas.closest(".lk-root");
+    const root = canvas.closest(".lk-root, .gk-background-preview");
     if (root) mo.observe(root, { attributes: true, attributeFilter: ["data-theme", "style"] });
     const onFocus = () => { focused = true; refresh(); };
     const onBlur = () => { focused = false; dirty ||= ripples.length > 0; ripples.length = 0; refresh(); };
@@ -117,6 +149,7 @@ export const PixelField = forwardRef<PixelFieldHandle, { className?: string }>(f
     return () => {
       cancelAnimationFrame(raf);
       clearTimeout(timer);
+      redraw.current = () => {};
       kick.current = () => {};
       ro.disconnect(); io?.disconnect(); mo.disconnect();
       window.removeEventListener("focus", onFocus);
@@ -125,7 +158,16 @@ export const PixelField = forwardRef<PixelFieldHandle, { className?: string }>(f
       reduced.removeEventListener("change", onMotion);
       renderer.dispose();
     };
-  }, []);
+  }, [pattern]);
 
-  return <canvas ref={canvasRef} className={className} aria-hidden="true" />;
+  return <canvas key={pattern} ref={canvasRef} className={className} aria-hidden="true"
+    style={pattern === "bars" ? { background: "var(--lk-bar-base)" } : { opacity: strength / 180 }} />;
+});
+
+
+export const WorkspaceBackground = forwardRef<PixelFieldHandle, { preview?: BackgroundSettings }>(function WorkspaceBackground({ preview }, ref) {
+  const saved = useBackgroundSettings();
+  const bg = preview ?? saved;
+  return bg.style === "plain" ? null : <PixelField ref={ref} className="lk-pixels"
+    pattern={bg.style} strength={bg[bg.style]} animated={bg.animated} barWidth={bg.barWidth} barSpeed={bg.barSpeed} />;
 });

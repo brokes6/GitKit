@@ -85,7 +85,7 @@ export function BranchPicker({ model, value, onChange, showValue }: {
 
   const activeId = visible[active] ? `${listId}-${active}` : undefined;
   return <div className="lk-picker" ref={rootRef} onKeyDown={onKeyDown}>
-    <button ref={triggerRef} type="button" className="lk-base-option lk-picker-trigger"
+    <button ref={triggerRef} type="button" className="lk-base-option lk-picker-trigger" title={showValue ? value : undefined}
       data-active={showValue || undefined} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? listId : undefined}
       style={showValue ? { "--lk-branch": branchColor(value) } as CSSProperties : undefined}
       onClick={() => open ? close() : openList()}>

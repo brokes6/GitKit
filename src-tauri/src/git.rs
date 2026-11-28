@@ -2179,6 +2179,25 @@ pub struct UpdateCheck {
     pub current_branch: String,
 }
 
+#[tauri::command]
+pub async fn git_refresh_remote_branches(
+    path: String, remote: String, expected_url: String, token: Option<String>,
+) -> Result<(), String> {
+    run_blocking(move || {
+        let url = run_git(&path, &["remote", "get-url", "--", &remote])?;
+        if url.trim() != expected_url {
+            return Err("远程仓库地址已变化".into());
+        }
+        let refspec = format!("+refs/heads/*:refs/remotes/{remote}/*");
+        run_git_auth(&path, &["-c", "core.hooksPath=/dev/null",
+            "-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=20",
+            "-c", "core.sshCommand=ssh -o BatchMode=yes -o ConnectTimeout=15", "fetch", "--no-tags",
+            "--no-recurse-submodules", "--no-write-fetch-head", "--refmap=", "--prune",
+            "--", &expected_url, &refspec], token.as_deref())?;
+        Ok(())
+    }).await
+}
+
 /// Check a repo for new upstream commits WITHOUT touching any local branch: the
 /// fetch only moves remote-tracking refs, then every local branch is compared to
 /// its upstream. Applying the result is a separate, explicit step

@@ -58,6 +58,14 @@
 .lk-tree-none { padding: 10px; color: var(--lk-muted); font-size: 12px; }
 .lk-menu { min-width: 240px; }
 .lk-menu-wide { width: 340px; }
+.lk-project-count {
+  display: inline-flex; flex: none; align-items: center; gap: 4px;
+  color: var(--lk-muted); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.lk-project-count[data-dirty] {
+  height: 20px; padding: 0 7px; border-radius: 7px; color: var(--lk-amber);
+  background: color-mix(in srgb, var(--lk-amber) 10%, transparent);
+}
 .lk-menu-row > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 
@@ -65,9 +73,12 @@
 .lk-create form { display: flex; flex-direction: column; gap: 10px; }
 .lk-create-title { font-size: 14px; font-weight: 650; }
 .lk-create-label { margin-top: 2px; color: var(--lk-muted); font-size: 11.5px; font-weight: 600; }
-.lk-base-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.lk-base-options { display: flex; align-items: center; gap: 6px; }
+.lk-base-options > .lk-picker:has(.lk-picker-trigger:not([data-active])) { flex-shrink: 0; }
+.lk-base-option > svg { flex-shrink: 0; }
+.lk-create-hint { overflow-wrap: anywhere; }
 .lk-base-option {
-  display: inline-flex; align-items: center; gap: 6px; height: 28px; max-width: 160px; padding: 0 10px;
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; min-width: 0; max-width: 160px; padding: 0 10px;
   border: 1px solid var(--lk-border-strong); border-radius: 999px; background: transparent;
   color: var(--lk-sec); font: inherit; font-size: 12px; font-weight: 600;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
