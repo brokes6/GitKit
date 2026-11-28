@@ -1334,17 +1334,19 @@ fn parse_diff_files(numstat: &str, names: &str) -> Vec<FileStat> {
 #[tauri::command]
 pub async fn commit_files(path: String, hash: String) -> Result<Vec<FileStat>, String> {
     run_blocking(move || {
-        let numstat = run_git(&path, &["show", "--format=", "--numstat", "-M", "-z", &hash])?;
-        let names = run_git(&path, &["show", "--format=", "--name-status", "-M", "-z", &hash])?;
+        let numstat = run_git(&path, &["show", COMMIT_DIFF_BASE, "--format=", "--numstat", "-M", "-z", &hash, "--"])?;
+        let names = run_git(&path, &["show", COMMIT_DIFF_BASE, "--format=", "--name-status", "-M", "-z", &hash, "--"])?;
         Ok(parse_diff_files(&numstat, &names))
     })
     .await
 }
 
+const COMMIT_DIFF_BASE: &str = "--diff-merges=first-parent";
+
 /// Diff of a single file within a commit.
 #[tauri::command]
 pub async fn commit_file_diff(path: String, hash: String, file: String) -> Result<String, String> {
-    run_blocking(move || run_git(&path, &["show", "--format=", "-M", &hash, "--", &file])).await
+    run_blocking(move || run_git(&path, &["show", COMMIT_DIFF_BASE, "--format=", "-M", &hash, "--", &file])).await
 }
 
 #[derive(Serialize)]
@@ -1437,14 +1439,61 @@ pub async fn git_file_content(
 }
 
 #[cfg(test)]
-mod file_content_tests {
-    use super::git_file_content;
+mod commit_detail_tests {
+    use super::{commit_file_diff, commit_files, git_file_content};
     use std::process::Command;
 
     fn git(repo: &std::path::Path, args: &[&str]) -> String {
         let output = Command::new("git").arg("-C").arg(repo).args(args).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn commit_details_compare_merges_with_the_first_parent() {
+        let repo = std::env::temp_dir().join(format!(
+            "gitkit-commit-details-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "--quiet", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        let commit_file = |file: &str| {
+            std::fs::write(repo.join(file), format!("{file}\n")).unwrap();
+            git(&repo, &["add", "--", file]);
+            git(&repo, &["commit", "--quiet", "-m", file]);
+            git(&repo, &["rev-parse", "HEAD"])
+        };
+        let root = commit_file("root.txt");
+        git(&repo, &["checkout", "--quiet", "-b", "feature"]);
+        let feature = commit_file("feature.txt");
+        git(&repo, &["checkout", "--quiet", "main"]);
+        let target = commit_file("target.txt");
+        git(&repo, &["merge", "--quiet", "--no-ff", "-m", "merge feature", "feature"]);
+        let merge = git(&repo, &["rev-parse", "HEAD"]);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let path = repo.to_string_lossy().into_owned();
+
+        for (revision, file) in [(&root, "root.txt"), (&feature, "feature.txt"), (&merge, "feature.txt")] {
+            let files = runtime.block_on(commit_files(path.clone(), revision.clone())).unwrap();
+            assert_eq!(files.len(), 1);
+            assert_eq!(files[0].path, file);
+            assert_eq!(files[0].status, "A");
+            assert_eq!((files[0].additions, files[0].deletions), (1, 0));
+
+            let diff = runtime.block_on(commit_file_diff(path.clone(), revision.clone(), file.into())).unwrap();
+            let expected = if revision == &merge {
+                git(&repo, &["diff", "-M", &target, &merge, "--", file])
+            } else {
+                git(&repo, &["show", "--format=", "-M", revision, "--", file])
+            };
+            assert_eq!(diff.trim(), expected);
+            assert!(diff.contains(&format!("+{file}")));
+        }
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     #[test]

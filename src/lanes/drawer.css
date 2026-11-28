@@ -1,0 +1,321 @@
+/* The lanes host supplies the palette. Some shared detail components still use
+   inline styles; structural selectors cover those without drawer hooks. */
+.lk-drawer-host > .gk-detail-panel[data-tracing] {
+  --gk-detail-hover: var(--lk-hover) !important;
+  --lk-drawer-rule: color-mix(in srgb, var(--lk-text) 7%, transparent);
+  --lk-drawer-selection: color-mix(in srgb, var(--lk-accent) 10%, transparent);
+  background: var(--lk-card) !important;
+  border: 1px solid var(--lk-drawer-rule) !important;
+  border-radius: 14px !important;
+  color: var(--lk-text);
+  transition-property: background-color, color, opacity !important;
+}
+
+.lk-drawer-host .gk-detail-panel > :is(.lk-drawer-bar, div:first-child) {
+  min-height: 32px;
+  padding: 2px 10px;
+  background: var(--lk-card) !important;
+  border-bottom: 1px solid var(--lk-drawer-rule) !important;
+  backdrop-filter: none !important;
+}
+
+.lk-drawer-host .gk-detail-panel > :is(.lk-drawer-bar, div:first-child) > :is(button, span) {
+  color: var(--lk-sec) !important;
+  font-size: 11px;
+}
+
+.lk-drawer-host .gk-detail-panel button {
+  border-radius: 8px !important;
+  transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+.lk-drawer-host .gk-detail-panel > :is(.lk-drawer-bar, div:first-child) button {
+  min-height: 26px;
+  background: transparent !important;
+}
+
+.lk-drawer-host .gk-detail-panel > :is(.lk-drawer-bar, div:first-child) button:hover {
+  background: var(--lk-hover) !important;
+  color: var(--lk-text) !important;
+}
+
+/* File list and working-tree actions */
+.lk-drawer-host .gk-detail-in > :is(.lk-drawer-changes, div.flex-shrink-0.flex-col) {
+  width: min(clamp(280px, 30%, 360px), 56%) !important;
+  background: var(--lk-card) !important;
+  border-right: 1px solid var(--lk-drawer-rule) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-files, .w-\[225px\]) {
+  width: min(clamp(260px, 28%, 340px), 52%) !important;
+  border-right: 1px solid var(--lk-drawer-rule) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-section, .justify-between.px-4.py-2\.5) {
+  min-height: 34px;
+  padding: 4px 10px 4px 14px;
+  gap: 4px;
+  border-bottom: 1px solid var(--lk-drawer-rule) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-section, .justify-between.px-4.py-2\.5) > span {
+  font-size: 11px;
+  letter-spacing: 0.035em;
+  text-transform: uppercase;
+  color: var(--lk-sec) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-section, .justify-between.px-4.py-2\.5) > span > span {
+  color: var(--lk-muted) !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-section, .justify-between.px-4.py-2\.5) > button,
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file, .group.flex.items-center.transition-colors) > div.flex-shrink-0 > button,
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-meta, .flex-shrink-0.p-5) button {
+  background: transparent !important;
+  border-color: transparent !important;
+  color: var(--lk-sec) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-section, .justify-between.px-4.py-2\.5) > button {
+  min-height: 24px;
+  padding-inline: 6px;
+  font-size: 11px;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-section, .justify-between.px-4.py-2\.5) > button:hover:not(:disabled),
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file, .group.flex.items-center.transition-colors) > div.flex-shrink-0 > button:hover:not(:disabled),
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-meta, .flex-shrink-0.p-5) button:hover:not(:disabled) {
+  background: var(--lk-hover) !important;
+  color: var(--lk-drawer-action-hover, var(--lk-text)) !important;
+}
+
+.lk-drawer-host .gk-detail-in button:is([data-lk-destructive], :has(.lucide-trash-2, .lucide-rotate-ccw), [title*="reset --hard"]) {
+  --lk-drawer-action-hover: var(--lk-red);
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file, .group.flex.items-center.transition-colors) {
+  min-height: 30px;
+  transition-property: background-color, color, opacity;
+  border-radius: 8px !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file, .group.flex.items-center.transition-colors).cursor-pointer,
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file, .group.flex.items-center.transition-colors) > button:first-child {
+  padding: 4px 8px;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file, .group.flex.items-center.transition-colors) :is(.lk-drawer-file-label, .flex-col.min-w-0.flex-1) {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file-label, .group.flex.items-center.transition-colors .flex-col.min-w-0.flex-1) > span:first-child {
+  flex: 0 0 auto;
+  max-width: 100%;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file-label, .group.flex.items-center.transition-colors .flex-col.min-w-0.flex-1):has(> span:nth-child(2)) > span:first-child {
+  max-width: 78%;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file-label, .group.flex.items-center.transition-colors .flex-col.min-w-0.flex-1) > span:nth-child(n + 2) {
+  min-width: 0;
+  font-size: 11px;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file-label, .group.flex.items-center.transition-colors .flex-col.min-w-0.flex-1) > span:nth-child(2) {
+  color: var(--lk-sec) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file, .group.flex.items-center.transition-colors)[data-lk-selected="false"]:is(:hover, :focus-within) {
+  background: var(--lk-hover) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file, .group.flex.items-center.transition-colors)[data-lk-selected="true"] {
+  background: var(--lk-drawer-selection) !important;
+}
+
+.lk-drawer-host .gk-detail-in [data-lk-selected="true"] :is(.lk-drawer-file-label, .flex-col.min-w-0.flex-1) > span:first-child {
+  color: color-mix(in srgb, var(--lk-accent) 76%, var(--lk-text)) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-file, .group.flex.items-center.transition-colors) > .group-hover\:opacity-100 {
+  transition: opacity 120ms ease;
+}
+
+.lk-drawer-host .gk-detail-in [data-lk-file-status] {
+  color: var(--lk-sec) !important;
+}
+
+.lk-drawer-host .gk-detail-in [data-lk-file-status="added"] {
+  color: var(--lk-green) !important;
+}
+
+.lk-drawer-host .gk-detail-in [data-lk-file-status="modified"] {
+  color: var(--lk-amber) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is([data-lk-file-status="deleted"], [data-lk-file-status="conflicted"]) {
+  color: var(--lk-red) !important;
+}
+
+/* Composer */
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-changes, div.flex-shrink-0.flex-col) > :is(.lk-drawer-composer, div.p-3),
+.lk-drawer-host .gk-detail-in > :is(.lk-drawer-changes, div.flex-shrink-0.flex-col) > div:nth-child(2) {
+  border-top: 1px solid var(--lk-drawer-rule) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-composer, div.p-3:has(> .gk-primary-sweep)) {
+  padding: 10px 12px 12px;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-composer, div.p-3:has(> .gk-primary-sweep)) :is(textarea, select) {
+  background: var(--lk-input) !important;
+  color: var(--lk-text) !important;
+  border: 1px solid var(--lk-drawer-rule) !important;
+  border-radius: 8px !important;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-composer, div.p-3:has(> .gk-primary-sweep)) textarea {
+  display: block;
+  line-height: 1.5;
+  user-select: text;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-composer, div.p-3:has(> .gk-primary-sweep)) textarea::placeholder {
+  color: var(--lk-sec);
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-composer, div.p-3:has(> .gk-primary-sweep)) > :is(.lk-drawer-identity, .mt-2.flex) {
+  min-height: 26px;
+}
+
+.lk-drawer-host:is([data-theme="dark"] *) select {
+  color-scheme: dark;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-composer, div.p-3:has(> .gk-primary-sweep)) select {
+  padding-block: 3px;
+}
+
+.lk-drawer-host .gk-detail-in .gk-primary-sweep {
+  min-height: 32px;
+  padding-block: 5px;
+  background: var(--lk-primary-bg) !important;
+  color: var(--lk-primary-fg) !important;
+  border: 1px solid transparent !important;
+  box-shadow: none !important;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.lk-drawer-host .gk-detail-in .gk-primary-sweep[title]:not(:disabled) {
+  background: transparent !important;
+  color: var(--lk-text) !important;
+  border-color: var(--lk-border-strong) !important;
+}
+
+.lk-drawer-host .gk-detail-in .gk-primary-sweep:hover:not(:disabled) {
+  opacity: 0.84 !important;
+}
+
+.lk-drawer-host .gk-detail-in .gk-primary-sweep::after {
+  display: none;
+}
+
+/* Commit, stash and code gutters */
+.lk-drawer-host .gk-detail-in > .flex-1.flex-col.overflow-hidden,
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-diff, .min-w-0.min-h-0.flex-col:has(> .h-11)) {
+  background: var(--lk-card) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-meta, .flex-1.flex-col.overflow-hidden > .flex-shrink-0.p-5) {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--lk-drawer-rule) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-meta, .flex-1.flex-col.overflow-hidden > .flex-shrink-0.p-5) > :first-child {
+  margin-bottom: 8px;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-diff, .min-w-0.min-h-0.flex-col:has(> .h-11)) > :is(.h-11, .h-10, .justify-between.px-4) {
+  border-bottom: 1px solid var(--lk-drawer-rule) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-diff, .min-w-0.min-h-0.flex-col:has(> .h-11)) > .h-11 {
+  height: 36px;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-diff, .min-w-0.min-h-0.flex-col:has(> .h-11)) > .justify-between.px-4 {
+  padding-block: 4px;
+  color: var(--lk-sec) !important;
+  font-size: 11px;
+}
+
+.lk-drawer-host .gk-detail-in .gk-code-row {
+  font-size: 12px;
+  line-height: 1.8;
+  user-select: text;
+}
+
+.lk-drawer-host .gk-detail-in .gk-code-row > .tabular-nums {
+  border-right-color: var(--lk-drawer-rule) !important;
+}
+
+.lk-drawer-host .gk-detail-in .gk-code-row > .absolute[aria-hidden="true"] {
+  width: 2px;
+  background: color-mix(in srgb, var(--lk-drawer-change) 65%, transparent) !important;
+}
+
+.lk-drawer-host .gk-detail-in .gk-code-row[data-diff-new-line]:not([data-diff-old-line]) {
+  --lk-drawer-change: var(--lk-green);
+}
+
+.lk-drawer-host .gk-detail-in .gk-code-row[data-diff-old-line]:not([data-diff-new-line]) {
+  --lk-drawer-change: var(--lk-red);
+}
+
+.lk-drawer-host .gk-detail-in .gk-code-row:has(> .absolute[aria-hidden="true"]) {
+  background: color-mix(in srgb, var(--lk-drawer-change) 7%, transparent) !important;
+}
+
+.lk-drawer-host .gk-detail-in .gk-code-row[data-diff-hunk] {
+  padding-block: 2px;
+  background: var(--lk-chip) !important;
+}
+
+.lk-drawer-host .gk-detail-in .gk-code-row[data-diff-hunk] > span:last-child {
+  color: var(--lk-sec) !important;
+}
+
+.lk-drawer-host .gk-detail-in [data-diff-skipped] {
+  background: var(--lk-input) !important;
+  color: var(--lk-sec) !important;
+  border-color: var(--lk-drawer-rule) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-empty, .flex-1.items-center.justify-center.gap-2) {
+  background: var(--lk-card) !important;
+  color: var(--lk-sec) !important;
+}
+
+.lk-drawer-host .gk-detail-in :is(.lk-drawer-empty, .flex-1.items-center.justify-center.gap-2) > svg {
+  width: 22px;
+  height: 22px;
+  opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lk-drawer-host .gk-detail-panel,
+  .lk-drawer-host .gk-detail-panel * {
+    transition-duration: 0s !important;
+    /* Keep animationend for the shared panel's close handler. */
+    animation-duration: 1ms !important;
+  }
+}

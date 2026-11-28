@@ -29,7 +29,7 @@ import {
   Pin, EyeOff, Eye, Folder, AlertCircle, AlertTriangle, Cloud, GitBranchPlus, ChevronLeft, LayoutGrid,
   Settings, Trash2, Users, Github, Laptop, Sparkles, Languages, RotateCcw, TerminalSquare, SlidersHorizontal,
   Tag as TagIcon, Square, DownloadCloud, Pencil, FolderGit2, Search, PanelLeft, MoreHorizontal,
-  CircleDot, ArrowDown, ArrowUp, ExternalLink, Maximize2, History, ChevronsUpDown, List, Network, MessageSquare,
+  CircleDot, ArrowDown, ArrowUp, ExternalLink, Maximize2, History, ChevronsUpDown, List, Network, MessageSquare, Columns3,
 } from "lucide-react";
 import {
   invoke, pickRepoFolder, openRepo, initRepo, loadBranches, loadRemotes, loadHistory,
@@ -53,6 +53,12 @@ import { workingFileKey, workingFileCount, sameWorking, mergeWorkingPaths, shoul
 import type { WorkingFile } from "./workingStatus";
 import type { BranchColors } from "./branchColors";
 import { ProjectOverview, WorkbenchActionBar } from "./Workbench";
+import { LanesWorkspace, leaveLanes } from "./lanes/LanesWorkspace";
+import type { LaneMenuItem } from "./lanes/LanesWorkspace";
+import { laneRequestItem, useLaneRequests } from "./lanes/useLaneRequests";
+import { LanesSettings } from "./lanes/LanesSettings";
+import type { LanesSettingsProject } from "./lanes/LanesSettings";
+import "./lanes/drawer.css";
 import { ToolbarText } from "./ToolbarText";
 import { useToolbarLayoutMotion } from "./useToolbarLayoutMotion";
 import { DialogPresence, useDialogPresence } from "./DialogPresence";
@@ -697,6 +703,13 @@ function TitleBar({ themeMode, onThemeCycle, onOpenSettings, background, childre
           onMouseEnter={(e) => { e.currentTarget.style.background = t.inputBg; e.currentTarget.style.color = t.text; }}
           onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textMuted; }}>
           <Icon size={14} aria-hidden="true" />
+        </button>
+        <button onClick={() => { localStorage.setItem("gitkit.shell", "lanes"); location.reload(); }} className={iconButton}
+          title={tx("试用分支区域布局")} aria-label={tx("试用分支区域布局")}
+          style={{ color: t.textMuted, borderRadius: R - 3 }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = t.inputBg; e.currentTarget.style.color = t.text; }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = t.textMuted; }}>
+          <Columns3 size={14} aria-hidden="true" />
         </button>
         <button onClick={onOpenSettings} className={iconButton}
           title={tx("设置")} aria-label={tx("打开设置")}
@@ -2595,17 +2608,17 @@ function FileDiffView({ files, selectedFile, onFileSelect, onRevealFile, onExpan
             const isSel = selectedFile?.path === file.path;
             const parts = file.path.split("/"), name = parts.pop()!;
             return (
-              <div key={file.path}
-                className="group relative flex items-center transition-colors"
+              <div key={file.path} data-lk-selected={isSel || undefined}
+                className="lk-drawer-file group relative flex items-center transition-colors"
                 style={{ margin: "1px 6px", width: "calc(100% - 12px)",
                   background: isSel ? t.rowSelected : "transparent", borderRadius: R - 2 }}
                 onMouseEnter={(e) => { if (!isSel) e.currentTarget.style.background = t.rowHover; }}
                 onMouseLeave={(e) => { if (!isSel) e.currentTarget.style.background = "transparent"; }}>
                 <button onClick={() => onFileSelect(isSel ? null : file)}
                   className="w-full flex items-center gap-2 px-3 py-2 text-left cursor-pointer">
-                  <span className="text-[12px] font-mono font-bold w-3 text-center flex-shrink-0" style={{ color: st.color }}>{st.label}</span>
-                  <div className="flex flex-col min-w-0 flex-1">
-                    <span className="text-[13px] font-semibold truncate" style={{ color: isSel ? t.accentFg : t.text }}>{name}</span>
+                  <span className="text-[12px] font-mono font-bold w-3 text-center flex-shrink-0" data-lk-file-status={file.status} style={{ color: st.color }}>{st.label}</span>
+                  <div className="lk-drawer-file-label flex flex-col min-w-0 flex-1">
+                    <span className="text-[13px] font-semibold truncate" title={file.path} style={{ color: isSel ? t.accentFg : t.text }}>{name}</span>
                     {parts.length > 0 && <span className="text-[11px] truncate" style={{ color: t.textMuted }}>{parts.join("/")}</span>}
                   </div>
                   {!compact && <div className={`flex gap-1 flex-shrink-0 font-mono text-[11px] transition-opacity ${onRevealFile
@@ -2865,12 +2878,17 @@ function CommitDetail({ commit, selectedFile, onFileSelect, onRevealFile, onExpa
         )}
       </div>
 
+      {commit.parents.length > 1 && (
+        <div className="flex-shrink-0 px-4 py-2 text-[11px]" style={{ color: t.textMuted }}>
+          {tx("比较基准")} · {tf("父提交 {0}", 1)} · {commit.parents[0].slice(0, 8)}
+        </div>
+      )}
       <FileDiffView files={commit.files} selectedFile={selectedFile}
         onFileSelect={onFileSelect} onRevealFile={onRevealFile} onExpand={onExpand}
         compact onTrace={onTrace}
         repoPath={repoPath} sourceKey={commit.fullHash}
         loading={filesLoading}
-        emptyHint={tx("合并提交，无直接更改")} />
+        emptyHint={commit.parents.length > 1 ? tx("合并提交，无直接更改") : undefined} />
     </div>
   );
 }
@@ -3156,7 +3174,7 @@ function WorkingFileRow({ file, selected, disabled, onSelect, onStage, onUnstage
   const statusLabel = { modified: "M", added: "A", deleted: "D", untracked: "?", renamed: "R", conflicted: "!" }[file.status];
   const parts = file.path.split("/"), name = parts.pop()!;
   return (
-    <div className="group flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors"
+    <div className="lk-drawer-file group flex items-center gap-2 px-3 py-2 cursor-pointer transition-colors" data-lk-selected={selected || undefined}
       style={{ margin: "1px 6px", width: "calc(100% - 12px)",
         background: selected ? t.rowSelected : hovered ? t.rowHover : "transparent",
         borderRadius: R - 2 }}
@@ -3164,11 +3182,11 @@ function WorkingFileRow({ file, selected, disabled, onSelect, onStage, onUnstage
       onMouseLeave={() => setHovered(false)}
       onContextMenu={disabled ? undefined : onIgnore}
       onClick={onSelect}>
-      <span className="text-[12px] font-mono font-bold w-3 text-center flex-shrink-0" style={{ color: statusColor }}>
+      <span className="text-[12px] font-mono font-bold w-3 text-center flex-shrink-0" data-lk-file-status={file.status} style={{ color: statusColor }}>
         {statusLabel}
       </span>
-      <div className="flex flex-col min-w-0 flex-1">
-        <span className="text-[13px] font-semibold truncate" style={{ color: selected ? t.accentFg : t.text }}>{name}</span>
+      <div className="lk-drawer-file-label flex flex-col min-w-0 flex-1">
+        <span className="text-[13px] font-semibold truncate" title={file.path} style={{ color: selected ? t.accentFg : t.text }}>{name}</span>
         {parts.length > 0 && <span className="text-[11px] truncate" style={{ color: t.textMuted }}>{parts.join("/")}</span>}
         {file.hasStaged && file.hasUnstaged && <span className="text-[11px] truncate" style={{ color: t.amber }}>
           {file.staged ? tx("还有未暂存改动") : tx("部分改动已暂存")}
@@ -3221,13 +3239,13 @@ function ChangesSectionHeader({ label, count, action, onAction, onReset, disable
 }) {
   const t = useTheme();
   return (
-    <div className="flex items-center justify-between px-4 py-2.5 gap-2"
+    <div className="lk-drawer-section flex items-center justify-between px-4 py-2.5 gap-2"
       style={{ borderBottom: `0.5px solid ${t.border}` }}>
       <span className="text-[12px] font-semibold flex-1 min-w-0 truncate" style={{ color: t.textMuted }}>
         {label} <span style={{ color: t.textFaint }}>({count})</span>
       </span>
       {onReset && (
-        <button disabled={disabled} onClick={onReset}
+        <button disabled={disabled} onClick={onReset} data-lk-destructive
           className="text-[12px] px-2 py-0.5 transition-colors cursor-pointer disabled:cursor-not-allowed flex-shrink-0"
           title={tx("丢弃工作区的所有更改（reset --hard + clean）")}
           style={{ color: disabled ? t.textMuted : t.red, background: disabled ? t.disabledBg : t.redBg, borderRadius: R - 2,
@@ -3312,7 +3330,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
     }
   };
   return (
-    <div className="flex-shrink-0 flex flex-col overflow-hidden"
+    <div className="lk-drawer-changes flex-shrink-0 flex flex-col overflow-hidden"
       style={{ background: t.bgPanel, width: "clamp(260px, 23vw, 300px)",
         borderRight: `0.5px solid ${t.border}` }}>
       <div className="flex-shrink-0" style={{ maxHeight: "42%", minHeight: 80, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -3347,7 +3365,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
       </div>
 
       {/* Commit area */}
-      <div className="flex-shrink-0 p-3" style={{ borderTop: `0.5px solid ${t.border}` }}>
+      <div className="lk-drawer-composer flex-shrink-0 p-3" style={{ borderTop: `0.5px solid ${t.border}` }}>
         {operationActive ? <p className="text-xs leading-5" style={{ color: t.textSec }}>
           {tx("仓库有未完成的操作。解决冲突并暂存后，通过上方操作栏继续；普通提交草稿会保留。")}
         </p> : <>
@@ -3362,7 +3380,7 @@ function ChangesPanel({ files, selectedFile, onFileSelect, currentBranch, onStag
             borderRadius: R - 2, border: `0.5px solid ${t.inputBorder}` }} />
 
         {/* Committer — defaults to the default identity */}
-        <div className="flex items-center gap-2 mt-2">
+        <div className="lk-drawer-identity flex items-center gap-2 mt-2">
           <span className="text-[11px] flex-shrink-0" style={{ color: t.textMuted }}>{tx("提交者")}</span>
           {needsIdentity ? (
             <span className="text-[11px] truncate" style={{ color: t.textMuted }}>{tx("还没有提交者身份")}</span>
@@ -4905,18 +4923,21 @@ function CherryPickConflictDialog({ commit, target, files, onCancel, onContinue 
 
 // ─── CreatePRDialog (merge / pull request) ───────────────────────────────────
 
-function CreatePRDialog({ path, branches, currentBranch, chooseSource, remote, connection, commits, initialLookup, term, onCancel, onConfirm, onOpenRequest }: {
+function CreatePRDialog({ path, branches, currentBranch, initialTarget, chooseSource, remote, connection, commits, initialLookup, term, onCancel, onConfirm, onOpenRequest }: {
   path: string; branches: Branch[]; currentBranch: string; remote: Remote; connection: RequestConnection;
   chooseSource?: boolean;
-  commits: Commit[]; initialLookup: ReturnType<typeof useBranchRequest>; term: string;
+  /** Preselected target branch (e.g. the lane a branch was dropped on). */
+  initialTarget?: string;
+  /** The lookup for `currentBranch` when the host already has one; otherwise the dialog reads it. */
+  commits: Commit[]; initialLookup?: ReturnType<typeof useBranchRequest>; term: string;
   onCancel: () => void; onOpenRequest: (item: PlatformRequest) => Promise<void>;
   onConfirm: (source: string, target: string, title: string, description: string, publish: boolean) => Promise<boolean>;
 }) {
   const t = useTheme();
   const [source, setSource] = useState(currentBranch);
-  const otherLookup = useBranchRequest(source === currentBranch ? null : connection, source);
-  const lookup = source === currentBranch ? initialLookup : otherLookup;
-  const [chosenTarget, setChosenTarget] = useState("");
+  const otherLookup = useBranchRequest(source === currentBranch && initialLookup ? null : connection, source);
+  const lookup = source === currentBranch && initialLookup ? initialLookup : otherLookup;
+  const [chosenTarget, setChosenTarget] = useState(initialTarget ?? "");
   const target = chosenTarget || lookup.data?.requests[0]?.target || lookup.data?.defaultBranch || "";
   const targets = [...new Set([lookup.data?.defaultBranch, ...(lookup.data?.requests ?? []).map(item => item.target), ...remote.branches].filter((v): v is string => !!v))];
   const existing = lookup.data?.requests.find(item => item.target === target);
@@ -6413,7 +6434,7 @@ function ProjectPrefsSettings({ identities }: { identities: Identity[] }) {
 
 function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId,
   paletteId, setPaletteId, themeMode, setThemeMode, language, setLanguage, dailyCheck, setDailyCheck,
-  onRunCheckNow, checkBusy, checkProgress, projectCount, initialSection = "identity", onClose }: {
+  onRunCheckNow, checkBusy, checkProgress, projectCount, lanesProject, initialSection = "identity", onClose }: {
   identities: Identity[]; setIdentities: React.Dispatch<React.SetStateAction<Identity[]>>;
   defaultId: string; setDefaultId: (id: string) => void;
   paletteId: PaletteId; setPaletteId: (id: PaletteId) => void;
@@ -6421,7 +6442,9 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId,
   language: Language; setLanguage: (language: Language) => void;
   dailyCheck: DailyCheck; setDailyCheck: (c: DailyCheck) => void;
   onRunCheckNow: () => void; checkBusy: boolean; checkProgress: CheckProgress | null; projectCount: number;
-  initialSection?: "identity" | "github" | "gitlab";
+  /** The open repository, for per-project lane settings (its trunk). */
+  lanesProject?: LanesSettingsProject;
+  initialSection?: "identity" | "github" | "gitlab" | "lanes";
   onClose: () => void;
 }) {
   const t = useTheme();
@@ -6430,6 +6453,7 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId,
     { group: tx("账户"), key: "gitlab",     label: tx("GitLab 集成"), Icon: Cloud },
     { group: tx("账户"), key: "github",     label: tx("GitHub 集成"), Icon: Github },
     { group: tx("工作区"), key: "projects",   label: tx("项目配置"), Icon: FolderGit2 },
+    { group: tx("工作区"), key: "lanes",      label: tx("分支区域"), Icon: Columns3 },
     { group: tx("工作区"), key: "daily",      label: tx("定时检查"), Icon: RefreshCw },
     { group: tx("偏好"), key: "appearance", label: tx("外观"), Icon: Sparkles },
     { group: tx("偏好"), key: "language", label: tx("语言"), Icon: Languages },
@@ -6531,6 +6555,7 @@ function SettingsDialog({ identities, setIdentities, defaultId, setDefaultId,
             )}
             {section === "github" && <GithubAccountsSettings />}
             {section === "projects" && <ProjectPrefsSettings identities={identities} />}
+            {section === "lanes" && <LanesSettings theme={t} project={lanesProject} />}
             {section === "daily" && (
               <DailyCheckSettings cfg={dailyCheck} setCfg={setDailyCheck}
                 onRunNow={onRunCheckNow} busy={checkBusy} progress={checkProgress} projectCount={projectCount} />
@@ -6735,6 +6760,29 @@ function ContextMenu({ x, y, items, onClose, closing = false, trigger }: {
   );
 }
 
+// The GitLab merge-request detail, framed as a lanes drawer. The detail has its
+// own back-to-list / back-to-workspace navigation; Esc closes it too.
+function LanesRequestDrawer({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || e.defaultPrevented || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return <div className="lk-request-drawer gk-panel-in">{children}</div>;
+}
+
+// Map the app palette onto the lanes workspace so appearance settings apply.
+function lanesTokens(t: ThemeColors): React.CSSProperties {
+  return {
+    "--lk-bg": t.bg, "--lk-card": t.bgPanel, "--lk-pop": t.dialogBg,
+    "--lk-text": t.text, "--lk-sec": t.textSec, "--lk-muted": t.textMuted,
+    "--lk-border": t.border, "--lk-accent": t.accent, "--lk-amber": t.amber, "--lk-green": t.green, "--lk-red": t.red,
+  } as React.CSSProperties;
+}
+
 export default function App() {
   const [language, setLanguageState] = useState<Language>(getLanguage);
   const changeLanguage = (next: Language) => {
@@ -6766,17 +6814,21 @@ export default function App() {
 
   // ── settings + committer identities (persisted) ──
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [settingsSection, setSettingsSection] = useState<"identity" | "github" | "gitlab">("identity");
+  const [settingsSection, setSettingsSection] = useState<"identity" | "github" | "gitlab" | "lanes">("identity");
   const openIdentitySettings = () => { setSettingsSection("identity"); setSettingsOpen(true); };
   const [identities, setIdentities] = useState<Identity[]>(loadIdentities);
   const [defaultIdentityId, setDefaultIdentityId] = useState<string>(loadDefaultIdentityId);
   useEffect(() => { saveIdentities(identities); }, [identities]);
   useEffect(() => { localStorage.setItem("gitkit.defaultIdentityId", defaultIdentityId); }, [defaultIdentityId]);
 
+  // Experimental branch-lanes shell: same state, actions, dialogs and settings,
+  // laid out as stacked branch lanes over a dock instead of toolbar + timeline.
+  const [lanesShell] = useState(() => localStorage.getItem("gitkit.shell") === "lanes");
+
   // ── project state (restored from last session) ──
   const [projects, setProjects] = useState<Project[]>(loadProjects);
   const [activeProjectId, setActiveProjectId] = useState<string>(loadActiveProjectId);
-  const [workspaceView, setWorkspaceView] = useState<"home" | "repository">(loadWorkspaceView);
+  const [workspaceView, setWorkspaceView] = useState<"home" | "repository">(() => lanesShell ? "repository" : loadWorkspaceView());
   const [projectSidebarOpen, setProjectSidebarOpen] = useState(true);
   const [appFocusRevision, setAppFocusRevision] = useState(0);
   const appForeground = useAppForeground();
@@ -6784,7 +6836,7 @@ export default function App() {
   const appForegroundRef = useRef(appForeground);
   appForegroundRef.current = appForeground;
   const selectedProject = projects.find((p) => p.id === activeProjectId) ?? projects[0];
-  const activeProject = workspaceView === "repository" ? selectedProject : undefined;
+  const activeProject = workspaceView === "repository" || lanesShell ? selectedProject : undefined;
   const isReal = !!activeProject;
   const persistedProjects = useMemo(() => JSON.stringify(projects.map((p) => ({
     id: p.id, path: p.path, name: p.name, branch: p.branch, color: p.color, initialized: p.initialized,
@@ -7167,6 +7219,8 @@ export default function App() {
       if (historyMode === "topology" && (e.target as Element | null)?.closest?.("[data-gk-project-toggle]")) return;
       if ((e.target as Element | null)?.closest?.(".gk-context-menu, [role='menu'], [role='dialog'], .gk-branch-options")) return;
       if ((e.target as Element | null)?.closest?.("[data-commit-hash], .gk-topology-legend")) return;
+      // Lanes: the working area and the dock's 工作区 toggle drive the drawer themselves.
+      if ((e.target as Element | null)?.closest?.(".lk-working, .lk-seg-changes-toggle")) return;
       e.preventDefault();
       e.stopPropagation();
       closeDetail();
@@ -7207,6 +7261,26 @@ export default function App() {
     : view?.working ?? [];
   const changesCount = workingFileCount(activeWorking);
   const remoteNames = useMemo(() => remotes.map((r) => r.name), [remotes]);
+  // Lanes shell inputs — memoised so stack inference only reruns on new data.
+  const lanesBranches = useMemo(() => branches.filter((b) => b.head).map((b) => ({
+    name: b.name, head: b.head!, current: b.current, upstream: b.remote,
+    ahead: b.ahead, behind: b.behind, isRemote: b.isRemote,
+  })), [branches]);
+  const lanesCommits = useMemo(() => commits.filter((c) => !c.isStash && !c.otherRefsOnly).map((c) => ({
+    hash: c.fullHash, short: c.hash, message: c.message, author: c.author.name,
+    initials: c.author.initials, color: c.author.color, date: c.date, parents: c.parents,
+  })), [commits]);
+  // One row per path for lane 1's working area: the unstaged state wins, and
+  // `staged` says whether any part of it is already in the index.
+  const lanesWorking = useMemo(() => {
+    const byPath = new Map<string, { path: string; status: WorkingFile["status"]; staged: boolean }>();
+    for (const f of activeWorking) {
+      const prev = byPath.get(f.path);
+      if (!prev) byPath.set(f.path, { path: f.path, status: f.status, staged: f.staged });
+      else byPath.set(f.path, { path: f.path, status: f.staged ? prev.status : f.status, staged: prev.staged || f.staged });
+    }
+    return [...byPath.values()];
+  }, [activeWorking]);
 
   // ── persist per-repo UI state (hidden/pinned branches, collapsed folders) ──
   const prefsKey = activeProject?.path ?? "";
@@ -9251,7 +9325,7 @@ export default function App() {
   const prRemote = remotes.find(remote => remote.name === "origin") ?? remotes[0];
   const prUrl = prRemote?.url ?? "";
   const prContext = JSON.stringify([workspaceView, path, prUrl, currentBranch]);
-  const [prSession, setPrSession] = useState<{ context: string; accountId?: string; chooseSource?: boolean } | null>(null);
+  const [prSession, setPrSession] = useState<{ context: string; accountId?: string; chooseSource?: boolean; source?: string; target?: string } | null>(null);
   useEffect(() => { setPrSession(null); }, [prContext]);
   const currentPRContext = useRef(prContext);
   currentPRContext.current = prContext;
@@ -9287,7 +9361,7 @@ export default function App() {
     await openPlatformRequest(item.url, prConnection.instanceUrl, prConnection.provider);
   };
   const openRequestSettings = () => { setSettingsSection(requestSettingsSection); setSettingsOpen(true); };
-  const requestCreatePR = async (chooseSource = false) => {
+  const requestCreatePR = async (chooseSource = false, source?: string, target?: string) => {
     if (!path || !prRemote) return;
     if (!prConnection) {
       const accounts = matchingPRAccounts(prUrl);
@@ -9295,19 +9369,19 @@ export default function App() {
         const choice = await chooseAccount(accounts, term, true);
         if (!choice || !stillHere()) return;
         if (choice.remember) saveProjectAccountId(path, choice.account.id);
-        setPrSession({ context: prContext, accountId: choice.account.id, chooseSource });
+        setPrSession({ context: prContext, accountId: choice.account.id, chooseSource, source, target });
       } else {
         openRequestSettings();
       }
       return;
     }
-    if (!chooseSource && currentRequest.data?.requests.length === 1) {
+    if (!chooseSource && !source && currentRequest.data?.requests.length === 1) {
       try { await openRequest(currentRequest.data.requests[0]); }
       catch (error) { toast.error(tf("打开请求失败：{0}", error)); }
       return;
     }
     currentRequest.refresh();
-    setPrSession({ context: prContext, accountId: accountChoice, chooseSource });
+    setPrSession({ context: prContext, accountId: accountChoice, chooseSource, source, target });
   };
   const doCreatePR = async (source: string, target: string, title: string, description: string, publish: boolean) => {
     if (!prConnection || !prRemote || !path || !stillHere()) return false;
@@ -9550,6 +9624,245 @@ export default function App() {
   };
   const timelineActions = timelineActionsRef;
 
+  // The detail panel (changes, commit, stash) — shared by both shells. The
+  // classic shell docks it over the timeline; the lanes shell slides it over
+  // the lanes as a drawer.
+  const detailPanel = (detailOpen || detailClosing) && dataReady ? (
+              <div ref={detailPanelRef} className={`gk-detail-panel absolute top-0 bottom-0 right-0 flex flex-col overflow-hidden ${detailOpen ? "gk-panel-in" : "gk-panel-out"}`}
+                data-tracing={!!fileTrace}
+                data-topology={historyMode === "topology"}
+                data-trace-motion={traceMotion}
+                onTransitionEnd={event => {
+                  if (event.target === event.currentTarget && event.propertyName === "width") setTraceMotion(false);
+                }}
+                onAnimationEnd={event => {
+                  if (event.target === event.currentTarget && event.animationName === "gk-panel-out" && !detailOpen) {
+                    setDetailClosing(false); setFileTrace(null);
+                  }
+                }}
+                style={{ width: lanesShell ? "min(1120px, 100%)" : fileTrace || topologyDetailFullWidth ? "100%" : historyMode === "topology"
+                    ? `calc(100% - ${TOPOLOGY_DETAIL_CONTEXT_WIDTH}px)`
+                    : `min(100%, max(${TOPOLOGY_DETAIL_MIN_WIDTH}px, calc(100% - clamp(240px, 18vw, 300px))))`, background: theme.bgPanel,
+                  "--gk-detail-hover": theme.rowHover,
+                  // Above the timeline's hover popovers (ref chips use z-index 50),
+                  // so an expanded branch-ref overlay never bleeds over the panel.
+                  zIndex: 60,
+                  borderTopLeftRadius: topologyDetailFullWidth || compactHistory ? 0 : 12,
+                  borderBottomLeftRadius: topologyDetailFullWidth || compactHistory ? 0 : 12,
+                  borderLeft: topologyDetailFullWidth || compactHistory ? "none" : `0.5px solid ${theme.border}`,
+                  boxShadow: topologyDetailFullWidth || compactHistory ? "none" : theme.isDark ? "-12px 0 34px rgba(0,0,0,0.32)" : "-12px 0 34px rgba(0,0,0,0.10)" } as React.CSSProperties}>
+                <div className="flex-shrink-0 flex items-center gap-1 px-2.5 py-2"
+                  style={{ borderBottom: `0.5px solid ${theme.border}`, ...glassStyle(theme) }}>
+                  {fileTrace ? <>
+                    <button type="button" data-gk-exit-trace onClick={exitFileTrace} className="gk-detail-icon flex items-center gap-1.5 px-2 py-1 text-xs cursor-pointer" style={{ color: theme.textMuted, borderRadius: R - 3 }}>
+                      <ChevronLeft size={14} />{tx("退出追溯")}
+                    </button><span className="text-xs font-medium ml-2" style={{ color: theme.text }}>{tx("文件追溯")}</span>
+                  </> : topologyDetailFullWidth ? <>
+                    <button type="button" data-gk-back-topology {...press(closeDetail)} className="gk-detail-icon flex items-center gap-1.5 px-2 py-1 text-xs cursor-pointer"
+                      style={{ color: theme.textMuted, borderRadius: R - 3 }}>
+                      <ChevronLeft size={14} aria-hidden="true" />{tx("返回拓扑图")}
+                    </button>
+                    {inspectedTopologyCommit && <span className="text-[11px] flex items-center gap-2 min-w-0 ml-2" style={{ color: theme.textSec }}>
+                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" aria-hidden="true"
+                        style={{ background: topologyGraph[inspectedTopologyIndex]?.colors?.dot ?? "#8A857C" }} />
+                      <span className="truncate">{inspectedTopologyCommit.branchLabel ?? inspectedTopologyCommit.stashBranch}</span>
+                      <span aria-hidden="true" style={{ color: theme.textFaint }}>/</span>
+                      <code className="flex-shrink-0" style={{ color: theme.textMuted }}>{inspectedTopologyCommit.hash}</code>
+                    </span>}
+                  </> : selectedCommit && !viewChanges && !selectedStash ? <span className="text-xs px-2 py-1" style={{ color: theme.textMuted }}>{tx("提交详情")}</span> : <button {...press(closeDetail)}
+                    className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium cursor-pointer"
+                    style={{ color: theme.textMuted, borderRadius: R - 3 }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = theme.inputBg; e.currentTarget.style.color = theme.text; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = theme.textMuted; }}>
+                    <ChevronLeft size={14} /> {tx("返回")}
+                  </button>}
+                  <div className="flex-1" />
+                  <button {...press(closeDetail)} className="p-1.5 cursor-pointer" aria-label={tx("关闭提交详情")} title={tx("关闭")}
+                    style={{ color: theme.textMuted, borderRadius: R - 3 }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = theme.inputBg)}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
+                    <X size={14} />
+                  </button>
+                </div>
+                <div key={viewChanges ? "changes" : selectedStash ? `stash-${selectedStash.index}` : selectedCommit?.hash ?? "empty"}
+                  className="flex-1 flex overflow-hidden gk-detail-in">
+                  {viewChanges ? (
+                    <>
+                      <ChangesPanel key={path} files={activeWorking} selectedFile={selectedWorkingFile}
+                        onFileSelect={selectWorkingFile}
+                        currentBranch={currentBranch}
+                        identities={identities} defaultIdentityId={defaultIdentityId}
+                        projectKey={path ?? ""}
+                        onCommit={doCommit}
+                        onConfigureIdentity={openIdentitySettings}
+                        operationActive={!operationKnown || !!activeRepoOperation}
+                        busy={!!gitBusy || !!busyLabel || confirmBusy}
+                        onStage={(files) => doStage(files, true)}
+                        onUnstage={(files) => doStage(files, false)}
+                        onIgnore={openIgnoreMenu}
+                        onDiscard={doDiscardFile}
+                        onDiscardAll={doDiscardAll}
+                        />
+                      {selectedWorkingFile ? (
+                        <WorkingFileDiff file={selectedWorkingFile} repoPath={isReal ? path ?? "" : ""} />
+                      ) : (
+                        <div className="flex-1 flex flex-col items-center justify-center gap-2"
+                          style={{ background: theme.bgPanel, color: theme.textFaint }}>
+                          <FileText size={32} opacity={0.18} />
+                          <span className="text-xs">{tx("选择一个文件查看差异")}</span>
+                        </div>
+                      )}
+                    </>
+                  ) : selectedStash ? (
+                    <StashDetail stash={selectedStash} files={selectedStash.files}
+                      selectedFile={selectedStashFile} onFileSelect={selectStashFile}
+                      onExpand={openExpandedDiff}
+                      repoPath={isReal ? path ?? "" : ""}
+                      filesLoading={!!stashFilesReading && stashFilesReading.path === path && stashFilesReading.index === selectedStash.index}
+                      onApply={() => doStashApply(selectedStash.index)}
+                      onDrop={() => doStashDrop(selectedStash.index)} />
+                  ) : selectedCommit ? (
+                    <>
+                    <div className="flex-1 min-w-0 min-h-0" style={{ display: fileTrace ? "none" : "flex" }} aria-hidden={!!fileTrace}>
+                    <CommitDetail commit={selectedCommit} selectedFile={selectedFile}
+                      onFileSelect={selectDetailFile}
+                      onExpand={openExpandedDiff}
+                      repoPath={isReal ? path ?? "" : ""}
+                      filesLoading={!!commitFilesReading && commitFilesReading.path === path && commitFilesReading.hash === selectedCommit.fullHash}
+                      onRevealFile={isReal ? revealCommitFile : undefined}
+                      onTrace={isReal && selectedFile ? () => {
+                        setTraceMotion(historyMode === "topology" && topologyDetailSplit);
+                        setDiffExpanded(false); setFileTrace({ anchor: selectedCommit.fullHash, file: selectedFile.path });
+                        requestAnimationFrame(() => detailPanelRef.current?.querySelector<HTMLButtonElement>("[data-gk-exit-trace]")?.focus());
+                      } : undefined}
+                      onCherryPick={isReal ? () => requestCherryPick(selectedCommit) : undefined}
+                      checkoutBranch={isReal ? syncTargetOf(selectedCommit) : null}
+                      onCheckout={isReal ? () => doCheckoutSync(selectedCommit) : undefined} />
+                    </div>
+                    {fileTrace && isReal && path && <FileTracePanel key={`${path}:${fileTrace.anchor}:${fileTrace.file}`}
+                      repoPath={path} anchor={selectedCommit} filePath={fileTrace.file} branch={currentBranch}
+                      expanded={diffExpanded} onExpand={openExpandedDiff} onCloseExpanded={closeExpandedDiff}
+                      onRevealFile={revealCommitFile} />}
+                    </>
+                  ) : (
+                    <div className="flex-1 flex flex-col items-center justify-center gap-2"
+                      style={{ background: theme.bgPanel, color: theme.textFaint }}>
+                      <GitCommit size={30} opacity={0.18} />
+                      <span className="text-xs">{tx("选择一个提交查看详情")}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+  ) : null;
+
+  const mrDetail = mr.selectedId !== null ? <MergeRequestDetail key={`${mr.key}:${mr.selectedId}`}
+              theme={theme} detail={mr.detail} latest={mr.latest} snapshot={mr.snapshot}
+              loading={mr.loading} error={mr.error} files={mrFiles} diffVersion={mr.diffVersion}
+              diffLoading={mr.diffLoading} diffError={mr.diffError} discussions={mr.discussions}
+              discussionsLoading={mr.discussionsLoading} discussionsError={mr.discussionsError}
+              onRefresh={async () => { await mr.refresh(); }} onReviewLatest={mr.reviewLatest} onDownloadDiff={mr.downloadDiff} onMerge={async options => { try { return await mr.merge(options); } finally { currentRequest.refresh(); } }} onCommitMessages={mr.commitMessages} onCancel={async () => { try { return await mr.close(); } finally { currentRequest.refresh(); } }} onApprove={mr.approve} onOpenExternal={mr.openExternal}
+              onBackList={mr.backList} onBackWorkspace={mr.backWorkspace} onTabChange={mr.onTabChange}
+              onCreateDiffComment={mr.createDiffComment} onParticipantCandidates={mr.participantCandidates} onUpdateParticipants={mr.updateParticipants}
+              renderDiff={(files, selected, onSelect, sourceKey, lineComments) => <FileDiffView files={files} selectedFile={selected}
+                onFileSelect={onSelect} repoPath="" sourceKey={sourceKey} compact lineComments={lineComments} />} /> : null;
+
+  const canMutateBranches = dataReady && hasHead && !switching && operationKnown && !activeRepoOperation;
+  const createLaneBranch = async (name: string, base: string) => {
+    if (!activeProject) throw new Error(tx("请先打开仓库"));
+    const p = activeProject.path;
+    await createBranch(p, name, base, false);
+    realCache.current.delete(p);
+    if (activePathRef.current === p) setReloadTick((n) => n + 1);
+  };
+  const changesDrawerOpen = detailOpen && viewChanges && mr.selectedId === null;
+  // Toggle the changes drawer; with a file, keep it open and just select that file.
+  const openChangesPanel = (filePath?: string) => {
+    if (!filePath && changesDrawerOpen) { closeDetail(); return; }
+    if (!changesDrawerOpen) {
+      mr.backWorkspace(); setViewChanges(true); setSelectedWorkingFile(null);
+      setSelectedStash(null); setSelectedStashFile(null); openDetail();
+    }
+    const file = filePath ? activeWorking.find((f) => f.path === filePath && !f.staged) ?? activeWorking.find((f) => f.path === filePath) : undefined;
+    if (file) void selectWorkingFile(file);
+  };
+  const openLaneCommit = (hash: string) => {
+    const commit = commits.find((c) => c.fullHash === hash);
+    if (commit) openTimelineCommit(commit);
+  };
+  // ── merge / pull requests in the lanes ──
+  const laneRequestBranches = useMemo(() => lanesShell
+    ? lanesBranches.filter((b) => !b.isRemote).map((b) => ({ name: b.name, head: b.head }))
+    : [], [lanesShell, lanesBranches]);
+  const laneRequests = useLaneRequests(lanesShell && hasHead ? prConnection : null, laneRequestBranches,
+    mr.snapshot?.items, mr.snapshot?.instanceUrl ?? (mrConnection.url || "https://gitlab.com"));
+  const openLaneRequest = (branch: string) => {
+    const request = laneRequests[branch];
+    if (!request) return;
+    void openRequest(laneRequestItem(request, branch)).catch((error) => toast.error(tf("打开请求失败：{0}", error)));
+  };
+  const lanesInbox = useMemo(() => ({
+    configured: mr.enabled,
+    total: mr.snapshot?.total ?? mr.snapshot?.items.length ?? 0,
+    unread: mr.snapshot?.unseenIds.length ?? 0,
+    anchorRef: mr.anchorRef as { current: HTMLElement | null },
+    open: mr.listOpen,
+    onToggle: mr.toggleList,
+  }), [mr.enabled, mr.snapshot, mr.anchorRef, mr.listOpen, mr.toggleList]);
+
+  // Right-click menus in the lanes shell: the same actions the classic timeline and sidebar offer.
+  const laneItem = (item: CtxItem): LaneMenuItem => item.sep ? "sep"
+    : { label: item.label, danger: item.danger, onClick: item.onClick,
+        icon: item.Icon ? <item.Icon size={14} aria-hidden="true" /> : undefined };
+  const laneCommitMenu = (hash: string): LaneMenuItem[] => {
+    const commit = commits.find((c) => c.fullHash === hash);
+    if (!commit) return [];
+    const items: CtxItem[] = [
+      ...(isReal && !commit.isStash ? [{ label: tx("Cherry-pick 到当前分支"), Icon: GitCommit, onClick: () => requestCherryPick(commit) } as CtxItem] : []),
+      { label: tx("复制提交哈希"), Icon: Copy, onClick: () => { void copyWithToast(commit.fullHash, tx("提交哈希")); } },
+      { label: tx("复制提交信息"), Icon: Copy, onClick: () => { void copyWithToast(commit.message, tx("提交信息")); } },
+    ];
+    return items.map(laneItem);
+  };
+  const laneBranchMenu = (name: string): LaneMenuItem[] => {
+    const b = branches.find((x) => x.name === name && !x.isRemote);
+    if (!b) return [];
+    const localOnly = !b.remote;
+    const items: CtxItem[] = [];
+    if (!b.current && canMutateBranches) {
+      items.push({ label: tf("合并到当前分支（{0}）", currentBranch), Icon: GitMerge, onClick: () => openMergeDialog(b.name) }, { sep: true });
+    }
+    if (localOnly) items.push({ label: tx("重命名分支"), Icon: Pencil, onClick: () => setRenameTarget(b) });
+    items.push({ label: tx("复制分支名"), Icon: Copy, onClick: () => { void copyWithToast(b.name, tx("分支名")); } });
+    if (b.creation) items.push({ sep: true }, creationMenuItem(b.creation));
+    else if (localOnly && !b.current) items.push({ sep: true }, {
+      label: b.worktree ? tx("移除工作树并删除分支") : tx("删除分支"),
+      Icon: Trash2, danger: true, onClick: () => requestDeleteBranch(b),
+    });
+    return items.map(laneItem);
+  };
+  const lanesMoreActions: LaneMenuItem[] = [
+    { label: tx("搜索提交"), icon: <Search size={14} aria-hidden="true" />, onClick: () => setSearchOpen(true), disabled: !dataReady },
+    "sep",
+    { label: tx("合并"), icon: <GitMerge size={14} aria-hidden="true" />, onClick: () => openMergeDialog(), disabled: !canMutateBranches },
+    { label: tx("储藏"), icon: <Layers size={14} aria-hidden="true" />, onClick: requestStash, disabled: !canMutateBranches },
+    { label: tx("创建 Tag 并推送"), icon: <TagIcon size={14} aria-hidden="true" />, onClick: () => setTagDialogOpen(true),
+      disabled: !(hasHead && dataReady && !switching) },
+    { label: currentRequest.data?.requests.length === 1
+        ? `${prConnection?.provider === "gitlab" ? "MR !" : "PR #"}${currentRequest.data.requests[0].number}`
+        : tf("创建{0}", term),
+      icon: <GitPullRequest size={14} aria-hidden="true" />, onClick: () => { void requestCreatePR(); },
+      disabled: !(hasHead && dataReady && !switching && remotes.length > 0) },
+    "sep",
+    { label: checkedOut?.creation ? tx("撤回分支创建") : tx("撤回最近一次未推送提交到工作区"), icon: <RotateCcw size={14} aria-hidden="true" />,
+      onClick: () => { void requestUndo(); },
+      disabled: !(checkedOut && !switching && operationKnown && !activeRepoOperation
+        && (checkedOut.creation || !checkedOut.remote || checkedOut.ahead > 0)) },
+    { label: tx("强制推送…"), icon: <AlertTriangle size={14} aria-hidden="true" />, danger: true,
+      onClick: () => { void requestForcePush(); }, disabled: !(hasHead && dataReady && !switching && remotes.length > 0) },
+    "sep",
+    { label: tx("回到经典界面"), icon: <Columns3 size={14} aria-hidden="true" />, onClick: leaveLanes },
+  ];
+
   return (
     <ThemeCtx.Provider value={theme}>
     <BranchColorsCtx.Provider value={branchColors}>
@@ -9558,11 +9871,39 @@ export default function App() {
         style={{ background: theme.bg, isolation: "isolate", colorScheme: effectiveDark ? "dark" : "light",
           "--gk-accent": theme.accent } as React.CSSProperties}>
 
-          <Toaster position="bottom-center" theme={effectiveDark ? "dark" : "light"} closeButton
+          <Toaster position={lanesShell ? "top-center" : "bottom-center"} theme={effectiveDark ? "dark" : "light"} closeButton
             toastOptions={{ style: { background: theme.glass, backdropFilter: "blur(20px)",
               border: `0.5px solid ${theme.glassBorder}`, color: theme.text,
               fontSize: 12, fontFamily: "inherit", borderRadius: R, paddingRight: 36 } }} />
 
+          {lanesShell ? <><LanesWorkspace theme={effectiveDark ? "dark" : "light"} tokens={lanesTokens(theme)}
+            project={activeProject ? { id: activeProject.id, name: activeProject.name, path: activeProject.path } : null}
+            projects={projects.map((p) => ({ id: p.id, name: p.name, path: p.path }))}
+            status={!activeProject ? "none" : errored || (dataReady && !gitAvailable) ? "error" : !dataReady ? "loading" : "ready"}
+            error={errored ? loadError?.msg : tx("这个目录还不是 Git 仓库，可在经典界面中初始化")}
+            branches={lanesBranches} commits={lanesCommits} changes={changesCount} working={lanesWorking}
+            busy={gitBusy ?? (busyLabel ? "other" : null)}
+            onSelectProject={(project) => handleSelectProject(project.id)}
+            onOpenProject={() => { void handleOpenNew(); }} onCloneProject={() => setCloneOpen(true)}
+            onRetry={() => setReloadTick((n) => n + 1)}
+            onCreateBranch={createLaneBranch}
+            onCheckout={(branch) => { void requestCheckout(branch); }}
+            onFetch={gitAvailable && dataReady && !switching && remotes.length > 0 ? () => runGitAction("fetch") : undefined}
+            onPull={hasHead && dataReady && !switching && operationKnown && !activeRepoOperation && remotes.length > 0 ? () => runGitAction("pull") : undefined}
+            onPush={activeProject && dataReady && !switching && remotes.length > 0 ? () => runGitAction("push") : undefined}
+            onOpenChanges={openChangesPanel} changesOpen={changesDrawerOpen} onOpenCommit={openLaneCommit}
+            onOpenSettings={() => { setSettingsSection("identity"); setSettingsOpen(true); }}
+            moreActions={lanesMoreActions} commitMenu={laneCommitMenu} branchMenu={laneBranchMenu}
+            requests={laneRequests} inbox={lanesInbox} onOpenRequest={openLaneRequest}
+            onCreateRequest={remotes.length > 0 && hasHead ? (branch) => { void requestCreatePR(false, branch); } : undefined}
+            onDropRequest={remotes.length > 0 && hasHead ? (source, target) => { void requestCreatePR(false, source, target); } : undefined}
+            createRequestLabel={tf("创建{0}", term)}
+            drawer={mr.selectedId !== null ? <LanesRequestDrawer onClose={mr.backWorkspace}>{mrDetail}</LanesRequestDrawer> : detailPanel} />
+          <MergeRequestPopover theme={theme} snapshot={mr.snapshot} open={mr.listOpen} repository={requestRepository(prRemote?.url ?? "", mrConnection.url || "https://gitlab.com")}
+            configured={mr.enabled} cliConnected={!!readGlabInstance()} error={mr.syncError} anchorRef={mr.anchorRef} onClose={mr.closeList}
+            onSelect={(mrId) => { setDiffExpanded(false); setDetailOpen(false); void mr.select(mrId); }} onRefresh={mr.refresh}
+            onConfigure={() => { mr.closeList(); setSettingsSection("gitlab"); setSettingsOpen(true); }} />
+          </> : <>
           <TitleBar themeMode={themeMode} onThemeCycle={cycleTheme}
             background={workspaceView === "home" ? theme.bgPanel : theme.bg}
             onOpenSettings={() => { setSettingsSection("identity"); setSettingsOpen(true); }}>
@@ -9718,16 +10059,7 @@ export default function App() {
           ) : (
           <div className="gk-workspace-card flex flex-1 min-w-0 overflow-hidden"
             style={{ background: theme.bgPanel, boxShadow: theme.shadowEl }}>
-            {mr.selectedId !== null && <MergeRequestDetail key={`${mr.key}:${mr.selectedId}`}
-              theme={theme} detail={mr.detail} latest={mr.latest} snapshot={mr.snapshot}
-              loading={mr.loading} error={mr.error} files={mrFiles} diffVersion={mr.diffVersion}
-              diffLoading={mr.diffLoading} diffError={mr.diffError} discussions={mr.discussions}
-              discussionsLoading={mr.discussionsLoading} discussionsError={mr.discussionsError}
-              onRefresh={async () => { await mr.refresh(); }} onReviewLatest={mr.reviewLatest} onDownloadDiff={mr.downloadDiff} onMerge={async options => { try { return await mr.merge(options); } finally { currentRequest.refresh(); } }} onCommitMessages={mr.commitMessages} onCancel={async () => { try { return await mr.close(); } finally { currentRequest.refresh(); } }} onApprove={mr.approve} onOpenExternal={mr.openExternal}
-              onBackList={mr.backList} onBackWorkspace={mr.backWorkspace} onTabChange={mr.onTabChange}
-              onCreateDiffComment={mr.createDiffComment} onParticipantCandidates={mr.participantCandidates} onUpdateParticipants={mr.updateParticipants}
-              renderDiff={(files, selected, onSelect, sourceKey, lineComments) => <FileDiffView files={files} selectedFile={selected}
-                onFileSelect={onSelect} repoPath="" sourceKey={sourceKey} compact lineComments={lineComments} />} />}
+            {mrDetail}
             <div className="gk-history-workspace flex-1 min-w-0 min-h-0 overflow-hidden" data-history-mode={historyLayoutMode}
               data-history-moving={historySidebarMoving}
               onTransitionEnd={finishHistoryModeTransition}
@@ -9953,133 +10285,7 @@ export default function App() {
 
             {/* Keep timeline context when space allows; on narrower content
                 areas, give the file list and diff the full available width. */}
-            {(detailOpen || detailClosing) && dataReady && (
-              <div ref={detailPanelRef} className={`gk-detail-panel absolute top-0 bottom-0 right-0 flex flex-col overflow-hidden ${detailOpen ? "gk-panel-in" : "gk-panel-out"}`}
-                data-tracing={!!fileTrace}
-                data-topology={historyMode === "topology"}
-                data-trace-motion={traceMotion}
-                onTransitionEnd={event => {
-                  if (event.target === event.currentTarget && event.propertyName === "width") setTraceMotion(false);
-                }}
-                onAnimationEnd={event => {
-                  if (event.target === event.currentTarget && event.animationName === "gk-panel-out" && !detailOpen) {
-                    setDetailClosing(false); setFileTrace(null);
-                  }
-                }}
-                style={{ width: fileTrace || topologyDetailFullWidth ? "100%" : historyMode === "topology"
-                    ? `calc(100% - ${TOPOLOGY_DETAIL_CONTEXT_WIDTH}px)`
-                    : `min(100%, max(${TOPOLOGY_DETAIL_MIN_WIDTH}px, calc(100% - clamp(240px, 18vw, 300px))))`, background: theme.bgPanel,
-                  "--gk-detail-hover": theme.rowHover,
-                  // Above the timeline's hover popovers (ref chips use z-index 50),
-                  // so an expanded branch-ref overlay never bleeds over the panel.
-                  zIndex: 60,
-                  borderTopLeftRadius: topologyDetailFullWidth || compactHistory ? 0 : 12,
-                  borderBottomLeftRadius: topologyDetailFullWidth || compactHistory ? 0 : 12,
-                  borderLeft: topologyDetailFullWidth || compactHistory ? "none" : `0.5px solid ${theme.border}`,
-                  boxShadow: topologyDetailFullWidth || compactHistory ? "none" : theme.isDark ? "-12px 0 34px rgba(0,0,0,0.32)" : "-12px 0 34px rgba(0,0,0,0.10)" } as React.CSSProperties}>
-                <div className="flex-shrink-0 flex items-center gap-1 px-2.5 py-2"
-                  style={{ borderBottom: `0.5px solid ${theme.border}`, ...glassStyle(theme) }}>
-                  {fileTrace ? <>
-                    <button type="button" data-gk-exit-trace onClick={exitFileTrace} className="gk-detail-icon flex items-center gap-1.5 px-2 py-1 text-xs cursor-pointer" style={{ color: theme.textMuted, borderRadius: R - 3 }}>
-                      <ChevronLeft size={14} />{tx("退出追溯")}
-                    </button><span className="text-xs font-medium ml-2" style={{ color: theme.text }}>{tx("文件追溯")}</span>
-                  </> : topologyDetailFullWidth ? <>
-                    <button type="button" data-gk-back-topology {...press(closeDetail)} className="gk-detail-icon flex items-center gap-1.5 px-2 py-1 text-xs cursor-pointer"
-                      style={{ color: theme.textMuted, borderRadius: R - 3 }}>
-                      <ChevronLeft size={14} aria-hidden="true" />{tx("返回拓扑图")}
-                    </button>
-                    {inspectedTopologyCommit && <span className="text-[11px] flex items-center gap-2 min-w-0 ml-2" style={{ color: theme.textSec }}>
-                      <span className="w-1.5 h-1.5 rounded-full flex-shrink-0" aria-hidden="true"
-                        style={{ background: topologyGraph[inspectedTopologyIndex]?.colors?.dot ?? "#8A857C" }} />
-                      <span className="truncate">{inspectedTopologyCommit.branchLabel ?? inspectedTopologyCommit.stashBranch}</span>
-                      <span aria-hidden="true" style={{ color: theme.textFaint }}>/</span>
-                      <code className="flex-shrink-0" style={{ color: theme.textMuted }}>{inspectedTopologyCommit.hash}</code>
-                    </span>}
-                  </> : selectedCommit && !viewChanges && !selectedStash ? <span className="text-xs px-2 py-1" style={{ color: theme.textMuted }}>{tx("提交详情")}</span> : <button {...press(closeDetail)}
-                    className="flex items-center gap-1.5 px-2 py-1 text-xs font-medium cursor-pointer"
-                    style={{ color: theme.textMuted, borderRadius: R - 3 }}
-                    onMouseEnter={(e) => { e.currentTarget.style.background = theme.inputBg; e.currentTarget.style.color = theme.text; }}
-                    onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.color = theme.textMuted; }}>
-                    <ChevronLeft size={14} /> {tx("返回")}
-                  </button>}
-                  <div className="flex-1" />
-                  <button {...press(closeDetail)} className="p-1.5 cursor-pointer" aria-label={tx("关闭提交详情")} title={tx("关闭")}
-                    style={{ color: theme.textMuted, borderRadius: R - 3 }}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = theme.inputBg)}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}>
-                    <X size={14} />
-                  </button>
-                </div>
-                <div key={viewChanges ? "changes" : selectedStash ? `stash-${selectedStash.index}` : selectedCommit?.hash ?? "empty"}
-                  className="flex-1 flex overflow-hidden gk-detail-in">
-                  {viewChanges ? (
-                    <>
-                      <ChangesPanel key={path} files={activeWorking} selectedFile={selectedWorkingFile}
-                        onFileSelect={selectWorkingFile}
-                        currentBranch={currentBranch}
-                        identities={identities} defaultIdentityId={defaultIdentityId}
-                        projectKey={path ?? ""}
-                        onCommit={doCommit}
-                        onConfigureIdentity={openIdentitySettings}
-                        operationActive={!operationKnown || !!activeRepoOperation}
-                        busy={!!gitBusy || !!busyLabel || confirmBusy}
-                        onStage={(files) => doStage(files, true)}
-                        onUnstage={(files) => doStage(files, false)}
-                        onIgnore={openIgnoreMenu}
-                        onDiscard={doDiscardFile}
-                        onDiscardAll={doDiscardAll}
-                        />
-                      {selectedWorkingFile ? (
-                        <WorkingFileDiff file={selectedWorkingFile} repoPath={isReal ? path ?? "" : ""} />
-                      ) : (
-                        <div className="flex-1 flex flex-col items-center justify-center gap-2"
-                          style={{ background: theme.bgPanel, color: theme.textFaint }}>
-                          <FileText size={32} opacity={0.18} />
-                          <span className="text-xs">{tx("选择一个文件查看差异")}</span>
-                        </div>
-                      )}
-                    </>
-                  ) : selectedStash ? (
-                    <StashDetail stash={selectedStash} files={selectedStash.files}
-                      selectedFile={selectedStashFile} onFileSelect={selectStashFile}
-                      onExpand={openExpandedDiff}
-                      repoPath={isReal ? path ?? "" : ""}
-                      filesLoading={!!stashFilesReading && stashFilesReading.path === path && stashFilesReading.index === selectedStash.index}
-                      onApply={() => doStashApply(selectedStash.index)}
-                      onDrop={() => doStashDrop(selectedStash.index)} />
-                  ) : selectedCommit ? (
-                    <>
-                    <div className="flex-1 min-w-0 min-h-0" style={{ display: fileTrace ? "none" : "flex" }} aria-hidden={!!fileTrace}>
-                    <CommitDetail commit={selectedCommit} selectedFile={selectedFile}
-                      onFileSelect={selectDetailFile}
-                      onExpand={openExpandedDiff}
-                      repoPath={isReal ? path ?? "" : ""}
-                      filesLoading={!!commitFilesReading && commitFilesReading.path === path && commitFilesReading.hash === selectedCommit.fullHash}
-                      onRevealFile={isReal ? revealCommitFile : undefined}
-                      onTrace={isReal && selectedFile ? () => {
-                        setTraceMotion(historyMode === "topology" && topologyDetailSplit);
-                        setDiffExpanded(false); setFileTrace({ anchor: selectedCommit.fullHash, file: selectedFile.path });
-                        requestAnimationFrame(() => detailPanelRef.current?.querySelector<HTMLButtonElement>("[data-gk-exit-trace]")?.focus());
-                      } : undefined}
-                      onCherryPick={isReal ? () => requestCherryPick(selectedCommit) : undefined}
-                      checkoutBranch={isReal ? syncTargetOf(selectedCommit) : null}
-                      onCheckout={isReal ? () => doCheckoutSync(selectedCommit) : undefined} />
-                    </div>
-                    {fileTrace && isReal && path && <FileTracePanel key={`${path}:${fileTrace.anchor}:${fileTrace.file}`}
-                      repoPath={path} anchor={selectedCommit} filePath={fileTrace.file} branch={currentBranch}
-                      expanded={diffExpanded} onExpand={openExpandedDiff} onCloseExpanded={closeExpandedDiff}
-                      onRevealFile={revealCommitFile} />}
-                    </>
-                  ) : (
-                    <div className="flex-1 flex flex-col items-center justify-center gap-2"
-                      style={{ background: theme.bgPanel, color: theme.textFaint }}>
-                      <GitCommit size={30} opacity={0.18} />
-                      <span className="text-xs">{tx("选择一个提交查看详情")}</span>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
+            {!lanesShell && detailPanel}
             </div>
           </div>
           </div>
@@ -10098,6 +10304,7 @@ export default function App() {
             configured={mr.enabled} cliConnected={!!readGlabInstance()} error={mr.syncError} anchorRef={mr.anchorRef} onClose={mr.closeList}
             onSelect={(mrId) => { setDiffExpanded(false); void mr.select(mrId); }} onRefresh={mr.refresh}
             onConfigure={() => { mr.closeList(); setSettingsSection("gitlab"); setSettingsOpen(true); }} />
+          </>}
         </div>
 
         <DialogPresence>{diffExpanded && detailOpen && !viewChanges && !fileTrace ? (
@@ -10136,6 +10343,9 @@ export default function App() {
             dailyCheck={dailyCheck} setDailyCheck={setDailyCheck}
             onRunCheckNow={() => void runUpdateCheck()}
             checkBusy={checkBusy} checkProgress={checkProgress} projectCount={projects.length}
+            lanesProject={path ? { path, name: activeProject?.name ?? path.split("/").pop() ?? path,
+              branches: branches.filter((b) => !b.isRemote).map((b) => b.name), current: currentBranch,
+              laneBranches: lanesBranches, laneCommits: lanesCommits } : undefined}
             onClose={() => setSettingsOpen(false)} />
         )}
 
@@ -10263,8 +10473,10 @@ export default function App() {
         ) : null}</DialogPresence>
 
         {prSession?.context === prContext && prConnection && prRemote && path && (
-          <CreatePRDialog key={prContext + credentialRevision} path={path} branches={branches} currentBranch={currentBranch} term={term}
-            chooseSource={prSession.chooseSource} connection={prConnection} remote={prRemote} commits={commits} initialLookup={currentRequest}
+          <CreatePRDialog key={prContext + credentialRevision + (prSession.source ?? "") + ">" + (prSession.target ?? "")} path={path} branches={branches}
+            currentBranch={prSession.source ?? currentBranch} initialTarget={prSession.target} term={term}
+            chooseSource={prSession.chooseSource} connection={prConnection} remote={prRemote} commits={commits}
+            initialLookup={prSession.source && prSession.source !== currentBranch ? undefined : currentRequest}
             onOpenRequest={openRequest} onCancel={() => setPrSession(null)} onConfirm={doCreatePR} />
         )}
 

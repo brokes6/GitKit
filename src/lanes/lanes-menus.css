@@ -1,0 +1,176 @@
+/* Lanes menus: popovers, branch tree, dock menus, create popover, branch picker. */
+
+.lk-capsule-wrap { position: relative; display: inline-flex; max-width: 100%; }
+
+/* ── popovers ───────────────────────────────────────────────────────────── */
+
+.lk-popover {
+  position: absolute; z-index: 60; min-width: 270px; padding: 6px;
+  border: 1px solid var(--lk-border-strong); border-radius: 16px; background: var(--lk-pop);
+  box-shadow: var(--lk-shadow);
+}
+.lk-popover-up { bottom: calc(100% + 14px); left: 0; transform-origin: bottom left; --lk-pop-from: translateY(6px) scale(0.98); }
+.lk-popover-down { top: calc(100% + 2px); left: 0; transform-origin: top left; --lk-pop-from: translateY(-6px) scale(0.98); }
+
+/* Presence (usePresence.ts): mounted as "entering", flipped to "open" before paint, "closing" until
+   unmounted. Transitions rather than keyframes, so a reopen mid-exit reverses from where it is. */
+.lk-popover, .lk-listbox {
+  transition: opacity 0.16s var(--lk-ease), transform 0.17s var(--lk-ease);
+}
+.lk-popover:is([data-state="entering"], [data-state="closing"]),
+.lk-listbox:is([data-state="entering"], [data-state="closing"]) {
+  opacity: 0; transform: var(--lk-pop-from);
+}
+.lk-popover[data-state="closing"], .lk-listbox[data-state="closing"] {
+  pointer-events: none;
+  transition-duration: 0.14s; transition-timing-function: cubic-bezier(0.3, 0.1, 0.5, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .lk-popover, .lk-listbox { transition: opacity 0.1s linear; }
+  .lk-popover:is([data-state="entering"], [data-state="closing"]),
+  .lk-listbox:is([data-state="entering"], [data-state="closing"]) { transform: none; }
+}
+
+.lk-tree-title { padding: 7px 10px 6px; color: var(--lk-muted); font-size: 11px; font-weight: 600; }
+.lk-tree-scroll { max-height: min(52vh, 420px); overflow: auto; }
+.lk-tree-row, .lk-menu-row {
+  display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 10px;
+  border: 0; border-radius: 10px; background: transparent; text-align: left; font-size: 12.5px;
+}
+.lk-tree-row:hover:not([aria-disabled]), .lk-menu-row:hover { background: var(--lk-hover); }
+.lk-tree-row[data-active], .lk-menu-row[data-active] { background: var(--lk-chip); }
+.lk-tree-row[data-empty] { opacity: 0.55; }
+.lk-tree-trunk { color: var(--lk-sec); font-weight: 650; }
+.lk-tree-trunk em { margin-left: auto; font-style: normal; font-size: 10.5px; color: var(--lk-muted); }
+.lk-tree-indent { position: relative; flex-shrink: 0; width: calc(var(--lk-depth) * 14px - 4px); align-self: stretch; }
+.lk-tree-indent::after {
+  content: ""; position: absolute; right: 0; top: 0; width: 8px; height: 50%;
+  border-left: 1.5px solid var(--lk-border-strong); border-bottom: 1.5px solid var(--lk-border-strong);
+  border-bottom-left-radius: 5px;
+}
+.lk-tree-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lk-tree-count { color: var(--lk-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.lk-tree-slot {
+  width: 18px; height: 18px; border-radius: 6px; display: grid; place-items: center; flex-shrink: 0;
+  background: color-mix(in srgb, var(--lk-accent) 18%, transparent); color: var(--lk-accent);
+  font-size: 10.5px; font-weight: 700;
+}
+.lk-tree-none { padding: 10px; color: var(--lk-muted); font-size: 12px; }
+.lk-menu { min-width: 240px; }
+.lk-menu-wide { width: 340px; }
+.lk-menu-row > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+
+.lk-create { width: 360px; padding: 16px; }
+.lk-create form { display: flex; flex-direction: column; gap: 10px; }
+.lk-create-title { font-size: 14px; font-weight: 650; }
+.lk-create-label { margin-top: 2px; color: var(--lk-muted); font-size: 11.5px; font-weight: 600; }
+.lk-base-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.lk-base-option {
+  display: inline-flex; align-items: center; gap: 6px; height: 28px; max-width: 160px; padding: 0 10px;
+  border: 1px solid var(--lk-border-strong); border-radius: 999px; background: transparent;
+  color: var(--lk-sec); font: inherit; font-size: 12px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lk-base-option[data-active] {
+  border-color: var(--lk-accent); color: var(--lk-text);
+  background: color-mix(in srgb, var(--lk-accent) 12%, transparent);
+}
+
+/* ── branch picker (custom listbox) ─────────────────────────────────────── */
+
+.lk-picker { position: relative; display: inline-flex; min-width: 0; }
+.lk-picker-trigger { max-width: 170px; }
+.lk-picker-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lk-picker-chevron { flex-shrink: 0; margin-right: -2px; color: var(--lk-muted); transition: transform 0.18s var(--lk-ease); }
+.lk-picker-trigger[aria-expanded="true"] { border-color: var(--lk-border-strong); background: var(--lk-hover); color: var(--lk-text); }
+.lk-picker-trigger[aria-expanded="true"] .lk-picker-chevron { transform: rotate(180deg); }
+.lk-listbox {
+  position: absolute; z-index: 80; top: calc(100% + 6px); left: 0; width: 290px; padding: 6px;
+  border: 1px solid var(--lk-border-strong); border-radius: 14px; background: var(--lk-pop);
+  box-shadow: var(--lk-shadow);
+  transform-origin: top left; --lk-pop-from: translateY(-5px) scale(0.98);
+}
+.lk-listbox[data-end] { left: auto; right: 0; transform-origin: top right; }
+.lk-listbox[data-up] { top: auto; bottom: calc(100% + 6px); transform-origin: bottom left; --lk-pop-from: translateY(5px) scale(0.98); }
+.lk-listbox[data-up][data-end] { transform-origin: bottom right; }
+.lk-listbox-search {
+  display: flex; align-items: center; gap: 8px; height: 34px; margin: -2px -2px 6px; padding: 0 10px;
+  border-radius: 10px; background: var(--lk-input); color: var(--lk-muted);
+}
+.lk-listbox-search input {
+  flex: 1; min-width: 0; border: 0; outline: none; background: transparent;
+  color: var(--lk-text); font: inherit; font-size: 12.5px; user-select: text; -webkit-user-select: text;
+}
+
+.lk-listbox-scroll { max-height: 260px; overflow: auto; outline: none; scroll-padding: 4px; }
+.lk-listbox-row {
+  display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 10px;
+  border-radius: 9px; font-size: 12.5px; cursor: pointer;
+}
+.lk-listbox-row[data-active] { background: var(--lk-hover); }
+.lk-listbox-row[aria-selected="true"] { background: var(--lk-chip); font-weight: 650; }
+.lk-listbox-row[data-trunk] { color: var(--lk-sec); font-weight: 650; }
+.lk-listbox-row em { font-style: normal; font-size: 10.5px; color: var(--lk-muted); }
+.lk-listbox-trunk-icon { flex-shrink: 0; }
+.lk-listbox-name { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lk-listbox-name mark {
+  border-radius: 3px; padding: 0 1px; color: inherit;
+  background: color-mix(in srgb, var(--lk-accent) 28%, transparent);
+}
+.lk-listbox-check { flex-shrink: 0; margin-left: auto; color: var(--lk-accent); }
+.lk-listbox-row[data-trunk] .lk-listbox-check { margin-left: 4px; }
+.lk-create-hint { margin: 0; min-height: 18px; color: var(--lk-sec); font-size: 12px; }
+.lk-create-hint b { color: var(--lk-text); font-weight: 650; }
+.lk-create-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
+
+
+.lk-popover-end { left: auto; right: 0; transform-origin: bottom right; }
+.lk-menu-sep { height: 1px; margin: 5px 8px; background: var(--lk-border); }
+.lk-menu-row:disabled { opacity: 0.4; }
+.lk-menu-row[data-danger] { color: var(--lk-red); }
+
+/* Inside the create popover the list anchors to the popover itself, sitting
+   just above it at full width, so it never covers the name field or chips. */
+.lk-create .lk-picker { position: static; }
+.lk-create .lk-listbox,
+.lk-create .lk-listbox[data-up], .lk-create .lk-listbox[data-end] {
+  top: auto; right: 0; bottom: calc(100% + 8px); left: 0; width: auto;
+  transform-origin: bottom center; --lk-pop-from: translateY(6px) scale(0.985);
+}
+
+.lk-dock-inbox { max-width: 156px; }
+.lk-dock-inbox .lk-seg-value > span { overflow: hidden; text-overflow: ellipsis; }
+.lk-dock-inbox-badge {
+  flex-shrink: 0; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+  display: grid; place-items: center; background: var(--lk-accent); color: #fff;
+  font-size: 9.5px; font-weight: 700; line-height: 1;
+}
+
+/* A closing menu/list never sits in the way of the next click. */
+.lk-popover[data-state="closing"], .lk-listbox[data-state="closing"] { pointer-events: none !important; }
+.lk-popover[data-state="closing"] *, .lk-listbox[data-state="closing"] * { pointer-events: none !important; }
+
+/* Right-click menu (LaneContextMenu.tsx): fixed at the pointer. */
+.lk-popover.lk-context { position: fixed; z-index: 80; min-width: 220px; --lk-pop-from: scale(0.97); }
+.lk-context .lk-menu { min-width: 0; }
+.lk-context .lk-menu-row > svg { color: var(--lk-sec); flex-shrink: 0; }
+.lk-context .lk-menu-row[data-danger] > svg { color: inherit; }
+
+/* Create popover opened from a commit. */
+.lk-create-commit {
+  display: flex; align-items: center; gap: 8px; min-width: 0; height: 32px; padding: 0 10px;
+  border: 1px solid var(--lk-border); border-radius: 9px; color: var(--lk-text); font-size: 12px;
+}
+.lk-create-commit code { flex-shrink: 0; color: var(--lk-sec); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.lk-create-commit span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* The row / card a right-click menu belongs to stays marked while the menu is open. */
+.lk-commit[data-menu-target] {
+  background: color-mix(in srgb, var(--lk-branch) 16%, var(--lk-lane-surface));
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--lk-branch) 70%, transparent);
+  color: var(--lk-text);
+}
+.lk-commit[data-menu-target] .lk-rail i { transform: scale(1.3); }
+.lk-commit[data-menu-target] .lk-rail i { background: var(--lk-branch); }
+.lk-card[data-menu-target] { border-color: color-mix(in srgb, var(--lk-branch) 55%, var(--lk-border)); }

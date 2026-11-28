@@ -1,0 +1,411 @@
+/* Lanes workspace — one lane per branch stack, a long dock as the trunk. */
+
+.lk-root {
+  /* Core palette — the app maps its own palette onto these (inline style). */
+  --lk-bg: #0c0c0d; --lk-card: #18181a; --lk-pop: #1b1b1d;
+  --lk-text: #f1f1f2; --lk-sec: #a1a1a6; --lk-muted: #6c6c72;
+  --lk-border: rgba(255, 255, 255, 0.075);
+  --lk-accent: #35b8a7; --lk-amber: #e2a645; --lk-green: #57b97a; --lk-red: #e5534b;
+  --lk-pixel: var(--lk-sec); --lk-pixel-alpha: 0.26;
+  --lk-shadow: 0 22px 60px -24px rgba(0, 0, 0, 0.85);
+  --lk-card-shadow: 0 10px 22px -14px rgba(0, 0, 0, 0.9);
+
+  /* Derived from the core palette so any app palette stays coherent. */
+  --lk-card-deep: color-mix(in srgb, var(--lk-card) 80%, var(--lk-bg));
+  --lk-border-strong: color-mix(in srgb, var(--lk-text) 14%, transparent);
+  --lk-chip: color-mix(in srgb, var(--lk-text) 6%, transparent);
+  --lk-hover: color-mix(in srgb, var(--lk-text) 5%, transparent);
+  --lk-seg: color-mix(in srgb, var(--lk-text) 5%, var(--lk-card));
+  --lk-seg-hover: color-mix(in srgb, var(--lk-text) 10%, var(--lk-card));
+  --lk-input: color-mix(in srgb, var(--lk-text) 3%, var(--lk-bg));
+  --lk-dock: color-mix(in srgb, var(--lk-card) 96%, var(--lk-bg));
+  --lk-trunk: var(--lk-muted);
+  --lk-primary-bg: var(--lk-text); --lk-primary-fg: var(--lk-bg);
+
+  --lk-strip: 44px; --lk-tuck: 12px;
+  --lk-motion: 460ms; --lk-ease: cubic-bezier(0.22, 0.8, 0.24, 1);
+
+  position: fixed; inset: 0; display: flex; flex-direction: column;
+  background: var(--lk-bg); color: var(--lk-text);
+  font-size: 13px; line-height: 1.4; user-select: none; -webkit-user-select: none;
+}
+.lk-root[data-theme="light"] {
+  --lk-bg: #efeeeb; --lk-card: #fff; --lk-pop: #fff;
+  --lk-text: #1b1b1c; --lk-sec: #5d5d63; --lk-muted: #93939a;
+  --lk-border: rgba(0, 0, 0, 0.08);
+  --lk-accent: #148f80; --lk-amber: #b7781c; --lk-green: #2f8f53; --lk-red: #c93c37;
+  --lk-pixel: var(--lk-muted); --lk-pixel-alpha: 0.24;
+  --lk-shadow: 0 22px 60px -26px rgba(0, 0, 0, 0.35);
+  --lk-card-shadow: 0 10px 22px -16px rgba(0, 0, 0, 0.35);
+  --lk-dock: color-mix(in srgb, var(--lk-card) 96%, var(--lk-bg));
+}
+.lk-root button { font: inherit; color: inherit; cursor: pointer; }
+.lk-root button:disabled { cursor: default; opacity: 0.45; }
+/* No focus rings in the lanes UI: pointer users never see them, and keyboard
+   users get state from the existing hover/active/selected styles. Overrides the
+   app-wide :focus-visible ring (index.css uses !important). */
+.lk-root :is(button, input, textarea, select, [role="button"], [role="tab"], [role="option"], [tabindex]):focus,
+.lk-root :is(button, input, textarea, select, [role="button"], [role="tab"], [role="option"], [tabindex]):focus-visible {
+  outline: none !important; box-shadow: none;
+}
+/* Keyboard focus still needs to be findable: a quiet background tint instead of a ring. */
+.lk-root :is(button, [role="button"], [role="option"]):focus-visible:not(:hover) { background-color: var(--lk-hover); }
+
+/* ── chrome ─────────────────────────────────────────────────────────────── */
+
+.lk-titlebar {
+  position: relative; height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  color: var(--lk-muted); font-size: 12px; font-weight: 600; letter-spacing: 0.01em;
+}
+.lk-stage { position: relative; flex: 1; min-height: 0; padding: 0 13px; }
+/* Dithered pixel field behind the whole window; opaque cards hide it, so it
+   shows in the title area, lane gutters and around the dock. */
+.lk-pixels { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.lk-lanes { position: relative; display: flex; height: 100%; }
+.lk-message {
+  position: relative; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  color: var(--lk-sec); text-align: center; user-select: text;
+}
+.lk-message strong { color: var(--lk-text); font-size: 14px; }
+.lk-message p { max-width: 520px; margin: 0; font-size: 12px; white-space: pre-wrap; }
+
+/* The app's detail panel (changes / commit / stash) slides over the lanes. */
+.lk-drawer-host { position: absolute; z-index: 30; top: 44px; right: 20px; bottom: 92px; left: 20px; pointer-events: none; }
+.lk-drawer-host > * { pointer-events: auto; }
+.lk-drawer-host .gk-detail-panel {
+  border: 1px solid var(--lk-border-strong) !important; border-radius: 18px !important; box-shadow: var(--lk-shadow) !important;
+}
+
+/* ── slots & lane motion ────────────────────────────────────────────────── */
+
+.lk-slot { flex: 1 1 0; min-width: 0; padding: 0 7px; display: flex; }
+/* Reordering: neighbours slide aside while a lane is dragged by its top bar. */
+.lk-lanes[data-dragging] { cursor: grabbing; }
+.lk-lanes[data-dragging] .lk-slot:not([data-dragging]) { transition: transform 220ms var(--lk-ease); }
+.lk-slot[data-dragging], .lk-slot[data-settling] { position: relative; z-index: 10; will-change: transform; }
+.lk-slot .lk-lane { transition: transform 180ms var(--lk-ease), opacity 180ms; }
+.lk-slot[data-dragging] .lk-lane { transform: scale(1.012); opacity: 0.96; }
+.lk-slot[data-dragging] .lk-card { box-shadow: 0 26px 60px -24px rgba(0, 0, 0, 0.6); }
+.lk-slot[data-enter], .lk-slot[data-exit] { overflow: hidden; }
+.lk-slot[data-enter] { animation: lk-slot-in var(--lk-motion) var(--lk-ease) both; }
+.lk-slot[data-enter] .lk-lane { animation: lk-lane-in calc(var(--lk-motion) + 120ms) var(--lk-ease) both; }
+.lk-slot[data-exit] { animation: lk-slot-out var(--lk-motion) var(--lk-ease) forwards; pointer-events: none; }
+@keyframes lk-slot-in { from { flex-grow: 0.0001; padding-inline: 0; } }
+@keyframes lk-lane-in { from { opacity: 0; transform: translateX(-28px) scale(0.97); } }
+@keyframes lk-slot-out { to { flex-grow: 0.0001; padding-inline: 0; opacity: 0; } }
+
+.lk-lane {
+  position: relative; width: 100%; min-width: 300px; height: 100%;
+  display: flex; flex-direction: column; padding-bottom: 14px;
+}
+.lk-lane-top {
+  position: relative; z-index: 5; height: 40px; flex-shrink: 0; display: flex; align-items: center;
+  cursor: grab; touch-action: none;
+}
+.lk-lanes[data-dragging] .lk-lane-top { cursor: grabbing; }
+.lk-capsule {
+  display: inline-flex; align-items: center; gap: 7px; max-width: 100%; height: 28px; padding: 0 9px 0 4px;
+  border: 1px solid var(--lk-border); border-radius: 999px; background: var(--lk-bg);
+  font-size: 12px; font-weight: 500; color: var(--lk-sec); transition: background 0.15s, color 0.15s;
+}
+.lk-capsule:hover, .lk-capsule[aria-expanded="true"] { background: var(--lk-seg-hover); color: var(--lk-text); }
+.lk-capsule-index {
+  width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; flex-shrink: 0;
+  background: var(--lk-chip); font-size: 10.5px; font-variant-numeric: tabular-nums; color: var(--lk-muted);
+}
+.lk-capsule-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lk-capsule > svg { flex-shrink: 0; }
+
+/* ── single-branch lane ─────────────────────────────────────────────────── */
+
+.lk-deck { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.lk-card {
+  --lk-branch: var(--lk-trunk);
+  --lk-lane-surface: color-mix(in srgb, var(--lk-text) 3%, var(--lk-bg));
+  position: relative; display: flex; flex: 1; flex-direction: column; min-height: 0;
+  contain: layout paint style;
+  border: 1px solid color-mix(in srgb, var(--lk-text) 7%, transparent);
+  border-radius: 14px; overflow: hidden;
+  background: var(--lk-lane-surface);
+  transition: border-color 0.18s;
+}
+/* The focused lane (default base for 新建分支) has no frame; the dock's create popover names it. */
+
+.lk-card-head { flex-shrink: 0; padding: 10px 12px 8px; cursor: pointer; }
+.lk-card-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.lk-card-branch {
+  display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 0; border: 0; background: transparent; text-align: left;
+}
+.lk-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; background: var(--lk-branch); }
+.lk-card-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px; font-weight: 550;
+}
+.lk-card-actions { margin-left: auto; display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.lk-card-sub, .lk-card-meta {
+  display: flex; align-items: center; gap: 6px; margin-top: 5px; padding-left: 15px;
+  color: var(--lk-sec); font-size: 11.5px;
+}
+.lk-card-sub:empty { display: none; }
+.lk-card-role { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lk-card-meta { gap: 10px; }
+
+.lk-card-body { flex: 1; min-height: 0; overflow: auto; padding: 0 6px 8px; }
+.lk-card-empty { padding: 14px 12px; color: var(--lk-sec); font-size: 12px; }
+
+.lk-commits { list-style: none; margin: 0; padding: 2px 0 4px; }
+.lk-commit {
+  display: grid; grid-template-columns: 18px minmax(0, 1fr) auto 18px; align-items: center; gap: 8px;
+  height: 34px; padding: 0 7px; border-radius: 7px; font-size: 12px;
+  /* Rows scrolled out of view are skipped by layout and paint. */
+  content-visibility: auto; contain-intrinsic-size: auto 34px;
+}
+.lk-commit:hover { background: var(--lk-hover); }
+.lk-commit[role="button"] { cursor: pointer; }
+.lk-rail { position: relative; height: 100%; display: flex; align-items: center; justify-content: center; }
+.lk-rail::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px;
+  background: var(--lk-branch); opacity: 0.4;
+}
+.lk-commit:first-child .lk-rail::before { top: 50%; }
+.lk-rail i {
+  position: relative; width: 7px; height: 7px; border-radius: 50%;
+  border: 1px solid var(--lk-branch); background: var(--lk-lane-surface);
+}
+.lk-commit-msg { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lk-commit-meta, .lk-fork code { color: var(--lk-sec); font-size: 11px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.lk-avatar {
+  width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center;
+  color: #fff; font-size: 8px; font-weight: 600;
+}
+.lk-commit-more { padding: 7px 33px; color: var(--lk-sec); font-size: 11.5px; }
+
+.lk-working {
+  margin: 2px 2px 6px; padding: 5px;
+  border: 1px dashed color-mix(in srgb, var(--lk-amber) 36%, transparent); border-radius: 9px;
+  background: color-mix(in srgb, var(--lk-amber) 5%, transparent);
+}
+.lk-working-head { display: flex; align-items: center; gap: 6px; padding: 2px 4px 4px; font-size: 12px; }
+.lk-working-head > svg { color: var(--lk-amber); flex-shrink: 0; }
+.lk-working-head > button { margin-left: auto; flex-shrink: 0; }
+.lk-working-files { list-style: none; margin: 0; padding: 0; }
+.lk-working-file {
+  display: flex; align-items: center; gap: 6px; width: 100%; min-height: 24px; padding: 2px 4px;
+  border: 0; border-radius: 5px; background: transparent; text-align: left;
+}
+.lk-working-file:hover { background: var(--lk-hover); }
+.lk-working-status { flex: 0 0 14px; color: var(--lk-amber); text-align: center; font: 11px ui-monospace, monospace; }
+.lk-working-status[data-status="added"] { color: var(--lk-green); }
+.lk-working-status[data-status="deleted"], .lk-working-status[data-status="conflicted"] { color: var(--lk-red); }
+.lk-working-name, .lk-working-directory { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lk-working-name { flex-shrink: 1; font-size: 12px; }
+.lk-working-directory { flex-shrink: 2; color: var(--lk-sec); font-size: 11px; }
+.lk-working-staged { display: inline-flex; align-items: center; gap: 3px; margin-left: auto; flex-shrink: 0; color: var(--lk-green); font-size: 10.5px; }
+.lk-working-file.lk-working-more { padding-left: 24px; color: var(--lk-sec); font-size: 11.5px; }
+
+.lk-fork {
+  display: flex; align-items: center; gap: 6px; min-width: 0; margin: 0 4px;
+  padding: 8px 4px; border-top: 1px solid var(--lk-border); color: var(--lk-sec); font-size: 11.5px;
+}
+.lk-fork > svg, .lk-fork > code { flex-shrink: 0; }
+.lk-fork-origin { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lk-fork-origin b { font-weight: 550; color: var(--lk-text); }
+.lk-fork-note { margin-left: auto; flex-shrink: 0; color: var(--lk-sec); font-size: 10.5px; }
+
+.lk-tag {
+  display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 6px; flex-shrink: 0;
+  border-radius: 6px; background: var(--lk-chip); color: var(--lk-sec); font-size: 10.5px; font-weight: 600;
+}
+.lk-tag-current { background: color-mix(in srgb, var(--lk-accent) 18%, transparent); color: var(--lk-accent); }
+.lk-tag-warn { background: color-mix(in srgb, var(--lk-amber) 16%, transparent); color: var(--lk-amber); }
+.lk-tag-ok { background: color-mix(in srgb, var(--lk-green) 14%, transparent); color: var(--lk-green); }
+
+.lk-icon-button, .lk-chip-button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 26px;
+  border: 1px solid var(--lk-border); border-radius: 8px; background: transparent;
+  color: var(--lk-sec); font-size: 11.5px; font-weight: 500; transition: background 0.15s, color 0.15s;
+}
+.lk-icon-button { width: 26px; }
+.lk-chip-button { padding: 0 9px; }
+.lk-icon-button:hover, .lk-chip-button:hover { background: var(--lk-hover); color: var(--lk-text); }
+
+.lk-empty-lane {
+  width: 100%; min-width: 300px; margin: 40px 0 16px; border: 1px dashed var(--lk-border); border-radius: 14px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  color: var(--lk-muted); text-align: center;
+}
+.lk-empty-lane p { margin: 0; font-size: 12.5px; line-height: 1.6; }
+
+/* ── buttons & inputs ───────────────────────────────────────────────────── */
+
+.lk-button {
+  height: 30px; padding: 0 14px; border: 1px solid var(--lk-border-strong); border-radius: 10px;
+  background: var(--lk-chip); font-size: 12.5px; font-weight: 600;
+}
+.lk-button:hover:not(:disabled) { background: var(--lk-seg-hover); }
+.lk-button-ghost { background: transparent; border-color: transparent; color: var(--lk-sec) !important; }
+.lk-button-solid { background: var(--lk-primary-bg); color: var(--lk-primary-fg) !important; border-color: transparent; }
+.lk-button-solid:hover:not(:disabled) { background: var(--lk-primary-bg); opacity: 0.9; }
+.lk-input {
+  width: 100%; height: 36px; padding: 0 12px; border: 1px solid var(--lk-border-strong); border-radius: 10px;
+  background: var(--lk-input); color: var(--lk-text); font: inherit; font-size: 13px; outline: none;
+  user-select: text; -webkit-user-select: text;
+}
+.lk-input:focus { border-color: var(--lk-border-strong); }
+
+/* ── dock ───────────────────────────────────────────────────────────────── */
+
+.lk-dock-wrap { position: relative; z-index: 20; flex-shrink: 0; display: flex; justify-content: center; padding: 0 20px 16px; }
+.lk-dock {
+  display: flex; align-items: stretch; gap: 6px; max-width: 100%; height: 62px; padding: 6px;
+  flex-shrink: 0;
+  border: 1px solid var(--lk-border-strong); border-radius: 24px;
+  background: var(--lk-dock); box-shadow: var(--lk-shadow);
+  /* No backdrop-filter: blurring the animated pixel field re-rasterises every frame. */
+}
+.lk-seg-wrap { position: relative; display: flex; min-width: 0; }
+.lk-seg {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-width: 0; max-width: 230px; padding: 0 12px 0 14px;
+  border: 0; border-radius: 18px; background: var(--lk-seg); text-align: left; transition: background 0.15s;
+}
+.lk-seg-repo .lk-seg { padding-left: 7px; }
+button.lk-seg:hover, .lk-seg[data-open] { background: var(--lk-seg-hover); }
+.lk-seg-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.lk-seg-label { color: var(--lk-muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lk-seg-label em { font-style: normal; }
+.lk-seg-value {
+  display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13.5px; font-weight: 650;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.lk-seg-branch { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.lk-seg-branch > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.lk-seg-changes[data-dirty] { color: var(--lk-amber); }
+.lk-seg-chevron { flex-shrink: 0; color: var(--lk-muted); }
+.lk-repo-icon {
+  width: 36px; height: 36px; border-radius: 12px; flex-shrink: 0; display: grid; place-items: center;
+  background: linear-gradient(140deg, var(--lk-accent), color-mix(in srgb, var(--lk-accent) 55%, #000));
+  color: #fff;
+}
+.lk-sync { display: inline-flex; align-items: center; gap: 1px; color: var(--lk-amber); font-size: 11.5px; font-weight: 600; }
+.lk-dock-tools { display: flex; align-items: center; gap: 5px; padding: 0 2px; }
+.lk-round {
+  position: relative; width: 42px; height: 42px; border: 0; border-radius: 14px; display: grid; place-items: center;
+  background: var(--lk-seg); color: var(--lk-sec) !important; transition: background 0.15s, color 0.15s;
+}
+.lk-round:hover:not(:disabled), .lk-round[data-active] { background: var(--lk-seg-hover); color: var(--lk-text) !important; }
+.lk-round[data-busy] { opacity: 1 !important; color: var(--lk-accent) !important; }
+.lk-round-badge {
+  position: absolute; top: 3px; right: 3px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+  display: grid; place-items: center; background: var(--lk-accent); color: #fff;
+  font-size: 9.5px; font-weight: 700; line-height: 1;
+}
+.lk-spin { animation: lk-spin 0.9s linear infinite; }
+@keyframes lk-spin { to { transform: rotate(360deg); } }
+.lk-primary-wrap { position: relative; display: flex; }
+.lk-primary {
+  display: flex; align-items: center; gap: 10px; padding: 0 20px; border: 0; border-radius: 18px;
+  background: var(--lk-primary-bg); color: var(--lk-primary-fg) !important; font-size: 14px; font-weight: 650;
+  transition: transform 0.15s, opacity 0.15s; white-space: nowrap;
+}
+.lk-primary:hover:not(:disabled) { opacity: 0.92; }
+.lk-primary:active:not(:disabled) { transform: scale(0.98); }
+.lk-primary-wrap .lk-popover-up { left: auto; right: 0; transform-origin: bottom right; }
+
+@media (prefers-reduced-motion: reduce) {
+  .lk-root * { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+}
+
+/* GitLab merge-request detail as a lanes drawer (same frame as the changes drawer). */
+.lk-drawer-host .lk-request-drawer {
+  position: absolute; inset: 0 0 0 auto; width: min(1120px, 100%);
+  display: flex; flex-direction: column; overflow: hidden;
+  border: 1px solid var(--lk-border-strong); border-radius: 18px; box-shadow: var(--lk-shadow);
+  background: var(--lk-card);
+}
+.lk-drawer-host .lk-request-drawer > * { flex: 1; min-height: 0; }
+
+/* Width spring: while the dock animates, its children keep their natural size
+   and the bar is centred; the parts that don't fit yet stay hidden under the
+   rounded frame (clip-path keeps popovers, which sit outside, visible). */
+.lk-dock > * { flex-shrink: 0; }
+.lk-dock > .lk-seg-wrap { flex-shrink: 1; }
+
+/* ── "merged into" flow: test ✓ › pre ✓ › master ○ ── */
+.lk-flow {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px 3px; margin-top: 6px; padding-left: 15px;
+  color: var(--lk-sec); font-size: 11px;
+}
+.lk-flow-label { margin-right: 3px; }
+.lk-flow-item { display: inline-flex; align-items: center; gap: 3px; min-width: 0; }
+.lk-flow-sep { color: var(--lk-muted); flex-shrink: 0; }
+.lk-flow-step {
+  display: inline-flex; align-items: center; gap: 4px; height: 20px; max-width: 120px; padding: 0 6px 0 4px;
+  border: 0; border-radius: 6px; background: transparent; color: var(--lk-sec); font: inherit; cursor: pointer;
+}
+.lk-flow-step:hover { background: var(--lk-hover); color: var(--lk-text); }
+.lk-flow-step[data-state="done"] { color: var(--lk-text); }
+.lk-flow-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lk-flow-dot {
+  display: inline-grid; place-items: center; width: 12px; height: 12px; flex-shrink: 0; border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--lk-step) 55%, var(--lk-border)); color: #fff;
+}
+.lk-flow-step[data-state="done"] .lk-flow-dot { border-color: var(--lk-step); background: var(--lk-step); }
+.lk-flow-step[data-state="stale"] .lk-flow-dot {
+  border-color: var(--lk-step); background: color-mix(in srgb, var(--lk-step) 40%, transparent);
+}
+.lk-flow-step[data-state="todo"] .lk-flow-dot { border-style: dashed; }
+
+.lk-commit[data-flash] { animation: lk-commit-flash 1.6s ease-out; }
+@keyframes lk-commit-flash {
+  0%, 30% { background: color-mix(in srgb, var(--lk-branch) 18%, transparent); }
+  100% { background: transparent; }
+}
+
+/* ── merge-request drag: branch name → another lane ── */
+.lk-card-branch[data-drag="ready"] { cursor: grab; touch-action: none; }
+.lk-card-branch[data-drag="ready"]:hover .lk-card-name { text-decoration: underline dotted color-mix(in srgb, var(--lk-text) 35%, transparent); text-underline-offset: 3px; }
+.lk-root[data-request-drag], .lk-root[data-request-drag] * { cursor: grabbing !important; user-select: none; }
+.lk-card[data-drop] { transition: border-color 0.15s, opacity 0.18s, background-color 0.15s; }
+.lk-card[data-drop="no"] { opacity: 0.45; }
+.lk-card[data-drop="source"] { border-style: dashed; border-color: color-mix(in srgb, var(--lk-branch) 55%, var(--lk-border)); }
+.lk-card[data-drop="ok"] { border-color: color-mix(in srgb, var(--lk-branch) 30%, var(--lk-border)); }
+.lk-card[data-drop="over"] {
+  border-color: var(--lk-branch);
+  background: color-mix(in srgb, var(--lk-branch) 7%, var(--lk-lane-surface));
+  box-shadow: inset 0 0 0 1px var(--lk-branch);
+}
+.lk-card[data-drop="over"]::after {
+  content: attr(data-drop-label); white-space: pre; width: max-content; overflow: hidden; text-overflow: ellipsis;
+  position: absolute; left: 50%; top: 42%; z-index: 3; transform: translate(-50%, -50%);
+  max-width: calc(100% - 32px); padding: 10px 16px; text-align: center; line-height: 1.6;
+  border: 1px solid color-mix(in srgb, var(--lk-branch) 45%, var(--lk-border)); border-radius: 12px;
+  background: var(--lk-pop); color: var(--lk-text); font-size: 12.5px; font-weight: 550;
+  box-shadow: 0 14px 34px -16px rgba(0, 0, 0, 0.4);
+  pointer-events: none; animation: lk-drop-in 0.16s ease-out;
+}
+@keyframes lk-drop-in { from { opacity: 0; translate: 0 4px; } }
+.lk-drag-ghost {
+  position: fixed; left: 0; top: 0; z-index: 60; pointer-events: none;
+  display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 11px;
+  border: 1px solid var(--lk-border); border-radius: 999px;
+  background: var(--lk-pop); color: var(--lk-sec); font-size: 12px;
+  box-shadow: 0 12px 30px -12px rgba(0, 0, 0, 0.35);
+  animation: lk-drop-in 0.12s ease-out;
+}
+.lk-drag-ghost-branch { display: inline-flex; align-items: center; gap: 6px; color: var(--lk-text); font-weight: 550; white-space: nowrap; }
+.lk-drag-ghost-branch em { margin-left: 4px; font-style: normal; font-weight: 500; color: var(--lk-amber); font-size: 11px; }
+.lk-drag-ghost-hint { white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .lk-card[data-drop="over"]::after, .lk-drag-ghost { animation: none; } }
+
+/* ── commit rows: date column, merges as "source → target" ── */
+.lk-commit-date { color: var(--lk-sec); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lk-merge-line { display: flex; align-items: center; gap: 5px; }
+.lk-merge-icon { flex-shrink: 0; color: var(--lk-sec); }
+.lk-merge-branch {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: color-mix(in srgb, var(--lk-branch) 70%, var(--lk-text)); font-weight: 520;
+}
+.lk-merge-source { flex: 0 1 auto; }
+.lk-merge-target { flex: 0 0 auto; max-width: 45%; }
+.lk-merge-arrow { flex-shrink: 0; color: var(--lk-muted); }
